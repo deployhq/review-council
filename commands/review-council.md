@@ -1,8 +1,8 @@
 ---
 name: review-council
-description: "Multi-agent convergence review. Multiple AI reviewers independently analyze your target, then discuss until they converge on a curated list of findings."
+description: Multi-agent convergence review. Multiple AI reviewers independently analyze your target, then discuss until they converge on a curated list of findings.
 argument-hint: "[PR number | file/directory path | blank for auto-detect]"
-allowed-tools: ["Agent", "Bash", "Read", "Glob", "Grep", "Write", "mcp__codex__codex", "mcp__codex__codex-reply"]
+allowed-tools: Agent, Bash, Read, Glob, Grep, Write, mcp__codex__codex, mcp__codex__codex-reply
 ---
 
 # Review Council — Multi-Agent Convergence Review

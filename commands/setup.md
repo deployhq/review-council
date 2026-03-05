@@ -1,7 +1,7 @@
 ---
-name: review-council:setup
-description: "Set up the Review Council plugin — configure Codex and verify prerequisites"
-allowed-tools: ["Bash", "Read", "Write", "Edit"]
+name: setup
+description: Set up the Review Council plugin — configure Codex and verify prerequisites
+allowed-tools: Bash, Read, Write, Edit
 ---
 
 # Review Council — Setup

@@ -1,7 +1,7 @@
 ---
-name: review-council:uninstall
-description: "Remove Review Council configuration"
-allowed-tools: ["Bash", "Read", "Edit"]
+name: uninstall
+description: Remove Review Council configuration
+allowed-tools: Bash, Read, Edit
 ---
 
 # Review Council — Uninstall
