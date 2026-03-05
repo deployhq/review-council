@@ -31,45 +31,69 @@ The result: fewer false positives, broader coverage, and a clear priority order.
 
 ## How It Works
 
-```
-You: /review-council 42
-          |
-          v
-    1. DETECT — "This is PR #42, fetching diff..."
-          |
-          v
-    2. GATHER — PR diff, description, changed files, project context
-          |
-          v
-    3. REVIEW (parallel)
-       +--- Claude subagent (independent review)
-       +--- Codex via MCP (independent review)
-          |
-          v
-    4. SYNTHESIZE — merge, deduplicate, categorize
-          |
-          v
-    5. ROUND 2 (if disagreements)
-       +--- Both reviewers see synthesis
-       +--- Each confirms, revises, or rebuts
-          |
-          v
-    6. REPORT — curated findings with confidence levels
+```mermaid
+flowchart TD
+    A["/review-council [target]"] --> B{Detect Target}
+    B -->|PR number| C["Fetch PR diff & metadata"]
+    B -->|Source path| D["Read source files"]
+    B -->|Doc/plan path| E["Read document & references"]
+    B -->|No argument| F{Auto-detect}
+    F -->|Open PR on branch| C
+    F -->|Staged changes| D
+    F -->|Unstaged changes| D
+
+    C --> G["Gather Context"]
+    D --> G
+    E --> G
+
+    G --> H["Round 1: Independent Review"]
+
+    H --> I["Claude Subagent"]
+    H --> J["Codex via MCP"]
+
+    I --> K["Synthesize"]
+    J --> K
+
+    K --> L{Disagreements?}
+    L -->|"Yes"| M["Round 2: Share synthesis, revise"]
+    L -->|"No"| N["Final Report"]
+
+    M --> O{Converged?}
+    O -->|"Yes"| N
+    O -->|"No (max 3 rounds)"| P["Report with dissenting opinions"]
+
+    style A fill:#7c3aed,color:#fff
+    style H fill:#2563eb,color:#fff
+    style I fill:#6366f1,color:#fff
+    style J fill:#059669,color:#fff
+    style N fill:#16a34a,color:#fff
+    style P fill:#d97706,color:#fff
 ```
 
-**Auto-detection** means you usually just run `/review-council` with no arguments. It will:
-1. Check if your current branch has an open PR → PR review
-2. Check for staged changes → code review of staged diff
-3. Check for unstaged changes → code review of working changes
+**Auto-detection** means you usually just run `/review-council` with no arguments. It checks for an open PR on the current branch, then staged changes, then unstaged changes.
 
 ## Reviewers
 
-| Reviewer | How | Status |
-|----------|-----|--------|
+```mermaid
+graph LR
+    O["Orchestrator<br/>(Claude Code)"] -->|subagent| C["Claude<br/>Reviewer"]
+    O -->|stdio MCP| X["Codex<br/>Reviewer"]
+    O -.->|"planned"| G["Gemini<br/>Reviewer"]
+    O -.->|"planned"| L["Ollama<br/>Local Models"]
+
+    style O fill:#7c3aed,color:#fff
+    style C fill:#6366f1,color:#fff
+    style X fill:#059669,color:#fff
+    style G fill:#94a3b8,color:#fff,stroke-dasharray: 5 5
+    style L fill:#94a3b8,color:#fff,stroke-dasharray: 5 5
+```
+
+| Reviewer | Transport | Status |
+|----------|-----------|--------|
 | **Claude** | Native subagent with dedicated reviewer persona | Available |
-| **Codex** (OpenAI) | Via Codex MCP server (stdio) | Available |
-| **Gemini** | Via Gemini MCP (planned) | Roadmap |
-| **Ollama** | Via local model MCP (planned) | Roadmap |
+| **Codex** (OpenAI) | Codex MCP server (stdio) | Available |
+| **Gemini** | Gemini MCP (planned) | Roadmap |
+| **Ollama** | Local model MCP (planned) | Roadmap |
 
 Without Codex configured, Review Council runs in **single-reviewer mode** — still useful as a structured review with a dedicated persona, but you lose the cross-model validation.
 
@@ -167,6 +191,35 @@ review-council/
 └── README.md                # This file
 ```
 
+### Convergence Rounds
+
+```mermaid
+sequenceDiagram
+    participant O as Orchestrator
+    participant C as Claude Reviewer
+    participant X as Codex Reviewer
+
+    Note over O: Round 1 — Independent
+    O->>+C: Context package
+    O->>+X: Context package (delegation format)
+    C-->>-O: Findings + assessment
+    X-->>-O: Findings + assessment
+
+    Note over O: Synthesize — merge, deduplicate, categorize
+    O->>O: Agreed / Unique / Conflicting
+
+    alt Conflicts or important unique findings
+        Note over O: Round 2 — Informed Revision
+        O->>+C: Round 1 synthesis
+        O->>+X: Round 1 synthesis (via codex-reply)
+        C-->>-O: Revised findings
+        X-->>-O: Revised findings
+        O->>O: Final convergence
+    end
+
+    Note over O: Curated Report
+```
+
 ### Design Decisions
 
 **Why parallel independent reviews?** If reviewers see each other's output, they anchor on the first response. Independent review ensures genuinely different perspectives, then convergence rounds resolve differences.
@@ -179,12 +232,24 @@ review-council/
 
 ## GitHub Actions (Roadmap)
 
-Review Council can be triggered from CI as a reusable GitHub Action workflow — similar to [claude-fix-pr](https://github.com/deployhq/claude-fix-pr). The workflow would:
+Review Council can be triggered from CI as a reusable GitHub Action workflow — similar to [claude-fix-pr](https://github.com/deployhq/claude-fix-pr).
 
-1. Trigger on PR open/update or `/review-council` comment
-2. Run Review Council in headless Claude Code
-3. Post the curated report as a PR comment
-4. Optionally block merge on critical findings
+```mermaid
+flowchart LR
+    A["PR opened/updated"] --> B["GitHub Action"]
+    C["/review-council comment"] --> B
+    B --> D["Headless Claude Code"]
+    D --> E["Review Council"]
+    E --> F["PR Comment<br/>with findings"]
+    E --> G{"Critical issues?"}
+    G -->|"Yes"| H["Block merge"]
+    G -->|"No"| I["Approve"]
+
+    style B fill:#2563eb,color:#fff
+    style E fill:#7c3aed,color:#fff
+    style H fill:#dc2626,color:#fff
+    style I fill:#16a34a,color:#fff
+```
 
 This is planned for a future release.
 
@@ -192,14 +257,44 @@ This is planned for a future release.
 
 The architecture supports any model accessible via MCP:
 
-1. **MCP-based models** (Codex, Gemini) — wrap the CLI as an MCP server, add to setup command
-2. **Local models** (Ollama, llama.cpp) — wrap as stdio MCP server
-3. **API-based models** — wrap as HTTP MCP server
+```mermaid
+graph TB
+    subgraph "Orchestrator"
+        O["Review Council Command"]
+    end
 
-The delegation format in `rules/delegation-format.md` ensures consistent output across all providers. Adding a new reviewer requires:
-- Transport config in setup command
+    subgraph "Native"
+        C["Claude Subagent"]
+    end
+
+    subgraph "MCP Transport Layer"
+        direction TB
+        S1["stdio MCP"] --> X["Codex CLI"]
+        S2["stdio MCP"] --> G["Gemini CLI"]
+        S3["stdio MCP"] --> L["Ollama"]
+        S4["HTTP MCP"] --> A["Any API"]
+    end
+
+    O --> C
+    O --> S1
+    O -.-> S2
+    O -.-> S3
+    O -.-> S4
+
+    style O fill:#7c3aed,color:#fff
+    style C fill:#6366f1,color:#fff
+    style X fill:#059669,color:#fff
+    style G fill:#94a3b8,color:#fff
+    style L fill:#94a3b8,color:#fff
+    style A fill:#94a3b8,color:#fff
+```
+
+Adding a new reviewer requires:
+- Transport config in the setup command
 - Model-specific prompt adjustments (if needed)
 - No changes to orchestration logic
+
+The delegation format in `rules/delegation-format.md` ensures consistent, comparable output across all providers.
 
 ## Contributing
 
