@@ -23,17 +23,17 @@ The result: fewer false positives, broader coverage, and a clear priority order.
 /review-council:setup
 
 # Review something
-/review-council              # auto-detect: current PR or staged changes
-/review-council 42           # review PR #42
-/review-council src/auth.ts  # review a source file
-/review-council docs/plan.md # review a plan or document
+/review-council:run              # auto-detect: current PR or staged changes
+/review-council:run 42           # review PR #42
+/review-council:run src/auth.ts  # review a source file
+/review-council:run docs/plan.md # review a plan or document
 ```
 
 ## How It Works
 
 ```mermaid
 flowchart TD
-    A["/review-council [target]"] --> B{Detect Target}
+    A["/review-council:run [target]"] --> B{Detect Target}
     B -->|PR number| C["Fetch PR diff & metadata"]
     B -->|Source path| D["Read source files"]
     B -->|Doc/plan path| E["Read document & references"]
@@ -70,7 +70,7 @@ flowchart TD
     style P fill:#d97706,color:#fff
 ```
 
-**Auto-detection** means you usually just run `/review-council` with no arguments. It checks for an open PR on the current branch, then staged changes, then unstaged changes.
+**Auto-detection** means you usually just run `/review-council:run` with no arguments. It checks for an open PR on the current branch, then staged changes, then unstaged changes.
 
 ## Reviewers
 
@@ -178,7 +178,7 @@ review-council/
 │   ├── plugin.json          # Plugin metadata
 │   └── marketplace.json     # Marketplace listing
 ├── commands/
-│   ├── review-council.md    # Main command (orchestrator)
+│   ├── run.md               # Main command (orchestrator)
 │   ├── setup.md             # Setup wizard
 │   └── uninstall.md         # Cleanup
 ├── agents/
@@ -300,7 +300,7 @@ The delegation format in `rules/delegation-format.md` ensures consistent, compar
 
 1. Fork the repo
 2. Create a feature branch
-3. Test with `/review-council` on real PRs/code
+3. Test with `/review-council:run` on real PRs/code
 4. Submit a PR
 
 ## License

@@ -1,5 +1,5 @@
 ---
-name: review-council
+name: run
 description: Multi-agent convergence review. Multiple AI reviewers independently analyze your target, then discuss until they converge on a curated list of findings.
 argument-hint: "[PR number | file/directory path | blank for auto-detect]"
 allowed-tools: Agent, Bash, Read, Glob, Grep, Write, mcp__codex__codex, mcp__codex__codex-reply

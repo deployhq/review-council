@@ -4,7 +4,7 @@ Multi-agent convergence review plugin for Claude Code. Multiple AI reviewers ind
 
 ## Commands
 
-- `/review-council [target]` — Run a convergence review (auto-detects target type)
+- `/review-council:run [target]` — Run a convergence review (auto-detects target type)
 - `/review-council:setup` — Configure external model providers (Codex, etc.)
 - `/review-council:uninstall` — Remove configuration
 
@@ -28,7 +28,7 @@ Multi-agent convergence review plugin for Claude Code. Multiple AI reviewers ind
 ## Architecture
 
 ```
-/review-council [target]
+/review-council:run [target]
       |
       v
   Orchestrator (main Claude thread)
@@ -55,7 +55,7 @@ Multi-agent convergence review plugin for Claude Code. Multiple AI reviewers ind
 ```
 review-council/
   .claude-plugin/     Plugin metadata
-  commands/           Slash commands (/review-council, /setup, /uninstall)
+  commands/           Slash commands (/run, /setup, /uninstall)
   agents/             Subagent definitions (Claude reviewer persona)
   rules/              Orchestration logic and delegation format docs
 ```

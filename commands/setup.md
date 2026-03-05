@@ -80,10 +80,10 @@ Prerequisites:
   - GitHub CLI (gh) ........... [authenticated | not found (PR reviews disabled)]
 
 Usage:
-  /review-council              auto-detect (current PR or staged changes)
-  /review-council 42           review PR #42
-  /review-council src/foo.ts   review source code
-  /review-council docs/plan.md review a plan or document
+  /review-council:run              auto-detect (current PR or staged changes)
+  /review-council:run 42           review PR #42
+  /review-council:run src/foo.ts   review source code
+  /review-council:run docs/plan.md review a plan or document
 
 Restart Claude Code for MCP changes to take effect.
 ```

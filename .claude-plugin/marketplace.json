@@ -9,7 +9,7 @@
       "name": "review-council",
       "source": "./",
       "description": "Multi-agent convergence review — multiple AI models discuss and converge on a curated list of findings.",
-      "version": "0.1.0",
+      "version": "0.2.0",
       "author": {
         "name": "DeployHQ",
         "url": "https://github.com/deployhq"
