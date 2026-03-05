@@ -1,0 +1,14 @@
+{
+  "name": "review-council-marketplace",
+  "owner": {
+    "name": "DeployHQ",
+    "url": "https://github.com/deployhq"
+  },
+  "plugins": [
+    {
+      "name": "review-council",
+      "source": "./",
+      "description": "Multi-agent convergence review — multiple AI models discuss and converge on a curated list of findings"
+    }
+  ]
+}

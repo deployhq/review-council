@@ -1,0 +1,19 @@
+{
+  "name": "review-council",
+  "description": "Multi-agent convergence review. Multiple AI models independently review your PR, code, or plan, then discuss until they converge on a curated list of findings.",
+  "version": "0.1.0",
+  "author": {
+    "name": "DeployHQ",
+    "url": "https://github.com/deployhq"
+  },
+  "repository": "https://github.com/deployhq/review-council",
+  "license": "MIT",
+  "keywords": [
+    "code-review",
+    "multi-agent",
+    "convergence",
+    "pr-review",
+    "plan-review",
+    "adversarial-review"
+  ]
+}
