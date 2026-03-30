@@ -1,5 +1,4 @@
 ---
-name: uninstall
 description: Remove Review Council configuration
 allowed-tools: Bash, Read, Edit
 ---

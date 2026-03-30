@@ -6,7 +6,7 @@ Multi-agent convergence review for Claude Code. Multiple AI models independently
 
 Single-model code review has blind spots. Different models catch different things. Review Council runs multiple reviewers in parallel, compares their findings, and produces a single curated report where:
 
-- **Agreed findings** (both reviewers flagged) = high confidence
+- **Agreed findings** (multiple reviewers flagged) = high confidence
 - **Unique findings** (one reviewer) = worth considering
 - **Conflicts** (reviewers disagree) = both perspectives documented
 
@@ -19,7 +19,7 @@ The result: fewer false positives, broader coverage, and a clear priority order.
 /plugin marketplace add deployhq/review-council
 /plugin install review-council
 
-# Configure Codex as second reviewer
+# Check available providers
 /review-council:setup
 
 # Review something
@@ -46,13 +46,18 @@ flowchart TD
     D --> G
     E --> G
 
-    G --> H["Round 1: Independent Review"]
+    G --> H0["Detect Available Providers"]
+    H0 --> H["Round 1: Independent Review"]
 
     H --> I["Claude Subagent"]
-    H --> J["Codex via MCP"]
+    H --> J["Codex (CLI/MCP)"]
+    H --> J2["Gemini (CLI/MCP)"]
+    H --> J3["Perplexity (API)"]
 
     I --> K["Synthesize"]
     J --> K
+    J2 --> K
+    J3 --> K
 
     K --> L{Disagreements?}
     L -->|"Yes"| M["Round 2: Share synthesis, revise"]
@@ -63,9 +68,12 @@ flowchart TD
     O -->|"No (max 3 rounds)"| P["Report with dissenting opinions"]
 
     style A fill:#7c3aed,color:#fff
+    style H0 fill:#7c3aed,color:#fff
     style H fill:#2563eb,color:#fff
     style I fill:#6366f1,color:#fff
     style J fill:#059669,color:#fff
+    style J2 fill:#059669,color:#fff
+    style J3 fill:#059669,color:#fff
     style N fill:#16a34a,color:#fff
     style P fill:#d97706,color:#fff
 ```
@@ -77,48 +85,45 @@ flowchart TD
 ```mermaid
 graph LR
     O["Orchestrator<br/>(Claude Code)"] -->|subagent| C["Claude<br/>Reviewer"]
-    O -->|stdio MCP| X["Codex<br/>Reviewer"]
-    O -.->|"planned"| G["Gemini<br/>Reviewer"]
-    O -.->|"planned"| L["Ollama<br/>Local Models"]
+    O -->|"CLI / MCP"| X["Codex<br/>Reviewer"]
+    O -->|"CLI / MCP"| G["Gemini<br/>Reviewer"]
+    O -->|"API"| P["Perplexity<br/>Reviewer"]
 
     style O fill:#7c3aed,color:#fff
     style C fill:#6366f1,color:#fff
     style X fill:#059669,color:#fff
-    style G fill:#94a3b8,color:#fff,stroke-dasharray: 5 5
-    style L fill:#94a3b8,color:#fff,stroke-dasharray: 5 5
+    style G fill:#059669,color:#fff
+    style P fill:#059669,color:#fff
 ```
 
-| Reviewer | Transport | Status |
-|----------|-----------|--------|
-| **Claude** | Native subagent with dedicated reviewer persona | Available |
-| **Codex** (OpenAI) | Codex MCP server (stdio) | Available |
-| **Gemini** | Gemini MCP (planned) | Roadmap |
-| **Ollama** | Local model MCP (planned) | Roadmap |
+| Reviewer | Transport | Detection |
+|----------|-----------|-----------|
+| **Claude** | Native subagent | Always available |
+| **Codex** (OpenAI) | CLI (`codex exec`) / MCP fallback | `which codex` or MCP tool |
+| **Gemini** (Google) | CLI (`gemini`) / MCP fallback | `which gemini` or MCP tool |
+| **Perplexity** | Sonar API (`curl`) | `PERPLEXITY_API_KEY` env var |
 
-Without Codex configured, Review Council runs in **single-reviewer mode** — still useful as a structured review with a dedicated persona, but you lose the cross-model validation.
+Minimum 2 reviewers needed for convergence mode. With only Claude, runs in single-reviewer mode. Providers are auto-detected at runtime — no manual configuration needed.
 
 ## Setup
 
 ### Prerequisites
 
 - [Claude Code](https://claude.ai/code) CLI
-- [Codex CLI](https://github.com/openai/codex) — `npm install -g @openai/codex && codex login`
 - [GitHub CLI](https://cli.github.com/) (`gh`) — for PR reviews (optional)
+- At least one additional reviewer for convergence mode:
+  - [Codex CLI](https://github.com/openai/codex) — `npm install -g @openai/codex && codex login`
+  - [Gemini CLI](https://github.com/google-gemini/gemini-cli) — `npm install -g @google/gemini-cli`
+  - [Perplexity API key](https://www.perplexity.ai/) — set `PERPLEXITY_API_KEY` env var
 
 ### Install
 
 ```bash
 /plugin marketplace add deployhq/review-council
 /plugin install review-council
-/review-council:setup
 ```
 
-The setup command will:
-1. Verify Codex CLI is installed and authenticated
-2. Configure the Codex MCP server in `~/.claude/settings.json`
-3. Verify GitHub CLI for PR reviews (optional)
-
-Restart Claude Code after setup for MCP changes to take effect.
+Providers are auto-detected at runtime. Run `/review-council:setup` to check which providers are available.
 
 ### Uninstall
 
@@ -134,7 +139,7 @@ Restart Claude Code after setup for MCP changes to take effect.
 
 **Target:** PR #42 — "Add rate limiting to API endpoints"
 **Type:** PR
-**Reviewers:** Claude, Codex
+**Reviewers:** Claude, Codex, Gemini (3 of 4 — Perplexity: PERPLEXITY_API_KEY not set)
 **Rounds:** 2
 **Consensus:** Strong
 
@@ -177,15 +182,17 @@ review-council/
 ├── .claude-plugin/
 │   ├── plugin.json          # Plugin metadata
 │   └── marketplace.json     # Marketplace listing
-├── commands/
-│   ├── run.md               # Main command (orchestrator)
-│   ├── setup.md             # Setup wizard
-│   └── uninstall.md         # Cleanup
+├── skills/
+│   ├── run/SKILL.md         # Main command (orchestrator)
+│   ├── setup/SKILL.md       # Provider status checker
+│   └── uninstall/SKILL.md   # Cleanup
 ├── agents/
 │   └── reviewer-claude.md   # Claude reviewer persona
 ├── rules/
-│   ├── orchestration.md     # Convergence logic docs
-│   └── delegation-format.md # External model prompt format
+│   ├── orchestration.md     # Convergence logic
+│   ├── delegation-format.md # External model prompt format
+│   └── providers.md         # Provider registry
+├── docs/                    # Specs and plans
 ├── CLAUDE.md                # Plugin instructions
 ├── LICENSE                  # MIT
 └── README.md                # This file
@@ -198,12 +205,18 @@ sequenceDiagram
     participant O as Orchestrator
     participant C as Claude Reviewer
     participant X as Codex Reviewer
+    participant G as Gemini Reviewer
+    participant P as Perplexity Reviewer
 
     Note over O: Round 1 — Independent
     O->>+C: Context package
-    O->>+X: Context package (delegation format)
+    O->>+X: Context package (CLI/MCP)
+    O->>+G: Context package (CLI/MCP)
+    O->>+P: Context package (API)
     C-->>-O: Findings + assessment
     X-->>-O: Findings + assessment
+    G-->>-O: Findings + assessment
+    P-->>-O: Findings + assessment
 
     Note over O: Synthesize — merge, deduplicate, categorize
     O->>O: Agreed / Unique / Conflicting
@@ -211,9 +224,13 @@ sequenceDiagram
     alt Conflicts or important unique findings
         Note over O: Round 2 — Informed Revision
         O->>+C: Round 1 synthesis
-        O->>+X: Round 1 synthesis (via codex-reply)
+        O->>+X: Round 1 synthesis
+        O->>+G: Round 1 synthesis
+        O->>+P: Round 1 synthesis
         C-->>-O: Revised findings
         X-->>-O: Revised findings
+        G-->>-O: Revised findings
+        P-->>-O: Revised findings
         O->>O: Final convergence
     end
 
@@ -255,7 +272,7 @@ This is planned for a future release.
 
 ## Adding New Reviewers (Extensibility)
 
-The architecture supports any model accessible via MCP:
+The architecture supports any model accessible via CLI or API:
 
 ```mermaid
 graph TB
@@ -267,34 +284,31 @@ graph TB
         C["Claude Subagent"]
     end
 
-    subgraph "MCP Transport Layer"
+    subgraph "CLI / MCP Transport Layer"
         direction TB
-        S1["stdio MCP"] --> X["Codex CLI"]
-        S2["stdio MCP"] --> G["Gemini CLI"]
-        S3["stdio MCP"] --> L["Ollama"]
-        S4["HTTP MCP"] --> A["Any API"]
+        S1["CLI / MCP"] --> X["Codex"]
+        S2["CLI / MCP"] --> G["Gemini"]
+        S3["API (curl)"] --> P["Perplexity"]
+        S4["CLI / MCP / API"] --> A["Any Model"]
     end
 
     O --> C
     O --> S1
-    O -.-> S2
-    O -.-> S3
+    O --> S2
+    O --> S3
     O -.-> S4
 
     style O fill:#7c3aed,color:#fff
     style C fill:#6366f1,color:#fff
     style X fill:#059669,color:#fff
-    style G fill:#94a3b8,color:#fff
-    style L fill:#94a3b8,color:#fff
+    style G fill:#059669,color:#fff
+    style P fill:#059669,color:#fff
     style A fill:#94a3b8,color:#fff
 ```
 
-Adding a new reviewer requires:
-- Transport config in the setup command
-- Model-specific prompt adjustments (if needed)
-- No changes to orchestration logic
+Adding a new reviewer requires adding an entry to `rules/providers.md` with detection, CLI invocation, MCP fallback, and env requirements. Then update `skills/run/SKILL.md` to include it in the parallel dispatch.
 
-The delegation format in `rules/delegation-format.md` ensures consistent, comparable output across all providers.
+The delegation format in `rules/delegation-format.md` ensures consistent, comparable output across all providers. Transport is CLI-primary with MCP fallback — see the provider registry for details.
 
 ## Contributing
 
