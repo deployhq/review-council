@@ -53,12 +53,12 @@ Other reviewers independently reviewed the same material. Here is the synthesize
 [Insert synthesis: agreed findings, unique findings, conflicts]
 
 Please:
-1. Confirm or revise your original findings
+1. Confirm or revise your original findings — retain original `file:line` anchors for traceability
 2. For conflicts — explain your reasoning or concede if another reviewer's point is valid
 3. Flag any new concerns you missed that other reviewers caught
 4. Drop any findings you now consider less important after seeing the full picture
 
-Use the same output format as Round 1.
+Use the same output format as Round 1. Keep original finding locations (`file:line`) stable so the orchestrator can track findings across rounds.
 ```
 
 ## Adding New Providers

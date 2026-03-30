@@ -62,7 +62,7 @@ Reference for the orchestrator. At runtime, probe each provider in order. Availa
 
 1. Probe all providers at review start
 2. Minimum 2 available for convergence mode; 1 = single-reviewer mode
-3. Report header shows availability: `Reviewers: Claude, Codex (3 of 4 — Perplexity: PERPLEXITY_API_KEY not set)`
+3. Report header shows availability: `Reviewers: Claude, Codex, Gemini (3 participating — Perplexity: PERPLEXITY_API_KEY not set)`
 4. Transport fallback: CLI first, then MCP, then skip
 5. Never block a review because a provider is unavailable
 

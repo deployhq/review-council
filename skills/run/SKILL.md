@@ -133,15 +133,20 @@ PAYLOAD_EOF
 Then invoke the API:
 
 ```bash
-curl -s https://api.perplexity.ai/v1/chat/completions \
+curl -fsS https://api.perplexity.ai/v1/chat/completions \
   -H "Authorization: Bearer $PERPLEXITY_API_KEY" \
   -H "Content-Type: application/json" \
-  -d @/tmp/rc-perplexity-payload.json
+  -d @/tmp/rc-perplexity-payload.json \
+  -o /tmp/rc-perplexity-response.json
 ```
 
-Parse the response JSON to extract `.choices[0].message.content`.
+Then parse the response:
 
-**If invocation fails**: Note in output that Perplexity was skipped. Proceed with other reviewers.
+```bash
+jq -er '.choices[0].message.content' /tmp/rc-perplexity-response.json
+```
+
+**If curl or jq fails**: Note in output that Perplexity was skipped. Proceed with other reviewers.
 
 ### Delegation Prompt
 
@@ -199,7 +204,7 @@ Produce the final output using this exact format:
 
 **Target:** [what was reviewed — PR #N, file path, etc.]
 **Type:** [PR | Plan/Document | Code]
-**Reviewers:** [list of reviewers that participated] ([N] of 4 available — [skipped: reasons])
+**Reviewers:** [list of reviewers that participated] ([N] participating — [skipped: reasons])
 **Rounds:** [number of rounds run]
 **Consensus:** [Strong | Moderate | Mixed]
 
@@ -227,6 +232,14 @@ Produce the final output using this exact format:
 [Brief — things reviewers praised. Keep to 2-3 bullet points max.]
 
 ---
+
+## Step 8: Cleanup
+
+Remove temporary files used during the review:
+
+```bash
+rm -f /tmp/rc-codex-prompt.md /tmp/rc-gemini-prompt.md /tmp/rc-perplexity-payload.json /tmp/rc-perplexity-response.json
+```
 
 ## Orchestration Rules
 
