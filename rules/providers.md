@@ -45,7 +45,7 @@ Reference for the orchestrator. At runtime, probe each provider in order. Availa
 - **Detection**: `PERPLEXITY_API_KEY` env var is set and non-empty
 - **CLI invocation**: `curl` POST to Sonar API:
   ```bash
-  curl -s https://api.perplexity.ai/chat/completions \
+  curl -s https://api.perplexity.ai/v1/chat/completions \
     -H "Authorization: Bearer $PERPLEXITY_API_KEY" \
     -H "Content-Type: application/json" \
     -d '{

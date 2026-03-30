@@ -79,7 +79,15 @@ Provide the full context package. Tell the reviewer what type of review this is 
 
 ### Reviewer: Codex — If Available
 
-**CLI mode** (preferred): Use the `Bash` tool to invoke Codex CLI. Write the delegation prompt (from `rules/delegation-format.md`) to a temp file, then run:
+**CLI mode** (preferred): Use the `Bash` tool to invoke Codex CLI. First, write the delegation prompt (from `rules/delegation-format.md`) to a temp file:
+
+```bash
+cat > /tmp/rc-codex-prompt.md << 'PROMPT_EOF'
+[Insert full delegation prompt here]
+PROMPT_EOF
+```
+
+Then invoke Codex:
 
 ```bash
 codex exec --full-auto -q "$(cat /tmp/rc-codex-prompt.md)"
@@ -91,7 +99,15 @@ codex exec --full-auto -q "$(cat /tmp/rc-codex-prompt.md)"
 
 ### Reviewer: Gemini — If Available
 
-**CLI mode** (preferred): Use the `Bash` tool to invoke Gemini CLI:
+**CLI mode** (preferred): Use the `Bash` tool to invoke Gemini CLI. First, write the delegation prompt to a temp file:
+
+```bash
+cat > /tmp/rc-gemini-prompt.md << 'PROMPT_EOF'
+[Insert full delegation prompt here]
+PROMPT_EOF
+```
+
+Then invoke Gemini:
 
 ```bash
 gemini -p "$(cat /tmp/rc-gemini-prompt.md)" -o text
@@ -103,21 +119,24 @@ gemini -p "$(cat /tmp/rc-gemini-prompt.md)" -o text
 
 ### Reviewer: Perplexity — If Available
 
-Use the `Bash` tool to call the Sonar API:
+Use the `Bash` tool to call the Sonar API. First, write the payload file with the delegation prompt:
 
 ```bash
-curl -s https://api.perplexity.ai/chat/completions \
+cat > /tmp/rc-perplexity-payload.json << 'PAYLOAD_EOF'
+{
+  "model": "sonar",
+  "messages": [{"role": "user", "content": "[Insert full delegation prompt here, JSON-escaped]"}]
+}
+PAYLOAD_EOF
+```
+
+Then invoke the API:
+
+```bash
+curl -s https://api.perplexity.ai/v1/chat/completions \
   -H "Authorization: Bearer $PERPLEXITY_API_KEY" \
   -H "Content-Type: application/json" \
   -d @/tmp/rc-perplexity-payload.json
-```
-
-Where `/tmp/rc-perplexity-payload.json` contains:
-```json
-{
-  "model": "sonar",
-  "messages": [{"role": "user", "content": "DELEGATION_PROMPT_HERE"}]
-}
 ```
 
 Parse the response JSON to extract `.choices[0].message.content`.

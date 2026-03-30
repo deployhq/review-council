@@ -1,6 +1,6 @@
 ---
 description: Check Review Council provider status and prerequisites
-allowed-tools: Bash, Read, Write, Edit
+allowed-tools: Bash, Read
 ---
 
 # Review Council — Setup & Status
@@ -48,7 +48,7 @@ which gh 2>/dev/null && gh auth status 2>&1 | head -3
 
 Print:
 
-```
+```text
 Review Council — Provider Status
 
 Reviewers:
