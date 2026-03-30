@@ -41,9 +41,26 @@ Different models have different defaults for verbosity, structure, and focus. Th
 - Ensures every finding is actionable (not just "this looks wrong")
 - Makes deduplication possible across reviewers
 
+## Round 2 — Revision Template
+
+When the orchestrator triggers a second round, send this to each provider along with the original context and Round 1 synthesis:
+
+```
+## ROUND 2 — REVISION
+
+Other reviewers independently reviewed the same material. Here is the synthesized result from Round 1:
+
+[Insert synthesis: agreed findings, unique findings, conflicts]
+
+Please:
+1. Confirm or revise your original findings
+2. For conflicts — explain your reasoning or concede if another reviewer's point is valid
+3. Flag any new concerns you missed that other reviewers caught
+4. Drop any findings you now consider less important after seeing the full picture
+
+Use the same output format as Round 1.
+```
+
 ## Adding New Providers
 
-When adding a new model provider, the delegation format stays the same. Only the transport changes:
-- **Codex**: `mcp__codex__codex` tool (stdio MCP)
-- **Gemini**: Future — likely `mcp__gemini__gemini` or HTTP MCP
-- **Ollama**: Future — likely stdio MCP wrapping `ollama run`
+When adding a new model provider, the delegation format stays the same. Only the transport changes. See `rules/providers.md` for the full provider registry with detection, CLI invocation, MCP fallback, and env requirements for each provider.
