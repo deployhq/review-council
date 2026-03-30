@@ -121,19 +121,25 @@ Dispatch a `general-purpose` Agent with this prompt:
 
 > You are invoking the Perplexity reviewer for a Review Council review. Your job is to call the Sonar API, collect its response, and return the structured findings.
 >
-> Write the payload and call the API:
+> **Step 1: Build the JSON payload** using `jq` to avoid manual escaping:
 > ```bash
-> cat > /tmp/rc-perplexity-payload.json << 'PAYLOAD_EOF'
-> {
->   "model": "sonar",
->   "messages": [{"role": "user", "content": "[Insert full delegation prompt here, JSON-escaped]"}]
-> }
-> PAYLOAD_EOF
+> PROMPT="[the full delegation prompt text]"
+> jq -n --arg model "sonar" --arg prompt "$PROMPT" \
+>   '{model: $model, messages: [{role: "user", content: $prompt}]}' \
+>   > /tmp/rc-perplexity-payload.json
+> ```
+>
+> **Step 2: Call the API:**
+> ```bash
 > curl -fsS https://api.perplexity.ai/v1/chat/completions \
 >   -H "Authorization: Bearer $PERPLEXITY_API_KEY" \
 >   -H "Content-Type: application/json" \
 >   -d @/tmp/rc-perplexity-payload.json \
 >   -o /tmp/rc-perplexity-response.json
+> ```
+>
+> **Step 3: Parse the response:**
+> ```bash
 > jq -er '.choices[0].message.content' /tmp/rc-perplexity-response.json
 > ```
 >
