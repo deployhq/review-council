@@ -17,12 +17,9 @@ Reference for the orchestrator. At runtime, probe each provider in order. Availa
   1. CLI: `which codex 2>/dev/null` — if found, use CLI
   2. MCP fallback: `mcp__codex__codex` tool — if available, use MCP
   3. Neither — skip, note in report
-- **CLI invocation**: Write the delegation prompt to a temp file, then:
-  ```bash
-  codex exec --full-auto -q "$(cat /tmp/rc-review-prompt.md)"
-  ```
+- **CLI invocation**: The subagent runs `codex --help` and `codex exec --help` to discover current syntax, then invokes Codex in non-interactive/full-auto mode. Do not hardcode flags — CLI syntax changes between versions.
 - **MCP fallback**: `mcp__codex__codex` tool with delegation prompt as message
-- **Round 2 (CLI)**: Fresh `codex exec` call with full context + synthesis (no thread state)
+- **Round 2 (CLI)**: Fresh CLI call with full context + synthesis (no thread state)
 - **Round 2 (MCP)**: `mcp__codex__codex-reply` with `threadId` from Round 1
 - **Env requirements**: OpenAI API key (configured via `codex login`)
 
@@ -32,10 +29,7 @@ Reference for the orchestrator. At runtime, probe each provider in order. Availa
   1. CLI: `which gemini 2>/dev/null` — if found, use CLI
   2. MCP fallback: Gemini MCP tool if configured
   3. Neither — skip, note in report
-- **CLI invocation**: Write the delegation prompt to a temp file, then:
-  ```bash
-  gemini -p "$(cat /tmp/rc-review-prompt.md)" -o text
-  ```
+- **CLI invocation**: The subagent runs `gemini --help` to discover current syntax, then invokes Gemini in non-interactive mode with text output. Do not hardcode flags — CLI syntax changes between versions.
 - **MCP fallback**: Gemini MCP tool if configured in user's environment
 - **Round 2**: Fresh CLI call with full context + synthesis
 - **Env requirements**: Google API key (configured via `gemini login` or `GEMINI_API_KEY` env var)
