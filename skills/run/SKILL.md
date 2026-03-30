@@ -83,17 +83,13 @@ Provide the full context package. Tell the reviewer what type of review this is 
 
 Dispatch a `general-purpose` Agent with this prompt:
 
-> You are invoking the Codex reviewer for a Review Council review. Your job is to call Codex, collect its response, and return the structured findings.
+> You are invoking the Codex reviewer for a Review Council review. Your job is to call the Codex CLI, collect its response, and return the structured findings.
 >
-> **CLI mode** (preferred): Write the delegation prompt to a temp file, then invoke Codex:
-> ```bash
-> cat > /tmp/rc-codex-prompt.md << 'PROMPT_EOF'
-> [Insert full delegation prompt here]
-> PROMPT_EOF
-> codex exec --full-auto "$(cat /tmp/rc-codex-prompt.md)"
-> ```
+> **Step 1: Discover CLI syntax.** Run `codex --help` and `codex exec --help` to learn the available subcommands and flags. Do NOT assume any specific flags exist — always derive the correct invocation from the help output.
 >
-> **MCP mode** (fallback): If CLI fails, use the `mcp__codex__codex` tool with the delegation prompt.
+> **Step 2: Invoke Codex.** Write the delegation prompt to `/tmp/rc-codex-prompt.md`, then use the syntax you discovered to run Codex in non-interactive/full-auto mode with the prompt content.
+>
+> **MCP fallback:** If the CLI call fails, use the `mcp__codex__codex` tool with the delegation prompt instead.
 >
 > **If both fail**: Return "SKIPPED: Codex unavailable — [error details]"
 >
@@ -105,17 +101,13 @@ Dispatch a `general-purpose` Agent with this prompt:
 
 Dispatch a `general-purpose` Agent with this prompt:
 
-> You are invoking the Gemini reviewer for a Review Council review. Your job is to call Gemini, collect its response, and return the structured findings.
+> You are invoking the Gemini reviewer for a Review Council review. Your job is to call the Gemini CLI, collect its response, and return the structured findings.
 >
-> **CLI mode** (preferred): Write the delegation prompt to a temp file, then invoke Gemini:
-> ```bash
-> cat > /tmp/rc-gemini-prompt.md << 'PROMPT_EOF'
-> [Insert full delegation prompt here]
-> PROMPT_EOF
-> gemini -p "$(cat /tmp/rc-gemini-prompt.md)" -o text
-> ```
+> **Step 1: Discover CLI syntax.** Run `gemini --help` to learn the available subcommands and flags. Do NOT assume any specific flags exist — always derive the correct invocation from the help output.
 >
-> **MCP mode** (fallback): If CLI fails, use the Gemini MCP tool if configured.
+> **Step 2: Invoke Gemini.** Write the delegation prompt to `/tmp/rc-gemini-prompt.md`, then use the syntax you discovered to run Gemini in non-interactive mode with the prompt content and text output.
+>
+> **MCP fallback:** If the CLI call fails, use the Gemini MCP tool if configured.
 >
 > **If both fail**: Return "SKIPPED: Gemini unavailable — [error details]"
 >
