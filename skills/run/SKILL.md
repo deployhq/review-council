@@ -1,5 +1,4 @@
 ---
-name: run
 description: Multi-agent convergence review. Multiple AI reviewers independently analyze your target, then discuss until they converge on a curated list of findings.
 argument-hint: "[PR number | file/directory path | blank for auto-detect]"
 allowed-tools: Agent, Bash, Read, Glob, Grep, Write, mcp__codex__codex, mcp__codex__codex-reply
@@ -8,6 +7,21 @@ allowed-tools: Agent, Bash, Read, Glob, Grep, Write, mcp__codex__codex, mcp__cod
 # Review Council — Multi-Agent Convergence Review
 
 You are the **Orchestrator** of a review council. Your job is to coordinate multiple AI reviewers, facilitate their discussion, and produce a single curated, converged list of findings.
+
+## Step 0: Detect Available Providers
+
+Before doing anything else, probe which reviewers are available. Refer to `rules/providers.md` for detection methods.
+
+Run these checks in parallel:
+
+1. **Claude**: Always available.
+2. **Codex**: Run `which codex 2>/dev/null`. If found, mark as available (CLI). If not, check if `mcp__codex__codex` tool is available — if so, mark as available (MCP). Otherwise, unavailable.
+3. **Gemini**: Run `which gemini 2>/dev/null`. If found, mark as available (CLI). If not, check if Gemini MCP tool is available. Otherwise, unavailable.
+4. **Perplexity**: Run `test -n "$PERPLEXITY_API_KEY" && echo "available" || echo "unavailable"`.
+
+Announce: "**Review Council** — [N] reviewers available: [list]. [Skipped: reason for each unavailable provider]"
+
+If only Claude is available, proceed in **single-reviewer mode** and note it in the output. Suggest running `/review-council:setup` to see how to add more reviewers.
 
 ## Step 1: Detect Review Target
 
@@ -55,78 +69,73 @@ Prepare a **context package** — a clear, structured summary of everything the 
 
 ## Step 3: Round 1 — Independent Review (Parallel)
 
-Launch **both reviewers in parallel**. They must not see each other's output — this ensures truly independent perspectives.
+Launch **all available reviewers in parallel**. They must not see each other's output — this ensures truly independent perspectives.
 
-### Reviewer A: Claude (native subagent)
+### Reviewer: Claude (native subagent) — Always
 
 Use the `Agent` tool with `subagent_type: "reviewer-claude"`.
 
 Provide the full context package. Tell the reviewer what type of review this is (PR, plan, or code).
 
-### Reviewer B: Codex (external model via MCP)
+### Reviewer: Codex — If Available
 
-Use the `mcp__codex__codex` tool. Send a review request following this format:
+**CLI mode** (preferred): Use the `Bash` tool to invoke Codex CLI. Write the delegation prompt (from `rules/delegation-format.md`) to a temp file, then run:
 
-```
-## TASK
-You are an independent expert reviewer on a review council. Review the following [PR/plan/code] thoroughly and independently.
-
-## CONTEXT
-[Full context package — same material sent to the other reviewer]
-
-## EXPECTED OUTCOME
-A structured review with:
-1. Findings: List of issues, each with severity (critical/important/suggestion) and confidence (high/medium/low)
-2. What's good: Things done well (keep brief)
-3. Overall assessment: One paragraph summary
-
-## CONSTRAINTS
-- Focus on substantive issues, not style nitpicks or formatting preferences
-- Each finding must explain WHY it's a problem and WHAT to do about it
-- Be specific — reference exact lines, sections, or file paths
-- For PRs: only review what changed in the diff, not pre-existing code
-- Limit to your top 10 most important findings — quality over quantity
-
-## MUST DO
-- Rate each finding: severity (critical/important/suggestion) + confidence (high/medium/low)
-- Provide a concrete, actionable recommendation for each finding
-- Consider: correctness, security, performance, reliability, maintainability
-- For plans: evaluate feasibility, completeness, risks, missing considerations
-- For code: evaluate correctness, edge cases, error handling, security
-- For PRs: evaluate the change itself and its implications
-
-## MUST NOT DO
-- Flag style/formatting preferences (tabs vs spaces, bracket placement, etc.)
-- Flag pre-existing issues not introduced by the change
-- Give vague feedback without actionable recommendations
-- Exceed 10 findings
-
-## OUTPUT FORMAT
-Use structured markdown:
-### Findings
-For each finding:
-- **[severity] [confidence]** — Location: `file:line` or section name
-  - Issue: [one sentence]
-  - Why: [impact if not addressed]
-  - Fix: [concrete recommendation]
-
-### What's Good
-- [brief positives]
-
-### Overall Assessment
-[one paragraph]
+```bash
+codex exec --full-auto -q "$(cat /tmp/rc-codex-prompt.md)"
 ```
 
-**If Codex MCP is not available** (tool call fails), proceed with Claude-only review. Note in the output: "Single-reviewer mode — run `/review-council:setup` to add Codex as a second reviewer."
+**MCP mode** (fallback): Use the `mcp__codex__codex` tool. Send the delegation prompt following the format in `rules/delegation-format.md`.
+
+**If invocation fails** (CLI exits non-zero, MCP tool errors): Note in output that Codex was skipped this round. Do not retry — proceed with other reviewers.
+
+### Reviewer: Gemini — If Available
+
+**CLI mode** (preferred): Use the `Bash` tool to invoke Gemini CLI:
+
+```bash
+gemini -p "$(cat /tmp/rc-gemini-prompt.md)" -o text
+```
+
+**MCP mode** (fallback): Use the Gemini MCP tool if configured.
+
+**If invocation fails**: Note in output that Gemini was skipped. Proceed with other reviewers.
+
+### Reviewer: Perplexity — If Available
+
+Use the `Bash` tool to call the Sonar API:
+
+```bash
+curl -s https://api.perplexity.ai/chat/completions \
+  -H "Authorization: Bearer $PERPLEXITY_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d @/tmp/rc-perplexity-payload.json
+```
+
+Where `/tmp/rc-perplexity-payload.json` contains:
+```json
+{
+  "model": "sonar",
+  "messages": [{"role": "user", "content": "DELEGATION_PROMPT_HERE"}]
+}
+```
+
+Parse the response JSON to extract `.choices[0].message.content`.
+
+**If invocation fails**: Note in output that Perplexity was skipped. Proceed with other reviewers.
+
+### Delegation Prompt
+
+For all non-Claude reviewers, use the delegation format from `rules/delegation-format.md`. The prompt is identical for every provider — only the transport differs.
 
 ## Step 4: Analyze Round 1 Results
 
-Once both reviewers respond, build a **synthesis**:
+Once all reviewers respond, build a **synthesis**:
 
 1. **Merge** all findings into a single list
 2. **Deduplicate** — two findings are duplicates if they reference the same location AND describe the same core concern (even if worded differently). Keep the more specific/actionable version.
 3. **Categorize** each finding:
-   - **Agreed** — Both reviewers flagged this (or substantially similar finding). HIGH confidence.
+   - **Agreed** — Multiple reviewers flagged this (or substantially similar finding). HIGH confidence.
    - **Unique** — Only one reviewer flagged this. MEDIUM confidence.
    - **Conflicting** — Reviewers explicitly disagree (one says it's fine, the other says it's a problem). Needs discussion.
 
@@ -137,29 +146,25 @@ Once both reviewers respond, build a **synthesis**:
 - Unique findings are all "suggestion" severity (not critical or important)
 - Total unique findings <= 3
 
-**If Round 2 is needed**, share the Round 1 synthesis with both reviewers and ask them to revise:
+**If Round 2 is needed**, share the Round 1 synthesis with all reviewers that participated in Round 1 and ask them to revise.
 
 ### Claude (Round 2)
 Spawn a new `reviewer-claude` agent. Provide the Round 1 synthesis and ask:
-- Confirm or revise your original findings in light of the other reviewer's perspective
+- Confirm or revise your original findings in light of the other reviewers' perspectives
 - Specifically address conflicting findings — explain your reasoning
-- Flag any new concerns triggered by the other reviewer's observations
+- Flag any new concerns triggered by other reviewers' observations
 
 ### Codex (Round 2)
-Use `mcp__codex__codex-reply` (with threadId from Round 1) to continue:
-```
-## ROUND 2 — REVISION
 
-Another reviewer independently reviewed the same material. Here is the synthesized result from Round 1:
+**CLI mode**: Fresh `codex exec` call with the full original context + Round 1 synthesis. Include the Round 2 revision instructions from `rules/delegation-format.md`.
 
-[Insert synthesis: agreed findings, unique findings, conflicts]
+**MCP mode**: Use `mcp__codex__codex-reply` with `threadId` from Round 1 to continue the thread.
 
-Please:
-1. Confirm or revise your original findings
-2. For conflicts — explain your reasoning or concede if the other reviewer's point is valid
-3. Flag any new concerns you missed that the other reviewer caught
-4. Drop any findings you now consider less important after seeing the full picture
-```
+### Gemini (Round 2)
+Fresh CLI/MCP call with full context + Round 1 synthesis + revision instructions.
+
+### Perplexity (Round 2)
+Fresh curl call with full context + Round 1 synthesis + revision instructions.
 
 ## Step 6: Round 3 (Rare — Only If Needed)
 
@@ -175,12 +180,12 @@ Produce the final output using this exact format:
 
 **Target:** [what was reviewed — PR #N, file path, etc.]
 **Type:** [PR | Plan/Document | Code]
-**Reviewers:** Claude, Codex [or "Claude (single-reviewer mode)"]
+**Reviewers:** [list of reviewers that participated] ([N] of 4 available — [skipped: reasons])
 **Rounds:** [number of rounds run]
 **Consensus:** [Strong | Moderate | Mixed]
 
 ### Critical Issues
-[Findings both reviewers agree are critical. Must fix before merging/shipping.]
+[Findings multiple reviewers agree are critical. Must fix before merging/shipping.]
 
 *If none: "No critical issues identified."*
 
@@ -200,17 +205,17 @@ Produce the final output using this exact format:
 *If none: omit this section entirely.*
 
 ### What's Done Well
-[Brief — things both reviewers praised. Keep to 2-3 bullet points max.]
+[Brief — things reviewers praised. Keep to 2-3 bullet points max.]
 
 ---
 
 ## Orchestration Rules
 
 - **Max 3 rounds.** If no convergence, output what you have with both perspectives noted.
-- **Substance over style.** Aggressively filter out nitpicks, formatting opinions, and subjective preferences. These waste the user's time.
-- **Confidence from agreement.** Both reviewers flag it = high confidence. One reviewer = medium. Conflicting = note both.
+- **Substance over style.** Aggressively filter out nitpicks, formatting opinions, and subjective preferences.
+- **Confidence from agreement.** Multiple reviewers flag it = high confidence. One reviewer = medium. Conflicting = note both.
 - **Be actionable.** Every finding must say what to do, not just what's wrong.
-- **Respect the user's time.** The output is a curated, prioritized list — not a dump of everything both reviewers said. Fewer high-quality findings > many low-quality ones.
+- **Respect the user's time.** The output is a curated, prioritized list — not a dump of everything all reviewers said. Fewer high-quality findings > many low-quality ones.
 - **Severity definitions:**
   - **Critical** — Will cause bugs, security vulnerabilities, data loss, or system failures. Blocks merge/ship.
   - **Important** — Significant quality, performance, or maintainability concern. Should fix.
