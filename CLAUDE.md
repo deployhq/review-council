@@ -4,26 +4,29 @@ Multi-agent convergence review plugin for Claude Code. Multiple AI reviewers ind
 
 ## Commands
 
-- `/review-council:run [target]` — Run a convergence review (auto-detects target type)
-- `/review-council:setup` — Configure external model providers (Codex, etc.)
+- `/review-council:run [target]` — Run a convergence review (auto-detects target type and available providers)
+- `/review-council:setup` — Show provider status and prerequisites
 - `/review-council:uninstall` — Remove configuration
 
 ## How It Works
 
-1. **Detect** — Auto-detects if you're reviewing a PR, source code, or plan/document
-2. **Gather** — Collects relevant context (diff, files, related docs)
-3. **Review** — Sends identical context to multiple independent reviewers in parallel
-4. **Converge** — Merges findings, identifies agreements/disagreements, runs additional rounds if needed
-5. **Report** — Outputs a curated, prioritized list with confidence levels based on reviewer agreement
+1. **Detect providers** — Auto-detects which reviewers are available (CLI first, MCP fallback)
+2. **Detect target** — Auto-detects if you're reviewing a PR, source code, or plan/document
+3. **Gather** — Collects relevant context (diff, files, related docs)
+4. **Review** — Sends identical context to all available reviewers in parallel
+5. **Converge** — Merges findings, identifies agreements/disagreements, runs additional rounds if needed
+6. **Report** — Outputs a curated, prioritized list with confidence levels based on reviewer agreement
 
 ## Reviewers
 
-| Reviewer | Transport | Status |
-|----------|-----------|--------|
-| Claude | Native subagent | Available |
-| Codex | MCP (stdio) | Available (requires setup) |
-| Gemini | MCP | Planned |
-| Ollama | MCP | Planned |
+| Reviewer | Transport | Detection |
+|----------|-----------|-----------|
+| Claude | Native subagent | Always available |
+| Codex | CLI (`codex exec`) / MCP fallback | `which codex` or MCP tool |
+| Gemini | CLI (`gemini`) / MCP fallback | `which gemini` or MCP tool |
+| Perplexity | Sonar API (`curl`) | `PERPLEXITY_API_KEY` env var |
+
+Minimum 2 reviewers needed for convergence mode. With only Claude, runs in single-reviewer mode.
 
 ## Architecture
 
@@ -31,11 +34,16 @@ Multi-agent convergence review plugin for Claude Code. Multiple AI reviewers ind
 /review-council:run [target]
       |
       v
+  Provider Detection (auto)
+      |
+      v
   Orchestrator (main Claude thread)
       |
       +---> Round 1 (parallel) ------+
       |     - Claude (subagent)      |
-      |     - Codex (MCP tool)       |
+      |     - Codex (CLI/MCP)        |
+      |     - Gemini (CLI/MCP)       |
+      |     - Perplexity (API)       |
       |<-----------------------------+
       |
       v
@@ -55,7 +63,8 @@ Multi-agent convergence review plugin for Claude Code. Multiple AI reviewers ind
 ```
 review-council/
   .claude-plugin/     Plugin metadata
-  commands/           Slash commands (/run, /setup, /uninstall)
+  skills/             Slash commands (run, setup, uninstall)
   agents/             Subagent definitions (Claude reviewer persona)
-  rules/              Orchestration logic and delegation format docs
+  rules/              Orchestration logic, delegation format, provider registry
+  docs/               Specs and plans
 ```
