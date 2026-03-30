@@ -231,11 +231,13 @@ Produce the final output using this exact format:
 
 ## Step 8: Cleanup
 
-Remove temporary files used during the review:
+Remove any temporary files created during the review:
 
 ```bash
-rm -f /tmp/rc-codex-prompt.md /tmp/rc-gemini-prompt.md /tmp/rc-perplexity-payload.json /tmp/rc-perplexity-response.json
+rm -f /tmp/rc-*-prompt.* /tmp/rc-perplexity-payload.json /tmp/rc-perplexity-response.json
 ```
+
+Note: Subagents handle their own temp files, so this is a belt-and-suspenders cleanup for anything that leaked.
 
 ## Orchestration Rules
 
