@@ -6,7 +6,7 @@ Multi-agent convergence review for Claude Code. Multiple AI models independently
 
 Single-model code review has blind spots. Different models catch different things. Review Council runs multiple reviewers in parallel, compares their findings, and produces a single curated report where:
 
-- **Agreed findings** (both reviewers flagged) = high confidence
+- **Agreed findings** (multiple reviewers flagged) = high confidence
 - **Unique findings** (one reviewer) = worth considering
 - **Conflicts** (reviewers disagree) = both perspectives documented
 
@@ -113,7 +113,7 @@ Minimum 2 reviewers needed for convergence mode. With only Claude, runs in singl
 - [GitHub CLI](https://cli.github.com/) (`gh`) — for PR reviews (optional)
 - At least one additional reviewer for convergence mode:
   - [Codex CLI](https://github.com/openai/codex) — `npm install -g @openai/codex && codex login`
-  - [Gemini CLI](https://github.com/google/gemini-cli) — `npm install -g @anthropic-ai/gemini && gemini login`
+  - [Gemini CLI](https://github.com/google-gemini/gemini-cli) — `npm install -g @google/gemini-cli`
   - [Perplexity API key](https://www.perplexity.ai/) — set `PERPLEXITY_API_KEY` env var
 
 ### Install
@@ -272,7 +272,7 @@ This is planned for a future release.
 
 ## Adding New Reviewers (Extensibility)
 
-The architecture supports any model accessible via MCP:
+The architecture supports any model accessible via CLI or API:
 
 ```mermaid
 graph TB
@@ -284,25 +284,25 @@ graph TB
         C["Claude Subagent"]
     end
 
-    subgraph "MCP Transport Layer"
+    subgraph "CLI / MCP Transport Layer"
         direction TB
-        S1["stdio MCP"] --> X["Codex CLI"]
-        S2["stdio MCP"] --> G["Gemini CLI"]
-        S3["stdio MCP"] --> L["Ollama"]
-        S4["HTTP MCP"] --> A["Any API"]
+        S1["CLI / MCP"] --> X["Codex"]
+        S2["CLI / MCP"] --> G["Gemini"]
+        S3["API (curl)"] --> P["Perplexity"]
+        S4["CLI / MCP / API"] --> A["Any Model"]
     end
 
     O --> C
     O --> S1
-    O -.-> S2
-    O -.-> S3
+    O --> S2
+    O --> S3
     O -.-> S4
 
     style O fill:#7c3aed,color:#fff
     style C fill:#6366f1,color:#fff
     style X fill:#059669,color:#fff
-    style G fill:#94a3b8,color:#fff
-    style L fill:#94a3b8,color:#fff
+    style G fill:#059669,color:#fff
+    style P fill:#059669,color:#fff
     style A fill:#94a3b8,color:#fff
 ```
 

@@ -3,21 +3,21 @@
 ## Convergence Criteria
 
 Stop iterating when ANY of these are true:
-1. All findings are agreed upon by both reviewers
+1. All findings are agreed upon by all reviewers
 2. No new findings emerged in the latest round
 3. Maximum rounds (3) reached
 
 ## Round Logic
 
 ### Round 1: Independent Review
-- Both reviewers see the same context
-- Neither sees the other's review
+- All reviewers see the same context
+- None see each other's review
 - Ensures truly independent perspectives
 
 ### Round 2: Informed Revision
-- Both reviewers see Round 1 synthesis
+- All reviewers see Round 1 synthesis
 - Each can confirm, revise, or rebut findings
-- New findings from seeing the other's perspective are welcome
+- New findings from seeing other reviewers' perspectives are welcome
 
 ### Round 3: Final Resolution (rare)
 - Only if Round 2 introduced significant new disagreements
@@ -40,7 +40,8 @@ Keep the more specific/actionable version.
 
 ## Graceful Degradation
 
-If only one reviewer is available (Codex not configured):
+If only Claude is available (no other providers detected):
 - Run full process with Claude reviewer only
 - Orchestrator critically examines findings from a second perspective
 - Output clearly notes "single-reviewer mode"
+- Suggest running `/review-council:setup` to check provider availability

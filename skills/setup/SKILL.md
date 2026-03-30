@@ -28,7 +28,7 @@ which gemini 2>/dev/null && gemini --version
 ```
 - If found: "Gemini (CLI) .......... available"
 - If not found, check if Gemini MCP tool is available: "Gemini (MCP) .......... available"
-- If neither: "Gemini ................ not found — install: `npm install -g @anthropic-ai/gemini && gemini login`"
+- If neither: "Gemini ................ not found — install: `npm install -g @google/gemini-cli`"
 
 ### Perplexity
 ```bash
