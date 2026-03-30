@@ -79,74 +79,75 @@ Provide the full context package. Tell the reviewer what type of review this is 
 
 ### Reviewer: Codex — If Available
 
-**CLI mode** (preferred): Use the `Bash` tool to invoke Codex CLI. First, write the delegation prompt (from `rules/delegation-format.md`) to a temp file:
+**IMPORTANT:** Use an `Agent` subagent to invoke Codex. This keeps the full review response out of the orchestrator's context window — only the structured findings return.
 
-```bash
-cat > /tmp/rc-codex-prompt.md << 'PROMPT_EOF'
-[Insert full delegation prompt here]
-PROMPT_EOF
-```
+Dispatch a `general-purpose` Agent with this prompt:
 
-Then invoke Codex:
-
-```bash
-codex exec --full-auto -q "$(cat /tmp/rc-codex-prompt.md)"
-```
-
-**MCP mode** (fallback): Use the `mcp__codex__codex` tool. Send the delegation prompt following the format in `rules/delegation-format.md`.
-
-**If invocation fails** (CLI exits non-zero, MCP tool errors): Note in output that Codex was skipped this round. Do not retry — proceed with other reviewers.
+> You are invoking the Codex reviewer for a Review Council review. Your job is to call Codex, collect its response, and return the structured findings.
+>
+> **CLI mode** (preferred): Write the delegation prompt to a temp file, then invoke Codex:
+> ```bash
+> cat > /tmp/rc-codex-prompt.md << 'PROMPT_EOF'
+> [Insert full delegation prompt here]
+> PROMPT_EOF
+> codex exec --full-auto "$(cat /tmp/rc-codex-prompt.md)"
+> ```
+>
+> **MCP mode** (fallback): If CLI fails, use the `mcp__codex__codex` tool with the delegation prompt.
+>
+> **If both fail**: Return "SKIPPED: Codex unavailable — [error details]"
+>
+> Return the full structured review output (Findings, What's Good, Overall Assessment).
 
 ### Reviewer: Gemini — If Available
 
-**CLI mode** (preferred): Use the `Bash` tool to invoke Gemini CLI. First, write the delegation prompt to a temp file:
+**IMPORTANT:** Use an `Agent` subagent to invoke Gemini, same pattern as Codex — keeps the response out of the orchestrator's context.
 
-```bash
-cat > /tmp/rc-gemini-prompt.md << 'PROMPT_EOF'
-[Insert full delegation prompt here]
-PROMPT_EOF
-```
+Dispatch a `general-purpose` Agent with this prompt:
 
-Then invoke Gemini:
-
-```bash
-gemini -p "$(cat /tmp/rc-gemini-prompt.md)" -o text
-```
-
-**MCP mode** (fallback): Use the Gemini MCP tool if configured.
-
-**If invocation fails**: Note in output that Gemini was skipped. Proceed with other reviewers.
+> You are invoking the Gemini reviewer for a Review Council review. Your job is to call Gemini, collect its response, and return the structured findings.
+>
+> **CLI mode** (preferred): Write the delegation prompt to a temp file, then invoke Gemini:
+> ```bash
+> cat > /tmp/rc-gemini-prompt.md << 'PROMPT_EOF'
+> [Insert full delegation prompt here]
+> PROMPT_EOF
+> gemini -p "$(cat /tmp/rc-gemini-prompt.md)" -o text
+> ```
+>
+> **MCP mode** (fallback): If CLI fails, use the Gemini MCP tool if configured.
+>
+> **If both fail**: Return "SKIPPED: Gemini unavailable — [error details]"
+>
+> Return the full structured review output (Findings, What's Good, Overall Assessment).
 
 ### Reviewer: Perplexity — If Available
 
-Use the `Bash` tool to call the Sonar API. First, write the payload file with the delegation prompt:
+**IMPORTANT:** Use an `Agent` subagent to invoke Perplexity, same pattern — keeps the API response out of the orchestrator's context.
 
-```bash
-cat > /tmp/rc-perplexity-payload.json << 'PAYLOAD_EOF'
-{
-  "model": "sonar",
-  "messages": [{"role": "user", "content": "[Insert full delegation prompt here, JSON-escaped]"}]
-}
-PAYLOAD_EOF
-```
+Dispatch a `general-purpose` Agent with this prompt:
 
-Then invoke the API:
-
-```bash
-curl -fsS https://api.perplexity.ai/v1/chat/completions \
-  -H "Authorization: Bearer $PERPLEXITY_API_KEY" \
-  -H "Content-Type: application/json" \
-  -d @/tmp/rc-perplexity-payload.json \
-  -o /tmp/rc-perplexity-response.json
-```
-
-Then parse the response:
-
-```bash
-jq -er '.choices[0].message.content' /tmp/rc-perplexity-response.json
-```
-
-**If curl or jq fails**: Note in output that Perplexity was skipped. Proceed with other reviewers.
+> You are invoking the Perplexity reviewer for a Review Council review. Your job is to call the Sonar API, collect its response, and return the structured findings.
+>
+> Write the payload and call the API:
+> ```bash
+> cat > /tmp/rc-perplexity-payload.json << 'PAYLOAD_EOF'
+> {
+>   "model": "sonar",
+>   "messages": [{"role": "user", "content": "[Insert full delegation prompt here, JSON-escaped]"}]
+> }
+> PAYLOAD_EOF
+> curl -fsS https://api.perplexity.ai/v1/chat/completions \
+>   -H "Authorization: Bearer $PERPLEXITY_API_KEY" \
+>   -H "Content-Type: application/json" \
+>   -d @/tmp/rc-perplexity-payload.json \
+>   -o /tmp/rc-perplexity-response.json
+> jq -er '.choices[0].message.content' /tmp/rc-perplexity-response.json
+> ```
+>
+> **If curl or jq fails**: Return "SKIPPED: Perplexity unavailable — [error details]"
+>
+> Return the full structured review output (Findings, What's Good, Overall Assessment).
 
 ### Delegation Prompt
 
@@ -179,16 +180,13 @@ Spawn a new `reviewer-claude` agent. Provide the Round 1 synthesis and ask:
 - Flag any new concerns triggered by other reviewers' observations
 
 ### Codex (Round 2)
-
-**CLI mode**: Fresh `codex exec` call with the full original context + Round 1 synthesis. Include the Round 2 revision instructions from `rules/delegation-format.md`.
-
-**MCP mode**: Use `mcp__codex__codex-reply` with `threadId` from Round 1 to continue the thread.
+Dispatch a new `general-purpose` Agent subagent (same pattern as Round 1). Provide the full original context + Round 1 synthesis + Round 2 revision instructions from `rules/delegation-format.md`. For MCP mode, the subagent can use `mcp__codex__codex-reply` with `threadId` from Round 1 to continue the thread.
 
 ### Gemini (Round 2)
-Fresh CLI/MCP call with full context + Round 1 synthesis + revision instructions.
+Dispatch a new `general-purpose` Agent subagent with full context + Round 1 synthesis + revision instructions.
 
 ### Perplexity (Round 2)
-Fresh curl call with full context + Round 1 synthesis + revision instructions.
+Dispatch a new `general-purpose` Agent subagent with full context + Round 1 synthesis + revision instructions via Sonar API.
 
 ## Step 6: Round 3 (Rare — Only If Needed)
 

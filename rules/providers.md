@@ -19,7 +19,7 @@ Reference for the orchestrator. At runtime, probe each provider in order. Availa
   3. Neither — skip, note in report
 - **CLI invocation**: Write the delegation prompt to a temp file, then:
   ```bash
-  codex exec --full-auto -q "$(cat /tmp/rc-review-prompt.md)"
+  codex exec --full-auto "$(cat /tmp/rc-review-prompt.md)"
   ```
 - **MCP fallback**: `mcp__codex__codex` tool with delegation prompt as message
 - **Round 2 (CLI)**: Fresh `codex exec` call with full context + synthesis (no thread state)
