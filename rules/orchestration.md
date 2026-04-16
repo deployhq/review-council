@@ -45,3 +45,53 @@ If only Claude is available (no other providers detected):
 - Orchestrator critically examines findings from a second perspective
 - Output clearly notes "single-reviewer mode"
 - Suggest running `/review-council:setup` to check provider availability
+
+## Output Validation
+
+After each reviewer returns, validate its output before including in synthesis.
+
+### Section Presence
+
+The output must contain:
+- A `## Findings` section (or `### Findings`)
+- A `## Overall Assessment` section (or `### Overall Assessment`)
+
+### Field-Level Validation
+
+Each finding must include:
+- **Severity** (critical/important/suggestion)
+- **Location** (file:line or section reference)
+- **Recommendation** (concrete fix or alternative)
+
+Findings missing any required field mark the entire reviewer output as FAILED.
+
+### Outcomes
+
+- **VALID** — has required sections with properly structured findings
+- **CLEAN** — has required sections, reviewer explicitly found no issues ("No issues found" in Findings section). Valid but contributes no findings to synthesis. CLEAN counts toward the RC_MIN_REVIEWERS threshold.
+- **FAILED** — output is malformed, missing required sections, or findings lack required fields
+
+## Recovery Flow
+
+After Round 1 validation, the orchestrator reports results and determines next action.
+
+### Decision Logic
+
+1. **All VALID or CLEAN**: proceed to synthesis (no user prompt needed)
+2. **Some FAILED, enough remain (>= RC_MIN_REVIEWERS)**: ask the user conversationally — "Should I retry the failed reviewer(s) (will use additional tokens), proceed with the N successful reviews, or abort?"
+3. **Some FAILED, not enough remain (< RC_MIN_REVIEWERS)**: ask the user — "Should I retry the failed reviewer(s) (will use additional tokens), or abort? Proceeding without retry means single-reviewer mode."
+4. **All FAILED**: report the failure and abort. Do not retry automatically.
+
+### Retry Rules
+
+- **One retry attempt max** per reviewer per round. If a reviewer fails twice, mark it as unavailable and move on.
+- **Retried results merge into the Round 1 pool** before synthesis begins. All validated results (first-pass and retried) are treated identically.
+- **RC_AUTO_RETRY=true** skips the user prompt and retries failed reviewers automatically. Intended for CI/automated pipelines.
+
+## Environment Variables
+
+| Variable | Default | Purpose |
+|---|---|---|
+| `RC_CLAUDE_MAX_TURNS` | `30` | Max turns for Claude reviewer subagent |
+| `RC_MIN_REVIEWERS` | `2` | Minimum successful reviewers for council mode |
+| `RC_AUTO_RETRY` | `false` | If `true`, retry failed reviewers without asking |
