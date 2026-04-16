@@ -142,18 +142,18 @@ The existing 8-step flow is preserved. Changes:
 
 **Step 3 (Gather Context)** — Formalizes the baseline context package as an explicit, named artifact that all reviewers receive identically. No change to what's gathered, just clarity that this is the shared baseline.
 
-**Step 4 (Round 1 Dispatch)** — Two changes:
+**Step 3 (Round 1 Dispatch)** — Two changes:
 - Claude reviewer prompt now embeds the full baseline context + delegation format inline
 - All reviewers get the identical delegation prompt with baseline context
 
-**New Step 4.5 (Validate & Recover):**
+**New Step 3.5 (Validate & Recover):**
 - Validate each reviewer's output against required sections
-- Count valid / failed / needs-context results
-- If all valid/clean: proceed to Step 5
+- Count valid / failed / clean results
+- If all valid/clean: proceed to synthesis
 - If any failed: report to user conversationally, ask whether to retry/proceed/abort
 - If user chooses retry: re-dispatch only failed reviewers, validate again
 - One retry max per reviewer — fail twice, mark unavailable, move on
-- Retried results merge into the Round 1 pool before synthesis begins — all validated results (first-pass and retried) are treated identically in Step 5
+- Retried results merge into the Round 1 pool before synthesis begins — all validated results (first-pass and retried) are treated identically
 
 **Steps 5-8** — Unchanged, except synthesis only uses validated results.
 
