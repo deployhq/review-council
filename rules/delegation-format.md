@@ -8,6 +8,14 @@ When delegating to external models (Codex, Gemini, Perplexity, etc.), use this s
 ## TASK
 [What to review and in what capacity]
 
+## REVIEW PROCESS
+Follow these steps in order:
+1. **Understand intent** — What is this PR/code/plan trying to achieve? Read carefully before judging.
+2. **Evaluate correctness** — Does it achieve its stated goal? Are there logic errors, missed edge cases, or incorrect assumptions?
+3. **Identify risks** — What could go wrong in production? Consider security, performance, reliability, data integrity, and failure modes.
+4. **Check completeness** — What's missing? Error handling, tests, documentation, migration steps, rollback plans.
+5. **Assess design** — Is this the right approach? Is there a simpler way? Will this be maintainable in 6 months?
+
 ## CONTEXT
 [Full context: diff, file contents, plan text, etc.]
 
@@ -40,6 +48,7 @@ Different models have different defaults for verbosity, structure, and focus. Th
 - Sets clear boundaries on scope and quantity
 - Ensures every finding is actionable (not just "this looks wrong")
 - Makes deduplication possible across reviewers
+- Gives every reviewer the same structured methodology, not just the same constraints
 
 ## Round 2 — Revision Template
 
