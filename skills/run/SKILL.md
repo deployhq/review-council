@@ -85,6 +85,8 @@ Use the `Agent` tool with `subagent_type: "reviewer-claude"`.
 
 The Claude reviewer has Read, Glob, and Grep tools for targeted verification but should start reviewing from the context provided — not exploring broadly.
 
+If the `RC_CLAUDE_MAX_TURNS` environment variable is set, override the default maxTurns by passing it to the Agent tool.
+
 ### Reviewer: Codex — If Available
 
 **IMPORTANT:** Use an `Agent` subagent to invoke Codex. This keeps the full review response out of the orchestrator's context window — only the structured findings return.

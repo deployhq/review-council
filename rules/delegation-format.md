@@ -24,18 +24,24 @@ Follow these steps in order:
 
 ## CONSTRAINTS
 [Focus areas, what to ignore, limits]
+- For PRs: focus on what the change introduces, what it might break, and whether it achieves its stated goal
+- For plans: focus on feasibility, completeness, risks, and missing considerations
+- For code: focus on correctness, security, performance, error handling, and maintainability
 
 ## MUST DO
 - Provide specific line/section references
 - Explain WHY each finding matters
 - Suggest a concrete fix for each finding
 - Rate severity (critical/important/suggestion) and confidence (high/medium/low)
+- Explain WHY each finding matters — include the impact, not just the symptom (e.g., "This will crash because user can be null when session expires" not just "This could be better")
+- Quality over quantity — 3 important findings beat 10 nitpicks. If the code/plan is good, say so and keep findings minimal.
 
 ## MUST NOT DO
 - Flag style/formatting nitpicks
 - Flag pre-existing issues not in the diff
 - Provide vague feedback without actionable recommendations
 - Exceed 10 findings (focus on the most important)
+- Review pre-existing issues not in the diff — for PRs, only review what changed
 
 ## OUTPUT FORMAT
 Structured markdown with: Findings (severity, confidence, location, issue, recommendation), What's Good, Overall Assessment.
