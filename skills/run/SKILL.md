@@ -43,29 +43,31 @@ Analyze the user's input: `$ARGUMENTS`
 
 Announce your detection: "**Review Council** — Reviewing [PR #42: title | plan: path | code: path | staged changes]"
 
-## Step 2: Gather Context
+## Step 2: Gather Context — Baseline Context Package
 
-Collect context appropriate to the detected type. Be thorough — reviewers need full context.
+Collect context appropriate to the detected type. This becomes the **baseline context package** — the identical context every reviewer receives. Gather mechanically using exact commands; do not summarize or interpret.
 
 **PR review:**
-- PR title, description, base/head branches
-- Full diff (`gh pr diff <number>`)
+- PR metadata: `gh pr view <number> --json title,body,baseRefName,headRefName,changedFiles,additions,deletions,reviewDecision,comments,reviews`
+- Full diff: `gh pr diff <number>`
 - List of changed files with additions/deletions
+- Git log for changed files: `git log --oneline -10 -- <changed_files>`
+- Git blame for changed hunks: `git blame -L <start>,<end> -- <file>` for each changed hunk
 - Any existing review comments or discussions
-- The project's CLAUDE.md or README for conventions (if present)
+- Project conventions: raw contents of CLAUDE.md, CONTRIBUTING.md, README (if present)
 
 **Plan/document review:**
 - Full document content
 - Any documents referenced or linked (ADRs, related plans)
-- Project context: CLAUDE.md, README, relevant existing code
+- Project conventions: raw contents of CLAUDE.md, CONTRIBUTING.md, README (if present)
 
 **Code review:**
 - Full file contents (or diff if reviewing changes)
-- Related files: imports, type definitions, tests
-- Recent git history for context: `git log --oneline -10 -- <files>`
-- Project context: CLAUDE.md, README
+- Git log for changed files: `git log --oneline -10 -- <files>`
+- Git blame for changed hunks
+- Project conventions: raw contents of CLAUDE.md, CONTRIBUTING.md, README (if present)
 
-Prepare a **context package** — a clear, structured summary of everything the reviewers need. You will send this same package to each reviewer to ensure they review the same material.
+Package this as a structured text block. You will send this same package to each reviewer — this is the shared baseline. Reviewers may explore further using their own tools, but the baseline ensures equal starting context.
 
 ## Step 3: Round 1 — Independent Review (Parallel)
 
@@ -75,7 +77,13 @@ Launch **all available reviewers in parallel**. They must not see each other's o
 
 Use the `Agent` tool with `subagent_type: "reviewer-claude"`.
 
-Provide the full context package. Tell the reviewer what type of review this is (PR, plan, or code).
+**Embed the full baseline context package and delegation prompt directly in the Agent tool's `prompt` parameter.** Build the prompt using the delegation format from `rules/delegation-format.md` with:
+- TASK: the review type and what to review
+- REVIEW PROCESS: included in the delegation format template
+- CONTEXT: the complete baseline context package gathered in Step 2
+- EXPECTED OUTCOME, CONSTRAINTS, MUST DO, MUST NOT DO, OUTPUT FORMAT: from the delegation format template
+
+The Claude reviewer has Read, Glob, and Grep tools for targeted verification but should start reviewing from the context provided — not exploring broadly.
 
 ### Reviewer: Codex — If Available
 
@@ -149,7 +157,56 @@ Dispatch a `general-purpose` Agent with this prompt:
 
 ### Delegation Prompt
 
-For all non-Claude reviewers, use the delegation format from `rules/delegation-format.md`. The prompt is identical for every provider — only the transport differs.
+For **all** reviewers (including Claude), use the delegation format from `rules/delegation-format.md`. The prompt structure and review criteria are identical for every provider — only the transport differs. The baseline context package from Step 2 goes into the CONTEXT section.
+
+## Step 3.5: Validate Round 1 Results & Recover
+
+Before synthesis, validate each reviewer's output. Refer to `rules/orchestration.md` for full validation rules.
+
+### Validate
+
+For each reviewer's response:
+1. Check for `## Findings` (or `### Findings`) section — present?
+2. Check for `## Overall Assessment` (or `### Overall Assessment`) section — present?
+3. If Findings section exists and contains findings, check each finding has: **Severity**, **Location**, **Recommendation**
+4. If Findings section says "No issues found" or equivalent — mark as CLEAN
+5. If sections are missing or findings lack required fields — mark as FAILED
+
+### Report & Recover
+
+Count VALID, CLEAN, and FAILED results.
+
+**If all VALID or CLEAN:** Announce results and proceed to Step 4.
+
+```
+Round 1 complete. All N reviewers produced valid output:
+  Claude   [ok]  3 findings
+  Codex    [ok]  5 findings
+  Gemini   [clean]  no issues found
+```
+
+**If any FAILED but enough remain (>= RC_MIN_REVIEWERS, default 2):**
+
+Report the status and ask the user conversationally:
+
+"Round 1 complete: [list results]. N of M reviewers succeeded. Should I retry the failed reviewer(s) (will use additional tokens), proceed with the N successful reviews, or abort?"
+
+If `RC_AUTO_RETRY` is set to `true`, skip the prompt and retry automatically.
+
+**If any FAILED and not enough remain (< RC_MIN_REVIEWERS):**
+
+"Round 1 complete: [list results]. Only N reviewer(s) succeeded — council mode requires RC_MIN_REVIEWERS. Should I retry the failed reviewer(s) (will use additional tokens), or abort? Proceeding without retry means single-reviewer mode."
+
+**If all FAILED:** Report the failure and abort.
+
+### Retry
+
+If retrying:
+- Re-dispatch only the FAILED reviewers using the same dispatch method as Round 1
+- Validate the retry results using the same checks
+- **One retry max per reviewer** — if it fails again, mark as unavailable
+- Merge all validated results (first-pass and retried) into a single pool
+- Proceed to Step 4 with the merged pool
 
 ## Step 4: Analyze Round 1 Results
 
