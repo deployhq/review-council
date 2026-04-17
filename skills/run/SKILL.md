@@ -77,15 +77,56 @@ Launch **all available reviewers in parallel**. They must not see each other's o
 
 Use the `Agent` tool with `subagent_type: "reviewer-claude"`.
 
-**Embed the full baseline context package and delegation prompt directly in the Agent tool's `prompt` parameter.** Build the prompt using the delegation format from `rules/delegation-format.md` with:
-- TASK: the review type and what to review
-- REVIEW PROCESS: included in the delegation format template
-- CONTEXT: the complete baseline context package gathered in Step 2
-- EXPECTED OUTCOME, CONSTRAINTS, MUST DO, MUST NOT DO, OUTPUT FORMAT: from the delegation format template
-
-The Claude reviewer has Read, Glob, and Grep tools for targeted verification but should start reviewing from the context provided — not exploring broadly.
-
 If the `RC_CLAUDE_MAX_TURNS` environment variable is set, override the default maxTurns by passing it to the Agent tool.
+
+**IMPORTANT:** Embed the full baseline context package and delegation prompt directly in the Agent tool's `prompt` parameter. Use this exact template — fill in the bracketed sections with the actual content:
+
+> ## TASK
+> [Review type]: Review the following [PR/plan/code] as one member of a multi-agent review council. Other AI models are reviewing the same material simultaneously.
+>
+> ## REVIEW PROCESS
+> Follow these steps in order:
+> 1. **Understand intent** — What is this PR/code/plan trying to achieve? Read carefully before judging.
+> 2. **Evaluate correctness** — Does it achieve its stated goal? Are there logic errors, missed edge cases, or incorrect assumptions?
+> 3. **Identify risks** — What could go wrong in production? Consider security, performance, reliability, data integrity, and failure modes.
+> 4. **Check completeness** — What's missing? Error handling, tests, documentation, migration steps, rollback plans.
+> 5. **Assess design** — Is this the right approach? Is there a simpler way? Will this be maintainable in 6 months?
+>
+> ## CONTEXT
+> [Paste the COMPLETE baseline context package here — full diff, file contents, git log, git blame, project conventions. Do NOT summarize or truncate.]
+>
+> ## CONSTRAINTS
+> - For PRs: focus on what the change introduces, what it might break, and whether it achieves its stated goal
+> - For plans: focus on feasibility, completeness, risks, and missing considerations
+> - For code: focus on correctness, security, performance, error handling, and maintainability
+> - You have Read, Glob, and Grep tools available. Use them ONLY to verify specific concerns (e.g., check callers of a changed function, verify a type definition). Do NOT explore the codebase broadly — start from the context above.
+>
+> ## MUST DO
+> - Provide specific file:line or section references
+> - Explain WHY each finding matters — include the impact, not just the symptom
+> - Suggest a concrete fix for each finding
+> - Rate severity (critical/important/suggestion) and confidence (high/medium/low)
+> - Quality over quantity — 3 important findings beat 10 nitpicks
+>
+> ## MUST NOT DO
+> - Flag style/formatting nitpicks
+> - Flag pre-existing issues not in the diff — only review what changed
+> - Provide vague feedback without actionable recommendations
+> - Exceed 10 findings
+> - Explore the codebase broadly instead of reviewing the provided context
+>
+> ## OUTPUT FORMAT
+> You MUST produce output with these exact sections:
+>
+> ### Findings
+> For each finding (max 10): Severity, Confidence, Location, Issue, Why it matters, Recommendation.
+> If no issues: write "No issues found."
+>
+> ### What's Good
+> Brief list of things done well.
+>
+> ### Overall Assessment
+> One paragraph: readiness, biggest risk, most important thing to address.
 
 ### Reviewer: Codex — If Available
 
