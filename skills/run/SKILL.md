@@ -99,7 +99,7 @@ If the `RC_CLAUDE_MAX_TURNS` environment variable is set, override the default m
 > - For PRs: focus on what the change introduces, what it might break, and whether it achieves its stated goal
 > - For plans: focus on feasibility, completeness, risks, and missing considerations
 > - For code: focus on correctness, security, performance, error handling, and maintainability
-> - You have Read, Glob, and Grep tools available. Use them ONLY to verify specific concerns (e.g., check callers of a changed function, verify a type definition). Do NOT explore the codebase broadly — start from the context above.
+> - You have Read, Glob, and Grep tools available. Review the provided context and produce your structured findings FIRST. Then use tools to verify concerns and explore for issues the context may have missed (e.g., check callers of a changed function, look for side effects). Always produce your structured output — exploration supplements the review, it does not replace it.
 >
 > ## MUST DO
 > - Provide specific file:line or section references
@@ -113,7 +113,7 @@ If the `RC_CLAUDE_MAX_TURNS` environment variable is set, override the default m
 > - Flag pre-existing issues not in the diff — only review what changed
 > - Provide vague feedback without actionable recommendations
 > - Exceed 10 findings
-> - Explore the codebase broadly instead of reviewing the provided context
+> - Explore the codebase without first reviewing the provided context and producing findings
 >
 > ## OUTPUT FORMAT
 > You MUST produce output with these exact sections:
