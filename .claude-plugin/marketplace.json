@@ -7,24 +7,7 @@
   "plugins": [
     {
       "name": "review-council",
-      "source": "./",
-      "description": "Multi-agent convergence review — multiple AI models discuss and converge on a curated list of findings.",
-      "version": "0.3.1",
-      "author": {
-        "name": "DeployHQ",
-        "url": "https://github.com/deployhq"
-      },
-      "homepage": "https://github.com/deployhq/review-council",
-      "repository": "https://github.com/deployhq/review-council",
-      "license": "MIT",
-      "keywords": [
-        "code-review",
-        "multi-agent",
-        "convergence",
-        "pr-review",
-        "plan-review",
-        "adversarial-review"
-      ]
+      "source": "./"
     }
   ]
 }

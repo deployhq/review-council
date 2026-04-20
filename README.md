@@ -59,7 +59,10 @@ flowchart TD
     J2 --> K
     J3 --> K
 
-    K --> L{Disagreements?}
+    K --> K2{Validate outputs}
+    K2 -->|"All valid"| L{Disagreements?}
+    K2 -->|"Some failed"| K3["Retry (1x max)<br/>or ask user"]
+    K3 --> L
     L -->|"Yes"| M["Round 2: Share synthesis, revise"]
     L -->|"No"| N["Final Report"]
 
@@ -76,9 +79,13 @@ flowchart TD
     style J3 fill:#059669,color:#fff
     style N fill:#16a34a,color:#fff
     style P fill:#d97706,color:#fff
+    style K2 fill:#d97706,color:#fff
+    style K3 fill:#d97706,color:#fff
 ```
 
 **Auto-detection** means you usually just run `/review-council:run` with no arguments. It checks for an open PR on the current branch, then staged changes, then unstaged changes.
+
+**Output validation.** After Round 1, each reviewer's response is checked for required sections and fields. Malformed responses are retried once; if still failing, the orchestrator asks whether to proceed with the remaining reviewers or abort. Set `RC_AUTO_RETRY=true` to skip the prompt (useful in CI).
 
 ## Reviewers
 
@@ -125,10 +132,21 @@ Minimum 2 reviewers needed for convergence mode. With only Claude, runs in singl
 
 Providers are auto-detected at runtime. Run `/review-council:setup` to check which providers are available.
 
+### Configuration
+
+Optional environment variables for tuning behavior:
+
+| Variable | Default | Purpose |
+|----------|---------|---------|
+| `RC_MIN_REVIEWERS` | `2` | Minimum successful reviewers required for council mode |
+| `RC_AUTO_RETRY` | `false` | If `true`, retry failed reviewers without asking (CI-friendly) |
+| `RC_CLAUDE_MAX_TURNS` | `30` | Max turns for the Claude reviewer subagent |
+| `PERPLEXITY_API_KEY` | — | Enables Perplexity reviewer via Sonar API |
+
 ### Uninstall
 
 ```bash
-/review-council:uninstall    # Remove MCP configuration
+/review-council:uninstall    # Prompts to remove Codex MCP server entry from ~/.claude/settings.json
 /plugin uninstall review-council
 ```
 
@@ -189,10 +207,9 @@ review-council/
 ├── agents/
 │   └── reviewer-claude.md   # Claude reviewer persona
 ├── rules/
-│   ├── orchestration.md     # Convergence logic
+│   ├── orchestration.md     # Convergence logic, validation, env vars
 │   ├── delegation-format.md # External model prompt format
 │   └── providers.md         # Provider registry
-├── docs/                    # Specs and plans
 ├── CLAUDE.md                # Plugin instructions
 ├── LICENSE                  # MIT
 └── README.md                # This file
@@ -218,6 +235,9 @@ sequenceDiagram
     G-->>-O: Findings + assessment
     P-->>-O: Findings + assessment
 
+    Note over O: Validate — required sections/fields present?
+    O->>O: Retry failed reviewers once (or ask user)
+
     Note over O: Synthesize — merge, deduplicate, categorize
     O->>O: Agreed / Unique / Conflicting
 
@@ -241,7 +261,7 @@ sequenceDiagram
 
 **Why parallel independent reviews?** If reviewers see each other's output, they anchor on the first response. Independent review ensures genuinely different perspectives, then convergence rounds resolve differences.
 
-**Why a structured delegation format?** Different models have different defaults. The 7-section format (TASK, CONTEXT, EXPECTED OUTCOME, CONSTRAINTS, MUST DO, MUST NOT DO, OUTPUT FORMAT) forces consistent, comparable output regardless of the model.
+**Why a structured delegation format?** Different models have different defaults. The delegation format (TASK, REVIEW PROCESS, CONTEXT, EXPECTED OUTCOME, CONSTRAINTS, MUST DO, MUST NOT DO, OUTPUT FORMAT) forces consistent, comparable output regardless of the model. See `rules/delegation-format.md` for the full template.
 
 **Why max 3 rounds?** Research shows rounds 1-2 catch 90%+ of issues. Round 3 has diminishing returns. Beyond 3 rounds, unresolved disagreements are better presented as "dissenting opinions" than debated further.
 

@@ -62,9 +62,12 @@ Minimum 2 reviewers needed for convergence mode. With only Claude, runs in singl
 
 ```
 review-council/
-  .claude-plugin/     Plugin metadata
+  .claude-plugin/     Plugin metadata (plugin.json is the single source of truth for version)
   skills/             Slash commands (run, setup, uninstall)
   agents/             Subagent definitions (Claude reviewer persona)
   rules/              Orchestration logic, delegation format, provider registry
-  docs/               Specs and plans
 ```
+
+## Versioning
+
+Bump the `version` field in `.claude-plugin/plugin.json` whenever you ship a bug fix or new feature (semver: patch for fixes, minor for features, major for breaking changes). `marketplace.json` inherits from `plugin.json` via strict-mode merge — do not duplicate the version there. Pair the bump with a `chore: bump version to X.Y.Z` commit after the change.
