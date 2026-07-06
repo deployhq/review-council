@@ -23,10 +23,10 @@ Multi-agent convergence review plugin for Claude Code. Multiple AI reviewers ind
 |----------|-----------|-----------|
 | Claude | Native subagent | Always available |
 | Codex | CLI (`codex exec`) / MCP fallback | `which codex` or MCP tool |
-| Gemini | CLI (`gemini`) / MCP fallback | `which gemini` or MCP tool |
+| Google (Antigravity / Gemini) | CLI — `agy` preferred, `gemini` fallback | `which agy` or `which gemini` |
 | Perplexity | Sonar API (`curl`) | `PERPLEXITY_API_KEY` env var |
 
-Minimum 2 reviewers needed for convergence mode. With only Claude, runs in single-reviewer mode.
+Minimum 2 reviewers needed for convergence mode. With only Claude, runs in single-reviewer mode. Antigravity and Gemini share one Google slot (`agy` preferred, `gemini` fallback) — they count as one reviewer, not two.
 
 ## Architecture
 
@@ -42,7 +42,7 @@ Minimum 2 reviewers needed for convergence mode. With only Claude, runs in singl
       +---> Round 1 (parallel) ------+
       |     - Claude (subagent)      |
       |     - Codex (CLI/MCP)        |
-      |     - Gemini (CLI/MCP)       |
+      |     - Google (agy→gemini)    |
       |     - Perplexity (API)       |
       |<-----------------------------+
       |

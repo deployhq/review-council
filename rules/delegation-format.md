@@ -1,6 +1,6 @@
 # Delegation Format
 
-When delegating to external models (Codex, Gemini, Perplexity, etc.), use this structured format to ensure consistent, comparable output regardless of the model's defaults.
+When delegating to external models (Codex, Antigravity, Gemini, Perplexity, etc.), use this structured format to ensure consistent, comparable output regardless of the model's defaults.
 
 ## Template
 
