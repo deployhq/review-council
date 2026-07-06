@@ -145,7 +145,7 @@ Dispatch a `general-purpose` Agent with this prompt:
 > **Step 2: Invoke Codex.** Write the delegation prompt to `/tmp/rc-codex-prompt.md`, then use the syntax you discovered to run Codex in non-interactive/full-auto mode with the prompt content.
 >
 > **Reliability rules — apply to every CLI call (see `rules/orchestration.md` → "Reviewer Timeouts & Fast-Fail"):**
-> - Wrap each invocation with a hard timeout so it can't hang forever. Resolve the binary first (it may be `timeout` or, on macOS, `gtimeout`, or absent), then use a portable `if`/`else` (works in bash, sh, and zsh): `TO="$(command -v timeout || command -v gtimeout || true)"` then `if [ -n "$TO" ]; then "$TO" "${RC_REVIEWER_TIMEOUT:-300}" codex …; else codex …; fi`. Exit code 124 = timed out = failure. Do NOT use `${TO:+$TO 300}` — it word-splits in bash but not zsh. If no timeout binary exists, run bare but still obey the next two rules strictly.
+> - Wrap each invocation with a hard timeout so it can't hang forever. Resolve the binary first (it may be `timeout` or, on macOS, `gtimeout`, or absent), then use a portable `if`/`else` (works in bash, sh, and zsh): `TO="$(command -v timeout || command -v gtimeout || true)"` then `if [ -n "$TO" ]; then "$TO" "${RC_REVIEWER_TIMEOUT:-600}" codex …; else codex …; fi`. Exit code 124 = timed out = failure. Do NOT use `${TO:+$TO 600}` — it word-splits in bash but not zsh. If no timeout binary exists, run bare but still obey the next two rules strictly.
 > - Do NOT loop with compounding retries. At most ONE retry, and only for a single clearly-transient blip (e.g. one network hiccup).
 > - Fast-fail immediately (return the SKIPPED sentinel, no further retries) when the output or error shows an auth failure (`not authenticated`, login/OAuth errors), a quota/rate cap (HTTP 429, `exhausted your … quota`, `rate limit`), or persistent overload (HTTP 503 / `high demand` past the timeout). A dead provider must fail in minutes, not tens of minutes.
 >
@@ -165,12 +165,12 @@ Dispatch a `general-purpose` Agent with this prompt. Pass the ordered tool list 
 >
 > For each tool in order:
 >
-> **Step 1: Discover CLI syntax.** Run `<tool> --help` to learn the available subcommands and flags. Do NOT assume any specific flags exist — always derive the correct invocation from the help output. (Hints verified against agy 1.0.16: `agy -p "<prompt>"` runs one prompt non-interactively and prints the response; optional `--add-dir <repo>`, `--model <name>`, and `--dangerously-skip-permissions` to avoid blocking on approvals in a non-TTY — agy print mode self-limits via `--print-timeout`, default 5m. `gemini` uses `gemini -p "<prompt>"` and may need `--skip-trust` or `GEMINI_CLI_TRUST_WORKSPACE=true` for headless/non-TTY runs.)
+> **Step 1: Discover CLI syntax.** Run `<tool> --help` to learn the available subcommands and flags. Do NOT assume any specific flags exist — always derive the correct invocation from the help output. (Hints verified against agy 1.0.16: `agy -p "<prompt>"` runs one prompt non-interactively and prints the response; optional `--add-dir <repo>`, `--model <name>`, and `--dangerously-skip-permissions` to avoid blocking on approvals in a non-TTY — agy print mode self-limits via `--print-timeout` (default 5m) — for the default 10m budget, pass `--print-timeout 10m` (or match `RC_REVIEWER_TIMEOUT`) so agy doesn't cut off before the outer timeout. `gemini` uses `gemini -p "<prompt>"` and may need `--skip-trust` or `GEMINI_CLI_TRUST_WORKSPACE=true` for headless/non-TTY runs.)
 >
 > **Step 2: Invoke the tool.** Write the delegation prompt to `/tmp/rc-google-prompt.md`, then use the syntax you discovered to run the tool in non-interactive mode with the prompt content and text output.
 >
 > **Reliability rules — apply to every CLI call (see `rules/orchestration.md` → "Reviewer Timeouts & Fast-Fail"):**
-> - Wrap each invocation with a hard timeout so it can't hang forever. Resolve the binary first (it may be `timeout` or, on macOS, `gtimeout`, or absent), then use a portable `if`/`else` (works in bash, sh, and zsh): `TO="$(command -v timeout || command -v gtimeout || true)"` then `if [ -n "$TO" ]; then "$TO" "${RC_REVIEWER_TIMEOUT:-300}" <tool> …; else <tool> …; fi`. Exit code 124 = timed out = failure. Do NOT use `${TO:+$TO 300}` — it word-splits in bash but not zsh. If no timeout binary exists, run bare but still obey the next two rules strictly.
+> - Wrap each invocation with a hard timeout so it can't hang forever. Resolve the binary first (it may be `timeout` or, on macOS, `gtimeout`, or absent), then use a portable `if`/`else` (works in bash, sh, and zsh): `TO="$(command -v timeout || command -v gtimeout || true)"` then `if [ -n "$TO" ]; then "$TO" "${RC_REVIEWER_TIMEOUT:-600}" <tool> …; else <tool> …; fi`. Exit code 124 = timed out = failure. Do NOT use `${TO:+$TO 600}` — it word-splits in bash but not zsh. If no timeout binary exists, run bare but still obey the next two rules strictly.
 > - Do NOT loop with compounding retries. At most ONE retry per tool, and only for a single clearly-transient blip (e.g. one network hiccup). Do NOT chase a provider's own model auto-fallback across many backoff attempts.
 > - Fast-fail a tool immediately (move to the next tool, no further retries) when the output or error shows an auth failure (`no longer supported`, `not authenticated`, `please migrate to the Antigravity`, `secret keyring is locked`), a quota/rate cap (HTTP 429, `exhausted your daily quota`, `TerminalQuotaError`, `rate limit`), or persistent overload (HTTP 503 / `high demand` past the timeout). A dead provider must fail in minutes, not tens of minutes.
 >
@@ -198,7 +198,7 @@ Dispatch a `general-purpose` Agent with this prompt:
 >
 > **Step 2: Call the API:**
 > ```bash
-> curl -fsS --max-time "${RC_REVIEWER_TIMEOUT:-300}" https://api.perplexity.ai/v1/chat/completions \
+> curl -fsS --max-time "${RC_REVIEWER_TIMEOUT:-600}" https://api.perplexity.ai/v1/chat/completions \
 >   -H "Authorization: Bearer $PERPLEXITY_API_KEY" \
 >   -H "Content-Type: application/json" \
 >   -d @/tmp/rc-perplexity-payload.json \
