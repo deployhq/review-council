@@ -92,12 +92,21 @@ After Round 1 validation, the orchestrator reports results and determines next a
 
 CLI and API reviewers must fail fast. A single overloaded or quota-capped provider must never stall the council — a dead provider should return `SKIPPED` in minutes, not tens of minutes. Every CLI/API reviewer subagent (Codex, the Google slot's `agy`/`gemini`, Perplexity) follows these rules:
 
-1. **Hard per-invocation timeout.** Wrap every CLI call with a timeout so a single call can't hang forever. Resolve the binary first — GNU `timeout` is not always present (notably on macOS without coreutils, where it may be `gtimeout`). Use an explicit `if`/`else` (portable across bash, sh, and zsh — do **not** use `${TO:+$TO 600}`, which word-splits in bash but stays one word in zsh):
+1. **Hard per-invocation timeout — never run a CLI unbounded.** Cap every CLI call. Prefer a tool-native cap when one exists (`curl --max-time`, agy's `--print-timeout`); otherwise wrap with `timeout`/`gtimeout`; and if **neither binary is present** (e.g. a stock macOS with no coreutils), use a pure-shell watchdog so the call still can't hang forever. Resolve the binary first and use an explicit `if`/`else` (portable across bash, sh, and zsh — do **not** use `${TO:+$TO 600}`, which word-splits in bash but stays one word in zsh):
    ```bash
+   cap="${RC_REVIEWER_TIMEOUT:-600}"
    TO="$(command -v timeout || command -v gtimeout || true)"
-   if [ -n "$TO" ]; then "$TO" "${RC_REVIEWER_TIMEOUT:-600}" <cli> …; else <cli> …; fi
+   if [ -n "$TO" ]; then
+     "$TO" "$cap" <cli> … > out.txt 2>&1; rc=$?
+   else
+     # no timeout binary — background + watchdog so the call is never unbounded
+     <cli> … > out.txt 2>&1 & pid=$!
+     ( sleep "$cap"; kill -TERM "$pid" 2>/dev/null ) >/dev/null 2>&1 & wd=$!
+     wait "$pid"; rc=$?; kill "$wd" 2>/dev/null
+   fi
+   # rc != 0 (124 timeout / 143 SIGTERM / provider error) = failure for this invocation
    ```
-   A timeout (exit code 124) counts as a failure for that invocation. For `curl`, prefer its built-in `--max-time ${RC_REVIEWER_TIMEOUT:-600}` (no external binary needed). If a CLI has its own internal wait (e.g. agy's `--print-timeout`, default 5m), raise it to match the budget or it will cut off before the wrapper does. If no timeout binary is available and you can't wrap the call, still enforce rules 2–3 strictly — the retry cap and fast-fail are what actually prevent a multi-hour hang.
+   For `curl`, its built-in `--max-time ${RC_REVIEWER_TIMEOUT:-600}` already caps it (no external binary needed). If a CLI has its own internal wait (e.g. agy's `--print-timeout`, default 5m), raise it to match the budget or it will cut off before the wrapper. The watchdog guarantees a cap even with no `timeout`/`gtimeout`; do **not** fall back to a bare, uncapped invocation — that reopens the exact hang this section prevents.
 2. **No compounding retries.** At most **one** retry per tool, and only for a single clearly-transient blip (e.g. one network hiccup). Never chase a provider's own model auto-fallback across many backoff attempts — that is what turned one dead provider into an ~84-minute hang.
 3. **Fast-fail (return `SKIPPED` immediately, no retry)** when the output or error indicates a non-transient condition:
    - **Auth failure** — e.g. `no longer supported`, `not authenticated`, `please migrate to the Antigravity`, `secret keyring is locked`, login/OAuth errors.

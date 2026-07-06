@@ -71,7 +71,7 @@ Backward-compatible Google reviewer. Note: Gemini CLI's consumer "Sign in with G
 
 `agy` (Antigravity) and `gemini` run the same Gemini model family, so they share **one** reviewer slot — never dispatch both as separate votes (it would skew convergence). Resolve the slot at detection time:
 
-- Both installed → try `agy` first, fall back to `gemini` if `agy` is absent or fast-fails. Counts as **one** reviewer.
+- Both installed → try `agy` first, fall back to `gemini` if `agy` is absent, fast-fails, **or returns empty/malformed output** (e.g. `agy -p` exiting 0 with no stdout in a non-TTY). Counts as **one** reviewer.
 - Only one installed → use it.
 - Neither → the Google slot is unavailable; note it in the report.
 
