@@ -22,13 +22,20 @@ which codex 2>/dev/null && codex --version
 - If not found, check if `mcp__codex__codex` tool is available: "Codex (MCP) ........... available"
 - If neither: "Codex ................. not found — install: `npm install -g @openai/codex && codex login`"
 
-### Gemini
+### Google (Antigravity / Gemini)
+
+One reviewer slot shared by both Google CLIs — `agy` (Antigravity) is preferred, `gemini` is the fallback.
+
 ```bash
+which agy 2>/dev/null && agy --version
 which gemini 2>/dev/null && gemini --version
 ```
-- If found: "Gemini (CLI) .......... available"
-- If not found, check if Gemini MCP tool is available: "Gemini (MCP) .......... available"
-- If neither: "Gemini ................ not found — install: `npm install -g @google/gemini-cli`"
+- Both found: "Google (agy → gemini) . available" — `agy` runs, `gemini` is the fallback
+- Only `agy`: "Google (Antigravity) .. available"
+- Only `gemini`: "Google (Gemini) ....... available"
+- Neither: "Google ................ not found — install Antigravity: `curl -fsSL https://antigravity.google/cli/install.sh | bash`"
+
+Note: Gemini CLI's consumer "Sign in with Google" was sunset 2026-06-18 — Gemini CLI now needs a `GEMINI_API_KEY`, Vertex AI, or an enterprise Gemini Code Assist license. Antigravity (`agy`) is the current path for Google-account sign-in.
 
 ### Perplexity
 ```bash
@@ -54,13 +61,15 @@ Review Council — Provider Status
 Reviewers:
   - Claude (native) ........... always available
   - Codex ..................... [available (CLI) | available (MCP) | not found]
-  - Gemini ................... [available (CLI) | available (MCP) | not found]
+  - Google (agy / gemini) ..... [available (agy → gemini) | available (Antigravity) | available (Gemini) | not found]
   - Perplexity ............... [available (API) | not configured]
 
 Prerequisites:
   - GitHub CLI (gh) ........... [authenticated | not found]
 
-[N] of 4 reviewers available. [Convergence mode ready. | Single-reviewer mode — install at least one additional provider.]
+[N] of 4 reviewer slots available. [Convergence mode ready. | Single-reviewer mode — install at least one additional provider.]
+
+(Antigravity and Gemini share the Google slot — `agy` preferred, `gemini` fallback — so they count as one reviewer, not two.)
 
 Usage:
   /review-council:run              auto-detect target
@@ -74,4 +83,4 @@ Usage:
 If fewer than 2 providers are available, suggest the easiest one to add based on what the user likely already has:
 - If they have Node.js: suggest Codex (`npm install -g @openai/codex`)
 - If they have a Perplexity account: suggest setting the API key
-- Otherwise: suggest Gemini
+- Otherwise: suggest Antigravity (`curl -fsSL https://antigravity.google/cli/install.sh | bash`) — the current Google-account path. (The deprecated `npm install -g @google/gemini-cli` still works only with a `GEMINI_API_KEY`, Vertex, or enterprise Code Assist license.)

@@ -1,5 +1,6 @@
 {
   "name": "review-council-marketplace",
+  "description": "Review Council — multi-agent convergence review. Multiple AI reviewers (Claude, Codex, Antigravity/Gemini, Perplexity) independently analyze your PR, code, or plan, then converge on a curated, prioritized findings list.",
   "owner": {
     "name": "DeployHQ",
     "url": "https://github.com/deployhq"

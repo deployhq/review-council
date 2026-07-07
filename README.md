@@ -51,7 +51,7 @@ flowchart TD
 
     H --> I["Claude Subagent"]
     H --> J["Codex (CLI/MCP)"]
-    H --> J2["Gemini (CLI/MCP)"]
+    H --> J2["Google (Antigravity / Gemini)"]
     H --> J3["Perplexity (API)"]
 
     I --> K["Synthesize"]
@@ -93,7 +93,7 @@ flowchart TD
 graph LR
     O["Orchestrator<br/>(Claude Code)"] -->|subagent| C["Claude<br/>Reviewer"]
     O -->|"CLI / MCP"| X["Codex<br/>Reviewer"]
-    O -->|"CLI / MCP"| G["Gemini<br/>Reviewer"]
+    O -->|"CLI (agy → gemini)"| G["Google<br/>Reviewer"]
     O -->|"API"| P["Perplexity<br/>Reviewer"]
 
     style O fill:#7c3aed,color:#fff
@@ -107,10 +107,12 @@ graph LR
 |----------|-----------|-----------|
 | **Claude** | Native subagent | Always available |
 | **Codex** (OpenAI) | CLI (`codex exec`) / MCP fallback | `which codex` or MCP tool |
-| **Gemini** (Google) | CLI (`gemini`) / MCP fallback | `which gemini` or MCP tool |
+| **Google** (Antigravity / Gemini) | CLI — `agy` preferred, `gemini` fallback | `which agy` or `which gemini` |
 | **Perplexity** | Sonar API (`curl`) | `PERPLEXITY_API_KEY` env var |
 
 Minimum 2 reviewers needed for convergence mode. With only Claude, runs in single-reviewer mode. Providers are auto-detected at runtime — no manual configuration needed.
+
+**Google slot:** Antigravity (`agy`) and Gemini (`gemini`) run the same Gemini model family, so they share **one** reviewer slot. When both are installed, `agy` runs and `gemini` is the fallback — never two Google votes. Google's consumer Gemini CLI "Sign in with Google" was [sunset on 2026-06-18](https://developers.googleblog.com/an-important-update-transitioning-gemini-cli-to-antigravity-cli/) in favor of the Antigravity CLI; Gemini CLI still works with a `GEMINI_API_KEY`, Vertex AI, or an enterprise Code Assist license.
 
 ## Setup
 
@@ -120,7 +122,8 @@ Minimum 2 reviewers needed for convergence mode. With only Claude, runs in singl
 - [GitHub CLI](https://cli.github.com/) (`gh`) — for PR reviews (optional)
 - At least one additional reviewer for convergence mode:
   - [Codex CLI](https://github.com/openai/codex) — `npm install -g @openai/codex && codex login`
-  - [Gemini CLI](https://github.com/google-gemini/gemini-cli) — `npm install -g @google/gemini-cli`
+  - [Antigravity CLI](https://antigravity.google) (`agy`) — `curl -fsSL https://antigravity.google/cli/install.sh | bash` (preferred Google reviewer)
+  - [Gemini CLI](https://github.com/google-gemini/gemini-cli) — `npm install -g @google/gemini-cli` (fallback; needs `GEMINI_API_KEY`, Vertex, or an enterprise Code Assist license — consumer "Sign in with Google" was sunset 2026-06-18)
   - [Perplexity API key](https://www.perplexity.ai/) — set `PERPLEXITY_API_KEY` env var
 
 ### Install
@@ -141,6 +144,7 @@ Optional environment variables for tuning behavior:
 | `RC_MIN_REVIEWERS` | `2` | Minimum successful reviewers required for council mode |
 | `RC_AUTO_RETRY` | `false` | If `true`, retry failed reviewers without asking (CI-friendly) |
 | `RC_CLAUDE_MAX_TURNS` | `30` | Max turns for the Claude reviewer subagent |
+| `RC_REVIEWER_TIMEOUT` | `600` | Per-invocation wall-clock cap (seconds, 10 min) for CLI/API reviewers; raise for very large diffs |
 | `PERPLEXITY_API_KEY` | — | Enables Perplexity reviewer via Sonar API |
 
 ### Uninstall
@@ -157,7 +161,7 @@ Optional environment variables for tuning behavior:
 
 **Target:** PR #42 — "Add rate limiting to API endpoints"
 **Type:** PR
-**Reviewers:** Claude, Codex, Gemini (3 of 4 — Perplexity: PERPLEXITY_API_KEY not set)
+**Reviewers:** Claude, Codex, Antigravity (3 of 4 — Perplexity: PERPLEXITY_API_KEY not set)
 **Rounds:** 2
 **Consensus:** Strong
 
@@ -222,13 +226,13 @@ sequenceDiagram
     participant O as Orchestrator
     participant C as Claude Reviewer
     participant X as Codex Reviewer
-    participant G as Gemini Reviewer
+    participant G as Google Reviewer
     participant P as Perplexity Reviewer
 
     Note over O: Round 1 — Independent
     O->>+C: Context package
     O->>+X: Context package (CLI/MCP)
-    O->>+G: Context package (CLI/MCP)
+    O->>+G: Context package (CLI: agy → gemini)
     O->>+P: Context package (API)
     C-->>-O: Findings + assessment
     X-->>-O: Findings + assessment
@@ -307,7 +311,7 @@ graph TB
     subgraph "CLI / MCP Transport Layer"
         direction TB
         S1["CLI / MCP"] --> X["Codex"]
-        S2["CLI / MCP"] --> G["Gemini"]
+        S2["CLI (agy → gemini)"] --> G["Google"]
         S3["API (curl)"] --> P["Perplexity"]
         S4["CLI / MCP / API"] --> A["Any Model"]
     end

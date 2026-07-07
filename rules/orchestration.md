@@ -88,6 +88,32 @@ After Round 1 validation, the orchestrator reports results and determines next a
 - **Retried results merge into the Round 1 pool** before synthesis begins. All validated results (first-pass and retried) are treated identically.
 - **RC_AUTO_RETRY=true** skips the user prompt and retries failed reviewers automatically. Intended for CI/automated pipelines.
 
+## Reviewer Timeouts & Fast-Fail
+
+CLI and API reviewers must fail fast. A single overloaded or quota-capped provider must never stall the council — a dead provider should return `SKIPPED` in minutes, not tens of minutes. Every CLI/API reviewer subagent (Codex, the Google slot's `agy`/`gemini`, Perplexity) follows these rules:
+
+1. **Hard per-invocation timeout — never run a CLI unbounded.** Cap every CLI call. Prefer a tool-native cap when one exists (`curl --max-time`, agy's `--print-timeout`); otherwise wrap with `timeout`/`gtimeout`; and if **neither binary is present** (e.g. a stock macOS with no coreutils), use a pure-shell watchdog so the call still can't hang forever. Resolve the binary first and use an explicit `if`/`else` (portable across bash, sh, and zsh — do **not** use `${TO:+$TO 600}`, which word-splits in bash but stays one word in zsh):
+   ```bash
+   cap="${RC_REVIEWER_TIMEOUT:-600}"
+   TO="$(command -v timeout || command -v gtimeout || true)"
+   if [ -n "$TO" ]; then
+     "$TO" "$cap" <cli> … > out.txt 2>&1; rc=$?
+   else
+     # no timeout binary — background + watchdog so the call is never unbounded
+     <cli> … > out.txt 2>&1 & pid=$!
+     ( sleep "$cap"; kill -TERM "$pid" 2>/dev/null ) >/dev/null 2>&1 & wd=$!
+     wait "$pid"; rc=$?; kill "$wd" 2>/dev/null
+   fi
+   # rc != 0 (124 timeout / 143 SIGTERM / provider error) = failure for this invocation
+   ```
+   For `curl`, its built-in `--max-time ${RC_REVIEWER_TIMEOUT:-600}` already caps it (no external binary needed). If a CLI has its own internal wait (e.g. agy's `--print-timeout`, default 5m), raise it to match the budget or it will cut off before the wrapper. The watchdog guarantees a cap even with no `timeout`/`gtimeout`; do **not** fall back to a bare, uncapped invocation — that reopens the exact hang this section prevents.
+2. **No compounding retries.** At most **one** retry per tool, and only for a single clearly-transient blip (e.g. one network hiccup). Never chase a provider's own model auto-fallback across many backoff attempts — that is what turned one dead provider into an ~84-minute hang.
+3. **Fast-fail (return `SKIPPED` immediately, no retry)** when the output or error indicates a non-transient condition:
+   - **Auth failure** — e.g. `no longer supported`, `not authenticated`, `please migrate to the Antigravity`, `secret keyring is locked`, login/OAuth errors.
+   - **Quota / rate cap** — HTTP 429, `exhausted your daily quota`, `TerminalQuotaError`, `rate limit`.
+   - **Persistent overload** — HTTP 503 / `high demand` that continues past the timeout.
+4. **Fallback, not retry.** For the Google slot, a fast-fail of `agy` means move on to `gemini` (its fallback), not retry `agy`. When no fallback tool remains, return the `SKIPPED` sentinel and let the council proceed with the remaining reviewers (subject to `RC_MIN_REVIEWERS`).
+
 ## Environment Variables
 
 | Variable | Default | Purpose |
@@ -95,3 +121,4 @@ After Round 1 validation, the orchestrator reports results and determines next a
 | `RC_CLAUDE_MAX_TURNS` | `30` | Max turns for Claude reviewer subagent |
 | `RC_MIN_REVIEWERS` | `2` | Minimum successful reviewers for council mode |
 | `RC_AUTO_RETRY` | `false` | If `true`, retry failed reviewers without asking |
+| `RC_REVIEWER_TIMEOUT` | `600` | Per-invocation wall-clock cap (seconds, 10 min) for CLI/API reviewers; raise for very large diffs |

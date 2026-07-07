@@ -16,7 +16,11 @@ Run these checks in parallel:
 
 1. **Claude**: Always available.
 2. **Codex**: Run `which codex 2>/dev/null`. If found, mark as available (CLI). If not, check if `mcp__codex__codex` tool is available — if so, mark as available (MCP). Otherwise, unavailable.
-3. **Gemini**: Run `which gemini 2>/dev/null`. If found, mark as available (CLI). If not, check if Gemini MCP tool is available. Otherwise, unavailable.
+3. **Google (Antigravity / Gemini)** — a single slot shared by both Google CLIs (see `rules/providers.md` → "Google-family reviewer"). Run `which agy 2>/dev/null` and `which gemini 2>/dev/null`. Resolve the slot:
+   - Both found → available; primary `agy`, fallback `gemini`.
+   - Only `agy` → available via `agy`. Only `gemini` → available via `gemini`.
+   - Neither → unavailable.
+   Never count this as two reviewers. Announce which tool will run (and that a fallback exists, if any).
 4. **Perplexity**: Run `test -n "$PERPLEXITY_API_KEY" && echo "available" || echo "unavailable"`.
 
 Announce: "**Review Council** — [N] reviewers available: [list]. [Skipped: reason for each unavailable provider]"
@@ -140,29 +144,43 @@ Dispatch a `general-purpose` Agent with this prompt:
 >
 > **Step 2: Invoke Codex.** Write the delegation prompt to `/tmp/rc-codex-prompt.md`, then use the syntax you discovered to run Codex in non-interactive/full-auto mode with the prompt content.
 >
-> **MCP fallback:** If the CLI call fails, use the `mcp__codex__codex` tool with the delegation prompt instead.
+> **Reliability rules — apply to every CLI call (see `rules/orchestration.md` → "Reviewer Timeouts & Fast-Fail"):**
+> - Cap each invocation so it can never hang forever. Resolve the binary first (it may be `timeout` or, on macOS, `gtimeout`, or absent), then use a portable `if`/`else` (works in bash, sh, and zsh): `TO="$(command -v timeout || command -v gtimeout || true)"` then `if [ -n "$TO" ]; then "$TO" "${RC_REVIEWER_TIMEOUT:-600}" codex …; else <pure-shell watchdog>; fi`. Do NOT use `${TO:+$TO 600}` — it word-splits in bash but not zsh. If **neither** `timeout` nor `gtimeout` exists, do NOT run bare — use the pure-shell watchdog from `rules/orchestration.md` § Reviewer Timeouts (background the call, `kill` it after the budget) so the invocation is still bounded. A non-zero exit (124 timeout / 143 SIGTERM / provider error) = failure.
+> - Do NOT loop with compounding retries. At most ONE retry, and only for a single clearly-transient blip (e.g. one network hiccup).
+> - Fast-fail immediately (return the SKIPPED sentinel, no further retries) when the output or error shows an auth failure (`not authenticated`, login/OAuth errors), a quota/rate cap (HTTP 429, `exhausted your … quota`, `rate limit`), or persistent overload (HTTP 503 / `high demand` past the timeout). A dead provider must fail in minutes, not tens of minutes.
+>
+> **MCP fallback:** If the CLI call fails for a non-fatal reason (not an auth/quota fast-fail), use the `mcp__codex__codex` tool with the delegation prompt instead.
 >
 > **If both fail**: Return "SKIPPED: Codex unavailable — [error details]"
 >
 > Return the full structured review output (Findings, What's Good, Overall Assessment).
 
-### Reviewer: Gemini — If Available
+### Reviewer: Google (Antigravity / Gemini) — If Available
 
-**IMPORTANT:** Use an `Agent` subagent to invoke Gemini, same pattern as Codex — keeps the response out of the orchestrator's context.
+**IMPORTANT:** Use an `Agent` subagent to invoke the Google-family reviewer, same pattern as Codex — keeps the response out of the orchestrator's context. `agy` (Antigravity) and `gemini` share one slot; try `agy` first, fall back to `gemini`.
 
-Dispatch a `general-purpose` Agent with this prompt:
+Dispatch a `general-purpose` Agent with this prompt. Pass the ordered tool list resolved in Step 0 — `agy` then `gemini` if both are installed, or whichever single tool is available:
 
-> You are invoking the Gemini reviewer for a Review Council review. Your job is to call the Gemini CLI, collect its response, and return the structured findings.
+> You are invoking the Google-family reviewer (Antigravity `agy`, with Gemini `gemini` as fallback) for a Review Council review. Your job is to call the CLI, collect its response, and return the structured findings. Try the tools in this order: **[ordered tool list, e.g. `agy`, then `gemini`]**.
 >
-> **Step 1: Discover CLI syntax.** Run `gemini --help` to learn the available subcommands and flags. Do NOT assume any specific flags exist — always derive the correct invocation from the help output.
+> For each tool in order:
 >
-> **Step 2: Invoke Gemini.** Write the delegation prompt to `/tmp/rc-gemini-prompt.md`, then use the syntax you discovered to run Gemini in non-interactive mode with the prompt content and text output.
+> **Step 1: Discover CLI syntax.** Run `<tool> --help` to learn the available subcommands and flags. Do NOT assume any specific flags exist — always derive the correct invocation from the help output. (Hints verified against agy 1.0.16: `agy -p "<prompt>"` runs one prompt non-interactively and prints the response; optional `--add-dir <repo>`, `--model <name>`, and `--dangerously-skip-permissions` to avoid blocking on approvals in a non-TTY — agy print mode self-limits via `--print-timeout` (default 5m) — for the default 10m budget, pass `--print-timeout 10m` (or match `RC_REVIEWER_TIMEOUT`) so agy doesn't cut off before the outer timeout. `gemini` uses `gemini -p "<prompt>"` and may need `--skip-trust` or `GEMINI_CLI_TRUST_WORKSPACE=true` for headless/non-TTY runs.)
 >
-> **MCP fallback:** If the CLI call fails, use the Gemini MCP tool if configured.
+> **Step 2: Invoke the tool.** Write the delegation prompt to `/tmp/rc-google-prompt.md`, then use the syntax you discovered to run the tool in non-interactive mode with the prompt content and text output.
 >
-> **If both fail**: Return "SKIPPED: Gemini unavailable — [error details]"
+> **Reliability rules — apply to every CLI call (see `rules/orchestration.md` → "Reviewer Timeouts & Fast-Fail"):**
+> - Cap each invocation so it can never hang forever. Resolve the binary first (it may be `timeout` or, on macOS, `gtimeout`, or absent), then use a portable `if`/`else` (works in bash, sh, and zsh): `TO="$(command -v timeout || command -v gtimeout || true)"` then `if [ -n "$TO" ]; then "$TO" "${RC_REVIEWER_TIMEOUT:-600}" <tool> …; else <pure-shell watchdog>; fi`. Do NOT use `${TO:+$TO 600}` — it word-splits in bash but not zsh. If **neither** `timeout` nor `gtimeout` exists, do NOT run bare — use the pure-shell watchdog from `rules/orchestration.md` § Reviewer Timeouts (background the call, `kill` it after the budget) so the invocation is still bounded. A non-zero exit (124 timeout / 143 SIGTERM / provider error) = failure.
+> - Do NOT loop with compounding retries. At most ONE retry per tool, and only for a single clearly-transient blip (e.g. one network hiccup). Do NOT chase a provider's own model auto-fallback across many backoff attempts.
+> - Fast-fail a tool immediately (move to the next tool, no further retries) when the output or error shows an auth failure (`no longer supported`, `not authenticated`, `please migrate to the Antigravity`, `secret keyring is locked`), a quota/rate cap (HTTP 429, `exhausted your daily quota`, `TerminalQuotaError`, `rate limit`), or persistent overload (HTTP 503 / `high demand` past the timeout). A dead provider must fail in minutes, not tens of minutes.
 >
-> Return the full structured review output (Findings, What's Good, Overall Assessment).
+> **Step 3: Validate the output before accepting it.** A tool counts as successful ONLY if it returned **non-empty** text containing a real `Findings` section (and `Overall Assessment`). Note: `agy -p` can exit **0 while printing nothing** in a non-TTY subprocess — so a zero exit code is not sufficient. Empty or malformed output is a **failure**, not a clean review.
+>
+> **Fallback:** If a tool fast-fails, is unavailable, OR produces empty/unusable output (Step 3), move to the next tool in the list and repeat Steps 1–3. (Don't accept a silent-empty `agy` and skip `gemini` — that wastes the whole Google slot.)
+>
+> **On success:** Return the full structured review output (Findings, What's Good, Overall Assessment), and note which tool produced it — prefix your answer with `TOOL: Antigravity` (for `agy`) or `TOOL: Gemini` (for `gemini`).
+>
+> **If every tool fails**: Return "SKIPPED: Google (Antigravity/Gemini) unavailable — [error details for each tool tried]"
 
 ### Reviewer: Perplexity — If Available
 
@@ -182,12 +200,13 @@ Dispatch a `general-purpose` Agent with this prompt:
 >
 > **Step 2: Call the API:**
 > ```bash
-> curl -fsS https://api.perplexity.ai/v1/chat/completions \
+> curl -fsS --max-time "${RC_REVIEWER_TIMEOUT:-600}" https://api.perplexity.ai/v1/chat/completions \
 >   -H "Authorization: Bearer $PERPLEXITY_API_KEY" \
 >   -H "Content-Type: application/json" \
 >   -d @/tmp/rc-perplexity-payload.json \
 >   -o /tmp/rc-perplexity-response.json
 > ```
+> Note: `-f` makes `curl` exit non-zero (22) on any HTTP 4xx/5xx without exposing the status code. Treat any such failure as terminal — fast-fail (return SKIPPED, no retry), do not loop. Perplexity has no fallback tool, so there's nothing to gain from distinguishing 401/403/429 from other errors. (If you ever need the exact status, capture it with `-w '%{http_code}'` and drop `-f`.)
 >
 > **Step 3: Parse the response:**
 > ```bash
@@ -223,9 +242,9 @@ Count VALID, CLEAN, and FAILED results.
 
 ```
 Round 1 complete. All N reviewers produced valid output:
-  Claude   [ok]  3 findings
-  Codex    [ok]  5 findings
-  Gemini   [clean]  no issues found
+  Claude        [ok]  3 findings
+  Codex         [ok]  5 findings
+  Antigravity   [clean]  no issues found
 ```
 
 **If any FAILED but enough remain (>= RC_MIN_REVIEWERS, default 2):**
@@ -280,8 +299,8 @@ Spawn a new `reviewer-claude` agent. Provide the Round 1 synthesis and ask:
 ### Codex (Round 2)
 Dispatch a new `general-purpose` Agent subagent (same pattern as Round 1). Provide the full original context + Round 1 synthesis + Round 2 revision instructions from `rules/delegation-format.md`. For MCP mode, the subagent can use `mcp__codex__codex-reply` with `threadId` from Round 1 to continue the thread.
 
-### Gemini (Round 2)
-Dispatch a new `general-purpose` Agent subagent with full context + Round 1 synthesis + revision instructions.
+### Google (Antigravity / Gemini) (Round 2)
+Dispatch a new `general-purpose` Agent subagent with full context + Round 1 synthesis + revision instructions. Reuse the same tool that succeeded in Round 1 (Antigravity or Gemini); if unknown, use the `agy → gemini` order again. Same reliability rules (timeout, no compounding retries, fast-fail) apply.
 
 ### Perplexity (Round 2)
 Dispatch a new `general-purpose` Agent subagent with full context + Round 1 synthesis + revision instructions via Sonar API.
