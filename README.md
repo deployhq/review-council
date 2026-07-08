@@ -149,7 +149,7 @@ Optional environment variables for tuning behavior:
 | `RC_MIN_REVIEWERS` | `2` | Minimum successful reviewers required for council mode |
 | `RC_AUTO_RETRY` | `false` | If `true`, retry failed reviewers without asking (CI-friendly) |
 | `RC_CLAUDE_MAX_TURNS` | `30` | Max turns for the Claude reviewer subagent |
-| `RC_REVIEWER_TIMEOUT` | `600` | Per-invocation wall-clock cap (seconds, 10 min) for CLI/API reviewers; raise for very large diffs |
+| `RC_REVIEWER_TIMEOUT` | `600` | Per-invocation wall-clock cap (**seconds**, 10 min) for CLI/API reviewers; sized to cover `agy`'s multi-minute cold start (`agy`'s own `--print-timeout` is raised to match, as a unit-suffixed duration like `600s`/`10m`). Raise for very large diffs or slow networks. |
 | `PERPLEXITY_API_KEY` | — | Enables Perplexity reviewer via Sonar API |
 
 ### Uninstall

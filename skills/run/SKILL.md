@@ -15,25 +15,39 @@ Before doing anything else, probe which reviewers are available. Refer to `rules
 **Run this detection command verbatim — do not hand-roll or abbreviate it.** The `agy` probe is the one most often dropped when detection is improvised, which silently collapses the Google slot to a `gemini` that cannot authenticate on Google Workspace accounts (`IneligibleTierError: DASHER_USER`). `agy` is the **default** Google reviewer and MUST be probed explicitly — including its known install path (`~/.local/bin/agy`), in case it isn't on `PATH`:
 
 ```bash
-AGY="$(command -v agy 2>/dev/null || { [ -x "$HOME/.local/bin/agy" ] && printf '%s\n' "$HOME/.local/bin/agy"; })"
-GEM="$(command -v gemini 2>/dev/null)"
-CDX="$(command -v codex 2>/dev/null)"
+# agy: probe PATH first, then common install dirs (a minimal PATH may omit them)
+AGY="$(command -v agy 2>/dev/null || true)"
+if [ -z "$AGY" ]; then
+  for d in "$HOME/.local/bin" /opt/homebrew/bin /usr/local/bin; do
+    [ -x "$d/agy" ] && { AGY="$d/agy"; break; }
+  done
+fi
+GEM="$(command -v gemini 2>/dev/null || true)"
+CDX="$(command -v codex 2>/dev/null || true)"
+# one key=value per line — never space-join (a $HOME with a space would break parsing)
 echo "codex=${CDX:-none}"
-if [ -n "$AGY" ]; then echo "google=antigravity agy=$AGY gemini_fallback=${GEM:-none}"
-elif [ -n "$GEM" ]; then echo "google=gemini gemini=$GEM"
-else echo "google=none"; fi
+if [ -n "$AGY" ]; then
+  echo "google=antigravity"
+  echo "agy=$AGY"
+  echo "gemini_fallback=${GEM:-none}"
+elif [ -n "$GEM" ]; then
+  echo "google=gemini"
+  echo "gemini=$GEM"
+else
+  echo "google=none"
+fi
 echo "perplexity=$([ -n "$PERPLEXITY_API_KEY" ] && echo set || echo unset)"
 ```
 
-Interpret the output:
+Interpret the output (each value is on its own line — read the whole line as the value, so paths containing spaces stay intact):
 
 1. **Claude**: Always available.
 2. **Codex**: `codex=<path>` → available (CLI). If `codex=none`, check whether the `mcp__codex__codex` tool is available — if so, available (MCP); otherwise unavailable.
 3. **Google (Antigravity / Gemini)** — one slot shared by both Google CLIs (see `rules/providers.md` → "Google-family reviewer"):
-   - `google=antigravity` → available as **Google (Antigravity)**. `agy` is primary — invoke it via the resolved `agy=<path>` from the command output so it works even if `~/.local/bin` isn't on `PATH`; `gemini` is fallback only. Announce it as "Google (Antigravity)", **never** "Gemini", because `agy` is what will actually run.
-   - `google=gemini` → available as **Google (Gemini)**. Note that `gemini` is ineligible for Workspace/Dasher Google accounts and may fast-fail auth (`IneligibleTierError`).
+   - `google=antigravity` → available as **Google (Antigravity)**. `agy` is primary — invoke it via the resolved `agy=<path>`; `gemini` (from `gemini_fallback=<path>`) is fallback only. Announce it as "Google (Antigravity)", **never** "Gemini", because `agy` is what will actually run.
+   - `google=gemini` → available as **Google (Gemini)**. Note that `gemini` is ineligible for Workspace/Dasher Google accounts and may fast-fail auth (`IneligibleTierError`). **If the user's account is a Google Workspace / managed domain, double-check that `agy` truly isn't installed** (e.g. in a dir the probe missed) before accepting a gemini-only slot — a `google=gemini` verdict there usually means the `agy` probe missed it, which is the exact silent collapse this detection is meant to prevent.
    - `google=none` → unavailable.
-   Never count this as two reviewers. Pass the resolved primary tool **and its path** (plus any fallback) to the Google reviewer subagent.
+   Never count this as two reviewers. Pass the resolved primary tool **and its path**, plus the fallback tool **and its path**, to the Google reviewer subagent.
 4. **Perplexity**: `perplexity=set` → available; `unset` → unavailable.
 
 Announce: "**Review Council** — [N] reviewers available: [list]. [Skipped: reason for each unavailable provider]". When the Google slot is available, name the actual tool — e.g. "Google (Antigravity)" — so it's clear `agy` (not `gemini`) is the one running.
@@ -172,9 +186,9 @@ Dispatch a `general-purpose` Agent with this prompt:
 
 **IMPORTANT:** Use an `Agent` subagent to invoke the Google-family reviewer, same pattern as Codex — keeps the response out of the orchestrator's context. `agy` (Antigravity) and `gemini` share one slot; try `agy` first, fall back to `gemini`.
 
-Dispatch a `general-purpose` Agent with this prompt. Pass the ordered tool list resolved in Step 0 — `agy` then `gemini` if both are installed, or whichever single tool is available — **using the resolved `agy` path** from Step 0's detection command (e.g. `/Users/you/.local/bin/agy`), not a bare `agy`, so the subagent can invoke it even if `~/.local/bin` isn't on its `PATH`:
+Dispatch a `general-purpose` Agent with this prompt. Pass the ordered tool list resolved in Step 0 — `agy` then `gemini` if both are installed, or whichever single tool is available — **using the resolved paths** from Step 0's detection output (`agy=<path>` and `gemini_fallback=<path>`), not bare command names, so the subagent can invoke each even if its dir isn't on the subagent's `PATH`:
 
-> You are invoking the Google-family reviewer (Antigravity `agy`, with Gemini `gemini` as fallback) for a Review Council review. Your job is to call the CLI, collect its response, and return the structured findings. Try the tools in this order: **[ordered tool list with resolved paths, e.g. `/Users/you/.local/bin/agy`, then `gemini`]**. Invoke each tool by the exact path/name given here — if a tool isn't found on `PATH`, use the full path provided rather than declaring it unavailable.
+> You are invoking the Google-family reviewer (Antigravity `agy`, with Gemini `gemini` as fallback) for a Review Council review. Your job is to call the CLI, collect its response, and return the structured findings. Try the tools in this order: **[ordered tool list with resolved full paths, e.g. `/Users/you/.local/bin/agy`, then `/Users/you/.nvm/.../bin/gemini`]**. Invoke each tool by the exact full path given here — if a tool isn't found on `PATH`, use the full path provided rather than declaring it unavailable.
 >
 > For each tool in order:
 >
@@ -182,7 +196,7 @@ Dispatch a `general-purpose` Agent with this prompt. Pass the ordered tool list 
 >
 > **Give `agy` room for a cold start — this is the "more time" it needs.** `agy`'s **first** `-p` call in a session pays a cold-start cost (model load, auth handshake, update check) and can legitimately take **several minutes** (a warm call is ~10s). Two caps apply to it and BOTH must cover the budget, or the cold start is truncated:
 > - The outer wrapper cap = `${RC_REVIEWER_TIMEOUT:-600}` (10 min default).
-> - agy's **own** `--print-timeout`, which defaults to **just 5 minutes** — you MUST pass `--print-timeout` matching the budget (e.g. `--print-timeout 10m`), otherwise agy cuts itself off at 5m before the wrapper's 10m and a slow cold start looks like a failure. This is not optional.
+> - agy's **own** `--print-timeout`, which defaults to **just 5 minutes**. You MUST pass it sized to the budget — but its value is a **Go duration string that needs a unit suffix**: a bare integer is rejected (`agy --print-timeout 600` → exit 2, `missing unit in duration "600"`, which kills the primary Google reviewer instantly). `RC_REVIEWER_TIMEOUT` is in **seconds**, so append `s`: `--print-timeout "${RC_REVIEWER_TIMEOUT:-600}s"` (or a literal like `10m`) — never a bare `--print-timeout 600`. Not optional: without it agy cuts itself off at 5m before the wrapper and a slow cold start looks like a failure.
 >
 > Treat multi-minute latency on the first `agy` call as **normal, not a hang** — do not fast-fail it for being slow. (Only auth/quota errors fast-fail; see below.)
 >
@@ -195,9 +209,10 @@ Dispatch a `general-purpose` Agent with this prompt. Pass the ordered tool list 
 >
 > **Step 3: Validate the output before accepting it.** A tool counts as successful ONLY if it returned **non-empty** text containing a real `Findings` section (and `Overall Assessment`). Note: `agy -p` can exit **0 while printing nothing** in a non-TTY subprocess — so a zero exit code is not sufficient. Empty or malformed output is a **failure**, not a clean review.
 >
-> **Step 4: Retry `agy` once, THEN fall back — this ordering is the whole point.** A transient `agy` blip must never be masked by a `gemini` that cannot succeed. Concretely:
-> - If **`agy`** returns **empty/malformed output** (Step 3 — the exit-0-no-stdout cold-start quirk, which returns quickly), **retry `agy` ONCE** before touching `gemini`. The second, warm call almost always returns a valid review. This is the single allowed retry for `agy`.
-> - Move to the next tool (`gemini`) ONLY when `agy` cannot be salvaged: it is **absent**, **hard-fails** (auth/quota fast-fail — retrying won't help), **times out** (retrying would double the budget), or its retry above **also** returns empty/malformed. Never retry a tool that hard-failed on auth/quota.
+> **Step 4: Retry `agy` once (only if it failed *fast*), THEN fall back — this ordering is the whole point.** A transient `agy` blip must never be masked by a `gemini` that cannot succeed, but the retry must never turn into a runaway. Concretely:
+> - Retry `agy` ONCE **only when the empty/malformed result came back quickly** — as a rule of thumb, in under ~⅓ of the budget (e.g. < ~2 min of a 10 min cap). That fast-empty is the exit-0-no-stdout cold-start quirk, and the warm retry almost always succeeds. **Time-box the retry to the *remaining* budget, not a fresh `RC_REVIEWER_TIMEOUT`**, so first-try + retry together can never exceed one budget. This is the single allowed retry for `agy`.
+> - Do **NOT** retry — move straight to the fallback — when the empty result arrived **near the cap** (a slow call that completed but printed nothing: treat it exactly like a timeout — a second full attempt would nearly double the wall-clock), or when `agy` **timed out** (rc 124/143), is **absent**, or **hard-failed** (auth/quota fast-fail — retrying won't help). Never retry a tool that hard-failed on auth/quota.
+> - **This is a terminal outcome for the slot.** Once you've done the one allowed `agy` retry (or skipped it per the rule above) and, if needed, tried `gemini`, the Google reviewer's result — success or `SKIPPED` — is **final for this round**. Do not let the orchestrator's Step 3.5 reviewer-level retry re-run it (see Step 3.5: the Google slot is not eligible for external retry once its internal retry/fallback is exhausted).
 > - **`gemini` is a dead end for Workspace/Dasher accounts:** `gemini -p` fast-fails near-instantly with `IneligibleTierError` (`reasonCode: DASHER_USER`, "not eligible for Gemini Code Assist for individuals") for any Google Workspace-domain account and any account without a `GEMINI_API_KEY`/Vertex/enterprise license. Treat that as the slot being unavailable — it is expected, not a bug to retry.
 >
 > **On success:** Return the full structured review output (Findings, What's Good, Overall Assessment), and note which tool produced it — prefix your answer with `TOOL: Antigravity` (for `agy`) or `TOOL: Gemini` (for `gemini`).
