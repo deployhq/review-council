@@ -12,18 +12,31 @@ You are the **Orchestrator** of a review council. Your job is to coordinate mult
 
 Before doing anything else, probe which reviewers are available. Refer to `rules/providers.md` for detection methods.
 
-Run these checks in parallel:
+**Run this detection command verbatim — do not hand-roll or abbreviate it.** The `agy` probe is the one most often dropped when detection is improvised, which silently collapses the Google slot to a `gemini` that cannot authenticate on Google Workspace accounts (`IneligibleTierError: DASHER_USER`). `agy` is the **default** Google reviewer and MUST be probed explicitly — including its known install path (`~/.local/bin/agy`), in case it isn't on `PATH`:
+
+```bash
+AGY="$(command -v agy 2>/dev/null || { [ -x "$HOME/.local/bin/agy" ] && printf '%s\n' "$HOME/.local/bin/agy"; })"
+GEM="$(command -v gemini 2>/dev/null)"
+CDX="$(command -v codex 2>/dev/null)"
+echo "codex=${CDX:-none}"
+if [ -n "$AGY" ]; then echo "google=antigravity agy=$AGY gemini_fallback=${GEM:-none}"
+elif [ -n "$GEM" ]; then echo "google=gemini gemini=$GEM"
+else echo "google=none"; fi
+echo "perplexity=$([ -n "$PERPLEXITY_API_KEY" ] && echo set || echo unset)"
+```
+
+Interpret the output:
 
 1. **Claude**: Always available.
-2. **Codex**: Run `which codex 2>/dev/null`. If found, mark as available (CLI). If not, check if `mcp__codex__codex` tool is available — if so, mark as available (MCP). Otherwise, unavailable.
-3. **Google (Antigravity / Gemini)** — a single slot shared by both Google CLIs (see `rules/providers.md` → "Google-family reviewer"). Run `which agy 2>/dev/null` and `which gemini 2>/dev/null`. Resolve the slot:
-   - `agy` found (with or without `gemini`) → available as **Google (Antigravity)** — `agy` is primary, `gemini` is fallback only. Announce it as "Google (Antigravity)", **not** "Gemini", because `agy` is what will actually run.
-   - Only `gemini` found → available as **Google (Gemini)**. Note that `gemini` is ineligible for Workspace/Dasher Google accounts and may fast-fail auth (`IneligibleTierError`).
-   - Neither → unavailable.
-   Never count this as two reviewers. Announce which tool will run (and that a fallback exists, if any).
-4. **Perplexity**: Run `test -n "$PERPLEXITY_API_KEY" && echo "available" || echo "unavailable"`.
+2. **Codex**: `codex=<path>` → available (CLI). If `codex=none`, check whether the `mcp__codex__codex` tool is available — if so, available (MCP); otherwise unavailable.
+3. **Google (Antigravity / Gemini)** — one slot shared by both Google CLIs (see `rules/providers.md` → "Google-family reviewer"):
+   - `google=antigravity` → available as **Google (Antigravity)**. `agy` is primary — invoke it via the resolved `agy=<path>` from the command output so it works even if `~/.local/bin` isn't on `PATH`; `gemini` is fallback only. Announce it as "Google (Antigravity)", **never** "Gemini", because `agy` is what will actually run.
+   - `google=gemini` → available as **Google (Gemini)**. Note that `gemini` is ineligible for Workspace/Dasher Google accounts and may fast-fail auth (`IneligibleTierError`).
+   - `google=none` → unavailable.
+   Never count this as two reviewers. Pass the resolved primary tool **and its path** (plus any fallback) to the Google reviewer subagent.
+4. **Perplexity**: `perplexity=set` → available; `unset` → unavailable.
 
-Announce: "**Review Council** — [N] reviewers available: [list]. [Skipped: reason for each unavailable provider]"
+Announce: "**Review Council** — [N] reviewers available: [list]. [Skipped: reason for each unavailable provider]". When the Google slot is available, name the actual tool — e.g. "Google (Antigravity)" — so it's clear `agy` (not `gemini`) is the one running.
 
 If only Claude is available, proceed in **single-reviewer mode** and note it in the output. Suggest running `/review-council:setup` to see how to add more reviewers.
 
@@ -159,9 +172,9 @@ Dispatch a `general-purpose` Agent with this prompt:
 
 **IMPORTANT:** Use an `Agent` subagent to invoke the Google-family reviewer, same pattern as Codex — keeps the response out of the orchestrator's context. `agy` (Antigravity) and `gemini` share one slot; try `agy` first, fall back to `gemini`.
 
-Dispatch a `general-purpose` Agent with this prompt. Pass the ordered tool list resolved in Step 0 — `agy` then `gemini` if both are installed, or whichever single tool is available:
+Dispatch a `general-purpose` Agent with this prompt. Pass the ordered tool list resolved in Step 0 — `agy` then `gemini` if both are installed, or whichever single tool is available — **using the resolved `agy` path** from Step 0's detection command (e.g. `/Users/you/.local/bin/agy`), not a bare `agy`, so the subagent can invoke it even if `~/.local/bin` isn't on its `PATH`:
 
-> You are invoking the Google-family reviewer (Antigravity `agy`, with Gemini `gemini` as fallback) for a Review Council review. Your job is to call the CLI, collect its response, and return the structured findings. Try the tools in this order: **[ordered tool list, e.g. `agy`, then `gemini`]**.
+> You are invoking the Google-family reviewer (Antigravity `agy`, with Gemini `gemini` as fallback) for a Review Council review. Your job is to call the CLI, collect its response, and return the structured findings. Try the tools in this order: **[ordered tool list with resolved paths, e.g. `/Users/you/.local/bin/agy`, then `gemini`]**. Invoke each tool by the exact path/name given here — if a tool isn't found on `PATH`, use the full path provided rather than declaring it unavailable.
 >
 > For each tool in order:
 >

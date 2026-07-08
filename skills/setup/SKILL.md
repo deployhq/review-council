@@ -27,7 +27,9 @@ which codex 2>/dev/null && codex --version
 One reviewer slot shared by both Google CLIs — `agy` (Antigravity) is preferred, `gemini` is the fallback.
 
 ```bash
-which agy 2>/dev/null && agy --version
+# probe agy on PATH, then its known install path (~/.local/bin) in case PATH misses it
+AGY="$(command -v agy 2>/dev/null || { [ -x "$HOME/.local/bin/agy" ] && printf '%s\n' "$HOME/.local/bin/agy"; })"
+[ -n "$AGY" ] && "$AGY" --version
 which gemini 2>/dev/null && gemini --version
 ```
 - Both found: "Google (agy → gemini) . available" — `agy` runs, `gemini` is the fallback
