@@ -109,10 +109,10 @@ CLI and API reviewers must fail fast. A single overloaded or quota-capped provid
    For `curl`, its built-in `--max-time ${RC_REVIEWER_TIMEOUT:-600}` already caps it (no external binary needed). If a CLI has its own internal wait (e.g. agy's `--print-timeout`, default 5m), raise it to match the budget or it will cut off before the wrapper. The watchdog guarantees a cap even with no `timeout`/`gtimeout`; do **not** fall back to a bare, uncapped invocation — that reopens the exact hang this section prevents.
 2. **No compounding retries.** At most **one** retry per tool, and only for a single clearly-transient blip (e.g. one network hiccup). Never chase a provider's own model auto-fallback across many backoff attempts — that is what turned one dead provider into an ~84-minute hang.
 3. **Fast-fail (return `SKIPPED` immediately, no retry)** when the output or error indicates a non-transient condition:
-   - **Auth failure** — e.g. `no longer supported`, `not authenticated`, `please migrate to the Antigravity`, `secret keyring is locked`, login/OAuth errors.
+   - **Auth failure** — e.g. `no longer supported`, `not authenticated`, `please migrate to the Antigravity`, `secret keyring is locked`, `IneligibleTierError` / `DASHER_USER` / `not eligible for Gemini Code Assist` (Workspace/Dasher account — `gemini` only), login/OAuth errors.
    - **Quota / rate cap** — HTTP 429, `exhausted your daily quota`, `TerminalQuotaError`, `rate limit`.
    - **Persistent overload** — HTTP 503 / `high demand` that continues past the timeout.
-4. **Fallback, not retry.** For the Google slot, a fast-fail of `agy` means move on to `gemini` (its fallback), not retry `agy`. When no fallback tool remains, return the `SKIPPED` sentinel and let the council proceed with the remaining reviewers (subject to `RC_MIN_REVIEWERS`).
+4. **Fallback, not retry — with one exception for `agy` empty output.** For the Google slot, a **hard** fast-fail of `agy` (auth/quota) or an `agy` timeout means move on to `gemini` (its fallback), not retry `agy`. **The one exception:** if `agy` returns **empty/malformed output** (exit 0 with no stdout — a cold-start quirk that returns quickly, not a hard failure), **retry `agy` once** before falling back — the warm retry almost always succeeds, and `gemini` is a dead end for Workspace/Dasher accounts (`IneligibleTierError: DASHER_USER`), so burning the slot on it wastes the whole Google reviewer. When no tool remains, return the `SKIPPED` sentinel **attributed to the primary tool** (`agy` when installed) — not mislabeled as a `gemini` auth failure — and let the council proceed with the remaining reviewers (subject to `RC_MIN_REVIEWERS`).
 
 ## Environment Variables
 
@@ -121,4 +121,4 @@ CLI and API reviewers must fail fast. A single overloaded or quota-capped provid
 | `RC_CLAUDE_MAX_TURNS` | `30` | Max turns for Claude reviewer subagent |
 | `RC_MIN_REVIEWERS` | `2` | Minimum successful reviewers for council mode |
 | `RC_AUTO_RETRY` | `false` | If `true`, retry failed reviewers without asking |
-| `RC_REVIEWER_TIMEOUT` | `600` | Per-invocation wall-clock cap (seconds, 10 min) for CLI/API reviewers; raise for very large diffs |
+| `RC_REVIEWER_TIMEOUT` | `600` | Per-invocation wall-clock cap (seconds, 10 min) for CLI/API reviewers; sized to cover `agy`'s multi-minute cold start (and `agy`'s own `--print-timeout` must be raised to match it). Raise for very large diffs or slow networks. |

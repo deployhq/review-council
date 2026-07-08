@@ -17,8 +17,8 @@ Run these checks in parallel:
 1. **Claude**: Always available.
 2. **Codex**: Run `which codex 2>/dev/null`. If found, mark as available (CLI). If not, check if `mcp__codex__codex` tool is available — if so, mark as available (MCP). Otherwise, unavailable.
 3. **Google (Antigravity / Gemini)** — a single slot shared by both Google CLIs (see `rules/providers.md` → "Google-family reviewer"). Run `which agy 2>/dev/null` and `which gemini 2>/dev/null`. Resolve the slot:
-   - Both found → available; primary `agy`, fallback `gemini`.
-   - Only `agy` → available via `agy`. Only `gemini` → available via `gemini`.
+   - `agy` found (with or without `gemini`) → available as **Google (Antigravity)** — `agy` is primary, `gemini` is fallback only. Announce it as "Google (Antigravity)", **not** "Gemini", because `agy` is what will actually run.
+   - Only `gemini` found → available as **Google (Gemini)**. Note that `gemini` is ineligible for Workspace/Dasher Google accounts and may fast-fail auth (`IneligibleTierError`).
    - Neither → unavailable.
    Never count this as two reviewers. Announce which tool will run (and that a fallback exists, if any).
 4. **Perplexity**: Run `test -n "$PERPLEXITY_API_KEY" && echo "available" || echo "unavailable"`.
@@ -165,7 +165,13 @@ Dispatch a `general-purpose` Agent with this prompt. Pass the ordered tool list 
 >
 > For each tool in order:
 >
-> **Step 1: Discover CLI syntax.** Run `<tool> --help` to learn the available subcommands and flags. Do NOT assume any specific flags exist — always derive the correct invocation from the help output. (Hints verified against agy 1.0.16: `agy -p "<prompt>"` runs one prompt non-interactively and prints the response; optional `--add-dir <repo>`, `--model <name>`, and `--dangerously-skip-permissions` to avoid blocking on approvals in a non-TTY — agy print mode self-limits via `--print-timeout` (default 5m) — for the default 10m budget, pass `--print-timeout 10m` (or match `RC_REVIEWER_TIMEOUT`) so agy doesn't cut off before the outer timeout. `gemini` uses `gemini -p "<prompt>"` and may need `--skip-trust` or `GEMINI_CLI_TRUST_WORKSPACE=true` for headless/non-TTY runs.)
+> **Step 1: Discover CLI syntax.** Run `<tool> --help` to learn the available subcommands and flags. Do NOT assume any specific flags exist — always derive the correct invocation from the help output. (Hints verified against agy 1.0.16–1.1.0: `agy -p "<prompt>"` runs one prompt non-interactively and prints the response; optional `--add-dir <repo>`, `--model <name>`, and `--dangerously-skip-permissions` to avoid blocking on approvals in a non-TTY. `gemini` uses `gemini -p "<prompt>"` and may need `--skip-trust` or `GEMINI_CLI_TRUST_WORKSPACE=true` for headless/non-TTY runs.)
+>
+> **Give `agy` room for a cold start — this is the "more time" it needs.** `agy`'s **first** `-p` call in a session pays a cold-start cost (model load, auth handshake, update check) and can legitimately take **several minutes** (a warm call is ~10s). Two caps apply to it and BOTH must cover the budget, or the cold start is truncated:
+> - The outer wrapper cap = `${RC_REVIEWER_TIMEOUT:-600}` (10 min default).
+> - agy's **own** `--print-timeout`, which defaults to **just 5 minutes** — you MUST pass `--print-timeout` matching the budget (e.g. `--print-timeout 10m`), otherwise agy cuts itself off at 5m before the wrapper's 10m and a slow cold start looks like a failure. This is not optional.
+>
+> Treat multi-minute latency on the first `agy` call as **normal, not a hang** — do not fast-fail it for being slow. (Only auth/quota errors fast-fail; see below.)
 >
 > **Step 2: Invoke the tool.** Write the delegation prompt to `/tmp/rc-google-prompt.md`, then use the syntax you discovered to run the tool in non-interactive mode with the prompt content and text output.
 >
@@ -176,11 +182,14 @@ Dispatch a `general-purpose` Agent with this prompt. Pass the ordered tool list 
 >
 > **Step 3: Validate the output before accepting it.** A tool counts as successful ONLY if it returned **non-empty** text containing a real `Findings` section (and `Overall Assessment`). Note: `agy -p` can exit **0 while printing nothing** in a non-TTY subprocess — so a zero exit code is not sufficient. Empty or malformed output is a **failure**, not a clean review.
 >
-> **Fallback:** If a tool fast-fails, is unavailable, OR produces empty/unusable output (Step 3), move to the next tool in the list and repeat Steps 1–3. (Don't accept a silent-empty `agy` and skip `gemini` — that wastes the whole Google slot.)
+> **Step 4: Retry `agy` once, THEN fall back — this ordering is the whole point.** A transient `agy` blip must never be masked by a `gemini` that cannot succeed. Concretely:
+> - If **`agy`** returns **empty/malformed output** (Step 3 — the exit-0-no-stdout cold-start quirk, which returns quickly), **retry `agy` ONCE** before touching `gemini`. The second, warm call almost always returns a valid review. This is the single allowed retry for `agy`.
+> - Move to the next tool (`gemini`) ONLY when `agy` cannot be salvaged: it is **absent**, **hard-fails** (auth/quota fast-fail — retrying won't help), **times out** (retrying would double the budget), or its retry above **also** returns empty/malformed. Never retry a tool that hard-failed on auth/quota.
+> - **`gemini` is a dead end for Workspace/Dasher accounts:** `gemini -p` fast-fails near-instantly with `IneligibleTierError` (`reasonCode: DASHER_USER`, "not eligible for Gemini Code Assist for individuals") for any Google Workspace-domain account and any account without a `GEMINI_API_KEY`/Vertex/enterprise license. Treat that as the slot being unavailable — it is expected, not a bug to retry.
 >
 > **On success:** Return the full structured review output (Findings, What's Good, Overall Assessment), and note which tool produced it — prefix your answer with `TOOL: Antigravity` (for `agy`) or `TOOL: Gemini` (for `gemini`).
 >
-> **If every tool fails**: Return "SKIPPED: Google (Antigravity/Gemini) unavailable — [error details for each tool tried]"
+> **If every tool fails**: Return a SKIPPED message attributed to the **primary** tool, with a per-tool status — e.g. "SKIPPED: Google (Antigravity) unavailable — agy: empty output after retry; gemini fallback: ineligible (Workspace/Dasher account, IneligibleTierError)". Lead with `agy` whenever it was installed. Do **NOT** report the slot as a bare "Gemini auth failure" when `agy` was the intended reviewer — that misleads a user whose `agy` works fine interactively.
 
 ### Reviewer: Perplexity — If Available
 
