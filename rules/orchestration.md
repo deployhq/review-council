@@ -85,6 +85,7 @@ After Round 1 validation, the orchestrator reports results and determines next a
 ### Retry Rules
 
 - **One retry attempt max** per reviewer per round. If a reviewer fails twice, mark it as unavailable and move on.
+- **The Google slot is exempt when it already exhausted its internal retry/fallback.** A `SKIPPED` whose reason is `agy` empty-after-retry, `agy` timeout, or `gemini` ineligibility (`DASHER_USER`) is **terminal** — do not re-run it here (it already spent its one allowed retry internally, and re-running only re-hits a dead `gemini` or another cold-start). Applies even under `RC_AUTO_RETRY=true`.
 - **Retried results merge into the Round 1 pool** before synthesis begins. All validated results (first-pass and retried) are treated identically.
 - **RC_AUTO_RETRY=true** skips the user prompt and retries failed reviewers automatically. Intended for CI/automated pipelines.
 
@@ -106,13 +107,13 @@ CLI and API reviewers must fail fast. A single overloaded or quota-capped provid
    fi
    # rc != 0 (124 timeout / 143 SIGTERM / provider error) = failure for this invocation
    ```
-   For `curl`, its built-in `--max-time ${RC_REVIEWER_TIMEOUT:-600}` already caps it (no external binary needed). If a CLI has its own internal wait (e.g. agy's `--print-timeout`, default 5m), raise it to match the budget or it will cut off before the wrapper. The watchdog guarantees a cap even with no `timeout`/`gtimeout`; do **not** fall back to a bare, uncapped invocation — that reopens the exact hang this section prevents.
+   For `curl`, its built-in `--max-time ${RC_REVIEWER_TIMEOUT:-600}` already caps it (no external binary needed). If a CLI has its own internal wait (e.g. agy's `--print-timeout`, default 5m), raise it to match the budget or it will cut off before the wrapper — agy's flag takes a **unit-suffixed duration** (`"${RC_REVIEWER_TIMEOUT:-600}s"` or `10m`; a bare integer like `600` is rejected with `missing unit in duration`). The watchdog guarantees a cap even with no `timeout`/`gtimeout`; do **not** fall back to a bare, uncapped invocation — that reopens the exact hang this section prevents.
 2. **No compounding retries.** At most **one** retry per tool, and only for a single clearly-transient blip (e.g. one network hiccup). Never chase a provider's own model auto-fallback across many backoff attempts — that is what turned one dead provider into an ~84-minute hang.
-3. **Fast-fail (return `SKIPPED` immediately, no retry)** when the output or error indicates a non-transient condition:
-   - **Auth failure** — e.g. `no longer supported`, `not authenticated`, `please migrate to the Antigravity`, `secret keyring is locked`, login/OAuth errors.
+3. **Fast-fail the current *tool* immediately (no retry)** when the output or error indicates a non-transient condition. Fast-fail is **tool-level, not slot-level**: if the reviewer has a documented fallback tool (the Google slot's `agy`→`gemini`), move to it next; return the reviewer-level `SKIPPED` sentinel only when **no fallback tool remains**. Non-transient conditions:
+   - **Auth failure** — e.g. `no longer supported`, `not authenticated`, `please migrate to the Antigravity`, `secret keyring is locked`, `IneligibleTierError` / `DASHER_USER` / `not eligible for Gemini Code Assist` (Workspace/Dasher account — `gemini` only), login/OAuth errors.
    - **Quota / rate cap** — HTTP 429, `exhausted your daily quota`, `TerminalQuotaError`, `rate limit`.
    - **Persistent overload** — HTTP 503 / `high demand` that continues past the timeout.
-4. **Fallback, not retry.** For the Google slot, a fast-fail of `agy` means move on to `gemini` (its fallback), not retry `agy`. When no fallback tool remains, return the `SKIPPED` sentinel and let the council proceed with the remaining reviewers (subject to `RC_MIN_REVIEWERS`).
+4. **Fallback, not retry — with one narrow, budget-bounded exception for `agy` empty output.** For the Google slot, a **hard** fast-fail of `agy` (auth/quota) or an `agy` timeout means move on to `gemini` (its fallback), not retry `agy`. **The one exception:** if `agy` returns **empty/malformed output *quickly*** (exit 0 with no stdout, back in well under the budget — the cold-start quirk), **retry `agy` once** before falling back, and **time-box that retry to the *remaining* budget, not a fresh `RC_REVIEWER_TIMEOUT`** (first-try + retry must fit inside one budget). If instead the empty result arrived **near the cap** — a slow call that completed but printed nothing — treat it like a timeout: **do not retry**, fall straight to `gemini`. The warm retry almost always succeeds, and `gemini` is a dead end for Workspace/Dasher accounts (`IneligibleTierError: DASHER_USER`), so burning the slot on it wastes the whole Google reviewer. When no tool remains, return the `SKIPPED` sentinel **attributed to the primary tool** (`agy` when installed) — not mislabeled as a `gemini` auth failure. That `SKIPPED` (and any successful Google result) is **terminal for the round**: the internal `agy` retry already consumed the slot's one allowed retry, so the Google reviewer is **not eligible for the Step 3.5 reviewer-level retry** — never re-run it externally on an `agy`-empty-after-retry, `agy`-timeout, or `gemini`-ineligible reason. Let the council proceed with the remaining reviewers (subject to `RC_MIN_REVIEWERS`).
 
 ## Environment Variables
 
@@ -121,4 +122,4 @@ CLI and API reviewers must fail fast. A single overloaded or quota-capped provid
 | `RC_CLAUDE_MAX_TURNS` | `30` | Max turns for Claude reviewer subagent |
 | `RC_MIN_REVIEWERS` | `2` | Minimum successful reviewers for council mode |
 | `RC_AUTO_RETRY` | `false` | If `true`, retry failed reviewers without asking |
-| `RC_REVIEWER_TIMEOUT` | `600` | Per-invocation wall-clock cap (seconds, 10 min) for CLI/API reviewers; raise for very large diffs |
+| `RC_REVIEWER_TIMEOUT` | `600` | Per-invocation wall-clock cap (**seconds**, 10 min) for CLI/API reviewers; sized to cover `agy`'s multi-minute cold start. `agy`'s own `--print-timeout` must be raised to match, as a **unit-suffixed** duration — `"${RC_REVIEWER_TIMEOUT}s"` or `10m`, never a bare `600`. Raise for very large diffs or slow networks. |

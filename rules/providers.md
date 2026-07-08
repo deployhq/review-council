@@ -27,8 +27,18 @@ Reference for the orchestrator. At runtime, probe each provider in order. Availa
 
 Google's successor to the Gemini CLI (binary `agy`). See the **Google-family reviewer** rule below — when both `agy` and `gemini` are installed, `agy` is tried first and `gemini` is the fallback; together they occupy a single reviewer slot.
 
-- **Detection**: `which agy 2>/dev/null` — if found, use CLI. (No MCP transport exists for Antigravity.)
-- **CLI invocation**: The subagent runs `agy --help` to discover current syntax, then invokes Antigravity in non-interactive mode with text output. Do not hardcode flags — CLI syntax changes between versions. Hint verified against agy 1.0.16: `agy -p "<prompt>"` (`-p`/`--print` = run a single prompt non-interactively and print the response). Optional: `--add-dir <repo>` to include the repo in the workspace, `--model <name>` to select a model, `--dangerously-skip-permissions` to avoid blocking on an approval it can't receive in a non-TTY. Print mode has a built-in `--print-timeout` (default 5m) — for reviews budgeted above 5m (the default `RC_REVIEWER_TIMEOUT` is 10m), pass `--print-timeout` to match (e.g. `--print-timeout 10m`) or agy will cut off first.
+- **Detection**: probe `command -v agy` first, then — if empty — the common install dirs, since a minimal `PATH` may omit them. Use the **same probe as the `run`/`setup` skills** (keep all three in sync — don't let this one drift narrower):
+  ```bash
+  AGY="$(command -v agy 2>/dev/null || true)"
+  if [ -z "$AGY" ]; then
+    for d in "$HOME/.local/bin" /opt/homebrew/bin /usr/local/bin; do
+      [ -x "$d/agy" ] && { AGY="$d/agy"; break; }
+    done
+  fi
+  ```
+  **`agy` must be probed explicitly and preferred — never default the Google slot to `gemini` without checking `agy` first.** Invoke by the resolved full path (`$AGY`) so a `PATH` gap doesn't make a present `agy` look absent. (No MCP transport exists for Antigravity.)
+- **CLI invocation**: The subagent runs `agy --help` to discover current syntax, then invokes Antigravity in non-interactive mode with text output. Do not hardcode flags — CLI syntax changes between versions. Hint verified against agy 1.0.16–1.1.0: `agy -p "<prompt>"` (`-p`/`--print` = run a single prompt non-interactively and print the response). Optional: `--add-dir <repo>` to include the repo in the workspace, `--model <name>` to select a model, `--dangerously-skip-permissions` to avoid blocking on an approval it can't receive in a non-TTY.
+- **Cold start**: `agy`'s **first** `-p` call in a session is slow (model load, auth handshake, update check) — it can take **several minutes**, versus ~10s once warm; occasionally it exits 0 with no stdout. Give it real headroom, or a cold start looks like a failure: the invocation is capped **twice** and both caps must cover the budget — the outer wrapper (`${RC_REVIEWER_TIMEOUT:-600}`, 10m default) **and** agy's own `--print-timeout`, which defaults to just **5m**. You MUST pass `--print-timeout` sized to the budget — but its value is a **Go duration string and requires a unit suffix**: a bare integer is rejected (`agy --print-timeout 600` exits 2 with `missing unit in duration "600"`). Since `RC_REVIEWER_TIMEOUT` is in **seconds**, append `s`: `--print-timeout "${RC_REVIEWER_TIMEOUT:-600}s"` (or a literal like `10m`). Set it equal to — or a touch below — the outer wrapper so agy trips on its own first and prints an attributable timeout message instead of being SIGTERM-ed. Without it agy self-limits at 5m and cuts off a slow cold start first. Treat multi-minute first-call latency as normal, not a hang. The empty-output quirk is handled by the retry-then-fallback policy below.
 - **Round 2**: Fresh CLI call with full context + synthesis
 - **Env requirements**: Authenticated `agy` session — Google account sign-in (Google One AI plans) or enterprise Gemini Enterprise Agent Platform (a Google Cloud project). Install: `curl -fsSL https://antigravity.google/cli/install.sh | bash`. Config lives under `~/.gemini/antigravity-cli/`.
 
@@ -69,13 +79,21 @@ Backward-compatible Google reviewer. Note: Gemini CLI's consumer "Sign in with G
 
 ### Google-family reviewer (Antigravity + Gemini)
 
-`agy` (Antigravity) and `gemini` run the same Gemini model family, so they share **one** reviewer slot — never dispatch both as separate votes (it would skew convergence). Resolve the slot at detection time:
+`agy` (Antigravity) and `gemini` run the same Gemini model family, so they share **one** reviewer slot — never dispatch both as separate votes (it would skew convergence). **`agy` is the primary Google reviewer whenever it is installed; `gemini` is only a last-resort fallback.** Resolve the slot at detection time:
 
-- Both installed → try `agy` first, fall back to `gemini` if `agy` is absent, fast-fails, **or returns empty/malformed output** (e.g. `agy -p` exiting 0 with no stdout in a non-TTY). Counts as **one** reviewer.
-- Only one installed → use it.
+- **`agy` installed** (with or without `gemini`) → the slot is **Google (Antigravity)** — `agy` primary, `gemini` fallback only. Announce and label it **Google (Antigravity)**, never "Gemini", even before invocation — `agy` is what will actually run.
+- Only `gemini` installed → use `gemini`; announce as **Google (Gemini)**.
 - Neither → the Google slot is unavailable; note it in the report.
 
-Label the result by the tool that produced it — **Antigravity** or **Gemini**.
+**Invocation policy when `agy` is primary** (the order matters — a transient `agy` blip must not be masked by a `gemini` that cannot succeed):
+
+1. Run `agy`. If it returns a valid non-empty review, use it. Done.
+2. If `agy` returns **empty or malformed output** — the known `agy -p` quirk of exiting **0 with no stdout** in a non-TTY, usually a cold-start artifact — **retry `agy` once, but only if that empty result came back *quickly*** (rule of thumb: under ~⅓ of the budget). Time-box the retry to the **remaining** budget, not a fresh `RC_REVIEWER_TIMEOUT`, so first-try + retry can never exceed one budget. The warm retry almost always returns a valid review. Do not go to `gemini` yet.
+3. Fall back to `gemini` only when `agy` cannot be salvaged: `agy` is **absent**, **hard-fails** (auth/quota — retrying won't help), **times out**, its empty result arrived **near the cap** (a slow-but-completed empty call — treat it like a timeout; do not retry, or you nearly double the wall-clock), or its **step-2 retry also returns empty/malformed**. The slot's outcome is then terminal for the round (not eligible for external reviewer-level retry).
+
+**`gemini` is a dead fallback for Workspace/Dasher accounts.** `gemini -p` fast-fails almost instantly with `IneligibleTierError` (`reasonCode: DASHER_USER`, "not eligible for Gemini Code Assist for individuals") for any Google **Workspace**-domain account, and for any account without a `GEMINI_API_KEY` / Vertex / enterprise Code Assist license. For those users the fallback **cannot** succeed — that is expected, not a misconfiguration. When it fails this way, report the slot honestly attributed to its **primary** tool — e.g. *"Google (Antigravity) — agy returned empty output after retry; Gemini fallback ineligible (Workspace/Dasher account). Slot skipped."* — **never** as a bare "Gemini auth failure," which hides that `agy` was the real reviewer and misleads a user whose `agy` works fine interactively.
+
+Label a successful result by the tool that produced it — **Antigravity** or **Gemini**.
 
 ## Adding a New Provider
 
