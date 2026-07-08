@@ -27,7 +27,16 @@ Reference for the orchestrator. At runtime, probe each provider in order. Availa
 
 Google's successor to the Gemini CLI (binary `agy`). See the **Google-family reviewer** rule below — when both `agy` and `gemini` are installed, `agy` is tried first and `gemini` is the fallback; together they occupy a single reviewer slot.
 
-- **Detection**: `command -v agy 2>/dev/null`, and if that's empty, fall back to the known install path `~/.local/bin/agy` (agy installs there and a session with a minimal `PATH` may not include it): `command -v agy 2>/dev/null || { [ -x "$HOME/.local/bin/agy" ] && printf '%s\n' "$HOME/.local/bin/agy"; }`. **`agy` must be probed explicitly and preferred — never default the Google slot to `gemini` without checking `agy` first.** Invoke by the resolved full path so a `PATH` gap doesn't make a present `agy` look absent. (No MCP transport exists for Antigravity.)
+- **Detection**: probe `command -v agy` first, then — if empty — the common install dirs, since a minimal `PATH` may omit them. Use the **same probe as the `run`/`setup` skills** (keep all three in sync — don't let this one drift narrower):
+  ```bash
+  AGY="$(command -v agy 2>/dev/null || true)"
+  if [ -z "$AGY" ]; then
+    for d in "$HOME/.local/bin" /opt/homebrew/bin /usr/local/bin; do
+      [ -x "$d/agy" ] && { AGY="$d/agy"; break; }
+    done
+  fi
+  ```
+  **`agy` must be probed explicitly and preferred — never default the Google slot to `gemini` without checking `agy` first.** Invoke by the resolved full path (`$AGY`) so a `PATH` gap doesn't make a present `agy` look absent. (No MCP transport exists for Antigravity.)
 - **CLI invocation**: The subagent runs `agy --help` to discover current syntax, then invokes Antigravity in non-interactive mode with text output. Do not hardcode flags — CLI syntax changes between versions. Hint verified against agy 1.0.16–1.1.0: `agy -p "<prompt>"` (`-p`/`--print` = run a single prompt non-interactively and print the response). Optional: `--add-dir <repo>` to include the repo in the workspace, `--model <name>` to select a model, `--dangerously-skip-permissions` to avoid blocking on an approval it can't receive in a non-TTY.
 - **Cold start**: `agy`'s **first** `-p` call in a session is slow (model load, auth handshake, update check) — it can take **several minutes**, versus ~10s once warm; occasionally it exits 0 with no stdout. Give it real headroom, or a cold start looks like a failure: the invocation is capped **twice** and both caps must cover the budget — the outer wrapper (`${RC_REVIEWER_TIMEOUT:-600}`, 10m default) **and** agy's own `--print-timeout`, which defaults to just **5m**. You MUST pass `--print-timeout` sized to the budget — but its value is a **Go duration string and requires a unit suffix**: a bare integer is rejected (`agy --print-timeout 600` exits 2 with `missing unit in duration "600"`). Since `RC_REVIEWER_TIMEOUT` is in **seconds**, append `s`: `--print-timeout "${RC_REVIEWER_TIMEOUT:-600}s"` (or a literal like `10m`). Set it equal to — or a touch below — the outer wrapper so agy trips on its own first and prints an attributable timeout message instead of being SIGTERM-ed. Without it agy self-limits at 5m and cuts off a slow cold start first. Treat multi-minute first-call latency as normal, not a hang. The empty-output quirk is handled by the retry-then-fallback policy below.
 - **Round 2**: Fresh CLI call with full context + synthesis
