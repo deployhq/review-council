@@ -103,6 +103,7 @@ Review Council — Provider Status
 
 Reviewers:
   - Claude (native) ........... always available
+  - Security (native, dedicated) always available
   - Codex ..................... [available (CLI) | available (MCP) | not found]
   - Google (agy / gemini) ..... [available (agy → gemini) | available (Antigravity) | available (Gemini) | not found]
   - Perplexity ............... [available (API) | not configured]
@@ -113,7 +114,9 @@ Prerequisites:
 Optional:
   - Config files (yq) ......... [available (mikefarah v4 detected) | installed just now (mikefarah v4) | wrong yq — need mikefarah/yq v4 | not installed (using defaults + RC_* env)]
 
-[N] of 4 reviewer slots available. [Council mode ready. | Single-reviewer mode — install at least one additional provider.]
+Claude and Security are both native and always available, but they are the same model family (Claude) — council mode and the refutation pass need at least one reviewer from a DIFFERENT family (Codex, Google, or Perplexity) to cross-verify against.
+
+[N] of 3 different-family reviewers available (Codex, Google, Perplexity). [Council mode ready. | Single-reviewer mode (Claude-family only) — install at least one different-family provider.]
 
 (Antigravity and Gemini share the Google slot — `agy` preferred, `gemini` fallback — so they count as one reviewer, not two.)
 

@@ -89,7 +89,7 @@ Reconcile the config (0.1) with detection (0.2):
 
 Announce: "**Review Council** — [N] reviewers available: [list]. [Skipped: reason for each unavailable **or config-disabled** provider]". When the Google slot is available, name the actual tool — e.g. "Google (Antigravity)" — so it's clear `agy` (not `gemini`) is the one running.
 
-If only Claude is available, proceed in **single-reviewer mode** and note it in the output. Suggest running `/review-council:setup` to see how to add more reviewers.
+If only Claude-family reviewers (Claude + the dedicated Security reviewer) are available — i.e. no different-family reviewer to cross-verify against — proceed in **single-reviewer mode** and note it in the output. Suggest running `/review-council:setup` to see how to add more reviewers.
 
 ## Step 0.5: Recall Learnings
 
@@ -444,7 +444,7 @@ If `settings.verify` is true, apply these gates and rules **in order**.
 
 ### 4.0 Skip gates (check first, before any routing)
 
-1. **Solo-Claude mode** — if Claude is the only available reviewer, **skip refutation entirely**. Tag every finding `[1 reviewer · unverified]` and go to Step 5. Do NOT self-verify with another Claude spawn — one model refuting itself is correlated-error theatre, not cross-family evidence.
+1. **Solo-Claude mode** — if only Claude-family reviewers (Claude + the dedicated Security reviewer) are available — i.e. no different-family reviewer to cross-verify against — **skip refutation entirely**. Tag every finding `[1 reviewer · unverified]` and go to Step 5. Do NOT self-verify with another Claude spawn — one model refuting itself is correlated-error theatre, not cross-family evidence.
 2. **Budget check FIRST (see `rules/orchestration.md` → Budget).** Sum the **measured elapsed** the Round-1 CLI invocations reported (the CLI long pole — e.g. `agy`'s cold start; not a stopwatch you watch). If that sum has already reached `settings.run_budget_seconds`, **skip refutation**: tag all findings `[unverified]`, print `stopped at budget: <n>s`, and go straight to Step 5. Never hard-abort — degrade.
 
 If neither gate fires, run the pass.
@@ -504,7 +504,7 @@ Collapse findings with the **same fingerprint** into one. Keep the most specific
 
 - **+1 tier (severity or confidence)** when a finding has **cross-family corroboration** — it was raised by **≥2 different families**, **or** it was **UPHELD** in Step 4 by a **different family** (these are the two `[cross-reviewed]` paths). A same-family-only pile-up is **NOT** a promotion signal.
 - **Drop a finding ONLY if it was REFUTED with positive counter-evidence.** Never drop on absence of proof.
-- **Keep and tag `[unverified]`** if the verdict was **INCONCLUSIVE**, or the finding was never verified at all (solo-Claude mode, over the cap, or budget-degraded).
+- **Keep and tag `[unverified]`** if the verdict was **INCONCLUSIVE**, or the finding was never verified at all (over the cap, or budget-degraded) — in a **multi-reviewer** run. Solo-Claude findings are already tagged `[1 reviewer · unverified]` in Step 4.0; they do not additionally get the plain `[unverified]` badge.
 - **Never demote a `critical` out of Critical** for being single-reviewer. Tag it `[1 reviewer · unverified]` and keep it Critical.
 - **Suppress** any finding whose fingerprint matches a **learnings Suppression** entry recalled in Step 0.5. **Count the suppressions.**
 - (Phase-2 note: `[verified]` + top confidence when a deterministic tool and an LLM hit the same fingerprint is **not** built in this phase.)

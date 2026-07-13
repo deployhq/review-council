@@ -72,11 +72,13 @@ flowchart TD
     K2 -->|"Some failed"| K3["Retry (1x max)<br/>or ask user / degrade"]
     K3 --> L
 
-    L -->|"verify=false or solo-Claude"| M2["Skip — tag [unverified] /<br/>[1 reviewer · unverified]"]
+    L -->|"verify=false"| M2["Skip — tag [unverified]"]
+    L -->|"solo-Claude"| M2b["Skip — tag [1 reviewer · unverified]"]
     L -->|"budget spent"| M3["Skip — stopped at budget: Ns"]
     L -->|"verify"| M["Refutation pass<br/>cross-family, budget-bounded<br/>UPHELD / REFUTED / INCONCLUSIVE"]
 
     M2 --> N
+    M2b --> N
     M3 --> N
     M --> N
 
@@ -130,7 +132,7 @@ graph LR
 | **Google** (Antigravity / Gemini) | CLI — `agy` preferred, `gemini` fallback | `which agy` or `which gemini` |
 | **Perplexity** | Sonar API (`curl`) | `PERPLEXITY_API_KEY` env var |
 
-Minimum 2 reviewers needed for council mode (`settings.min_reviewers`, default 2). With only Claude, runs in single-reviewer mode. Providers are auto-detected at runtime — no manual configuration needed.
+Minimum 2 reviewers needed for council mode (`settings.min_reviewers`, default 2). Claude and the dedicated Security reviewer are both native and always run, but they are the **same model family (Claude)** — council mode and the refutation pass need at least one reviewer from a **different family** (Codex, Google, or Perplexity) to cross-verify against. With only Claude-family reviewers (Claude + Security) available, the run proceeds in single-reviewer mode. Providers are auto-detected at runtime — no manual configuration needed.
 
 **Lens-differentiated Round 1.** Every reviewer is assigned a lens before dispatch: the dedicated Security reviewer always carries the Security lens; every repo-capable frontier reviewer (Claude, Codex, Google) carries Correctness & concurrency as its core, plus one diff-aware specialist overlay chosen from what actually changed (Cross-file/API-contract, Performance & reliability, Design & maintainability, Data-integrity & migration, Config/workflow, or UI-state & accessibility); tool-less Perplexity always carries Dependency/CVE/best-practices. **Lens = emphasis, not blinders** — every reviewer still flags any critical issue it notices outside its lens. The chosen lens map is printed before Round 1 and again in the final report header. `.review-council/config.yml` can pin a lens to specific providers or disable it (see [Configuration](#configuration)); `settings.personas: false` reverts every reviewer to the identical legacy (non-lens) prompt.
 
@@ -210,7 +212,7 @@ The judge (Step 5) turns those verdicts into the badges shown in the final repor
 |---|---|
 | `[cross-reviewed]` | Raised by ≥2 reviewer families, or UPHELD by a different-family verifier |
 | `[1 reviewer · unverified]` | A single reviewer raised it and it wasn't (yet) cross-verified — critical findings are **never** demoted out of Critical for this |
-| `[unverified]` | Not verified this run — solo-Claude mode, over the `verify_max_findings` cap, or the run budget was spent before verification |
+| `[unverified]` | Not verified this run — over the `verify_max_findings` cap, or the run budget was spent before verification (solo-Claude findings get `[1 reviewer · unverified]` instead) |
 
 `[verified]` (a deterministic tool and an LLM agreeing on the same fingerprint) is reserved for a future, tool-grounded phase and does not appear yet.
 
@@ -230,7 +232,14 @@ The judge (Step 5) turns those verdicts into the badges shown in the final repor
 **Type:** PR
 **Reviewers:** Claude, Security, Codex, Antigravity (4 of 5 — Perplexity: PERPLEXITY_API_KEY not set)
 **Lens map:** Security: Security (dedicated) · Claude: Correctness + Data-integrity & migration · Codex: Correctness + Cross-file / API-contract · Antigravity: Correctness + Performance & reliability
-**Pipeline:** Round 1 → Well-formed check → Refutation → Judge
+**Pipeline:** Round 1 → well-formed check → refutation → judge → report
+
+Judge ledger:
+fingerprint                                  | origin-families    | verdict      | suppression? | tool? | final-severity | final-confidence
+rate-limit.ts::ratelimiter::in-memory-store  | codex,claude        | UPHELD       | no           | —     | critical       | high
+rate-limit.ts::ratelimiter::ip-only-key      | claude              | INCONCLUSIVE | no           | —     | important      | high
+api.ts::handler::missing-rate-limit-headers  | codex,antigravity   | UPHELD       | no           | —     | important      | medium
+Suppressions applied: 0
 
 ### Critical Issues
 
