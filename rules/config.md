@@ -146,6 +146,11 @@ YAML processor). It must be on `PATH`. To use a `yq` at a non-standard location,
 defaults + `RC_*` env overrides (still fully functional, with one stderr note that `yq` was
 not found). `yq` is therefore **optional** — it is only needed to *use* config files.
 
+Run `/review-council:setup` to check for `yq` — it will detect the right binary and, with
+your explicit consent, install mikefarah/yq v4 for you (`brew install yq`, or a direct
+binary fetch on Linux without Homebrew). Decline and it just prints the manual command
+above and moves on.
+
 ## Reference blocks
 
 Two ready-to-use templates. Because every key is optional and defaults to the built-in

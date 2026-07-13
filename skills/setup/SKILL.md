@@ -58,9 +58,9 @@ which gh 2>/dev/null && gh auth status 2>&1 | head -3
 - If authenticated: "GitHub CLI ............ authenticated"
 - If not: "GitHub CLI ............. not found or not authenticated (PR reviews disabled)"
 
-### Config-file support (yq) — optional
+### Config-file support (yq) — optional, install offered with consent
 
-Review Council reads an optional `.review-council/config.yml` (see `rules/config.md`). Parsing needs **[mikefarah/yq](https://github.com/mikefarah/yq) v4**. It is **optional**: without it, the plugin runs on built-in defaults + `RC_*` env vars (config files are ignored). Detect it — and confirm it's the *right* `yq` (there is a different Python tool also named `yq`):
+Review Council reads an optional `.review-council/config.yml` (see `rules/config.md`). Parsing needs **[mikefarah/yq](https://github.com/mikefarah/yq) v4**. It is **optional**: without it, the plugin runs on built-in defaults + `RC_*` env vars (config files are ignored). Detect it first — and confirm it's the *right* `yq` (there is a different Python tool also named `yq` that must NOT count):
 
 ```bash
 if command -v yq >/dev/null 2>&1 && yq --version 2>&1 | grep -q 'mikefarah' && yq --version 2>&1 | grep -qE 'version v?4'; then
@@ -72,11 +72,27 @@ else
 fi
 ```
 
-- **mikefarah v4 present** → "Config files (yq) ..... available"
-- **present but wrong yq** (Python `yq`, or a v3) → "Config files (yq) ..... wrong yq — need mikefarah/yq v4"
-- **not found** → "Config files (yq) ..... not installed (using defaults + RC_* env)"
+- **mikefarah v4 present** → status row: "Config files (yq) ..... available (mikefarah v4 detected)". Nothing else to do.
+- **missing, or the wrong `yq`** → this is the unusual case for `setup` (an interactive skill): don't just print a command and stop. Instead, **detect → ask → install-on-consent → verify**:
+  1. **Explain** it's optional — needed only to *use* `.review-council/config.yml`; without it the plugin runs fine on built-in defaults + `RC_*` env vars.
+  2. **Ask the user for explicit consent**, e.g.: "Install mikefarah/yq v4 now so config files work? (yes/no)". Do not proceed without an explicit yes — this is consent-gated, never a silent auto-install.
+  3. **On yes**, install for the platform actually present, then re-verify:
+     - If `brew` is available (macOS, or Linux with Homebrew installed): `brew install yq`.
+     - Otherwise (Linux without brew): fetch the mikefarah v4 binary straight to `~/.local/bin`:
+       ```bash
+       mkdir -p "$HOME/.local/bin"
+       curl -fsSL https://github.com/mikefarah/yq/releases/latest/download/yq_linux_amd64 -o "$HOME/.local/bin/yq"
+       chmod +x "$HOME/.local/bin/yq"
+       ```
+       Confirm `~/.local/bin` is on `PATH` (`echo "$PATH"`); if it isn't, tell the user to add `export PATH="$HOME/.local/bin:$PATH"` to their shell profile (a new shell will need it).
+     - After installing, **re-run the detection one-liner above** to confirm `yq --version` now reports mikefarah v4. If it still doesn't (e.g. PATH not picked up yet in this session), say so plainly rather than reporting success.
+  4. **On no** (or anything non-affirmative) → print the manual install command (`brew install yq`, or the `curl`/`chmod` lines above for Linux) plus the <https://github.com/mikefarah/yq#install> link, and move on — this is never a blocker.
 
-When it's missing or the wrong `yq`, **print** the install instruction — do **not** install it (same norm the plugin uses for providers): `brew install yq` (macOS), or see <https://github.com/mikefarah/yq#install> for other platforms. State that it is optional — needed only to *use* config files; without it the plugin uses built-in defaults + `RC_*` overrides.
+Report the final status as one of:
+- "Config files (yq) ..... available (mikefarah v4 detected)"
+- "Config files (yq) ..... installed just now (mikefarah v4)" — after consent + a successful install
+- "Config files (yq) ..... not installed (using defaults + RC_* env)" — declined, or install failed
+- "Config files (yq) ..... wrong yq — need mikefarah/yq v4" — present but wrong, and the user declined to fix it
 
 ## Step 2: Summary
 
@@ -95,7 +111,7 @@ Prerequisites:
   - GitHub CLI (gh) ........... [authenticated | not found]
 
 Optional:
-  - Config files (yq) ......... [available | wrong yq — need mikefarah/yq v4 | not installed (using defaults + RC_* env)]
+  - Config files (yq) ......... [available (mikefarah v4 detected) | installed just now (mikefarah v4) | wrong yq — need mikefarah/yq v4 | not installed (using defaults + RC_* env)]
 
 [N] of 4 reviewer slots available. [Convergence mode ready. | Single-reviewer mode — install at least one additional provider.]
 
