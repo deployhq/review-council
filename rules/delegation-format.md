@@ -67,7 +67,7 @@ If you find no issues, write "No issues found" in Findings. Keep the What's Good
 
 ## LENS
 
-Before the `## TASK` section, the orchestrator prepends a short lens block to each reviewer's delegation payload:
+Immediately after the `## TASK` line, the orchestrator prepends a short lens block to each reviewer's delegation payload — it sits at the top of the review payload, right alongside the task, before `## REVIEW PROCESS`:
 
 ```
 ## LENS

@@ -98,7 +98,7 @@ Recall the team's shared learnings so past decisions shape this run. **Gated on 
 If `settings.learn` is **true**, read `.review-council/learnings.md` from the **target repo** (the CWD where the review runs, alongside `.review-council/config.yml`). **If the file is absent, skip silently** — no warning, no error. A missing file is the normal case. The file has two sections (format in `rules/config.md` → learnings):
 
 - **Conventions** — project-specific rules about what not to flag (e.g. "Migrations are auto-generated; do not flag missing down-migrations"). Fold this section **into the Step-2 baseline context package** (see Step 2) under a clear "Team Learnings — Conventions" heading. Because it rides the shared package, it is injected **once** and reaches **every** reviewer — do NOT paste it separately into each dispatch.
-- **Suppressions** — known false positives keyed by fingerprint. **Hold** this section for the Step-5 judge (a later PR). It is **not** injected into reviewer prompts in this phase; carry it forward so the judge can later down-weight/skip matching findings. Nothing consumes it yet — just pass it along.
+- **Suppressions** — known false positives keyed by fingerprint. **Hold** this section for the judge synthesis step (PR 1c). It is **not** injected into reviewer prompts in this phase; carry it forward so the judge can later down-weight/skip matching findings. Nothing consumes it yet — just pass it along.
 
 ## Step 1: Detect Review Target
 
@@ -144,7 +144,7 @@ Collect context appropriate to the detected type. This becomes the **baseline co
 - Git blame for changed hunks
 - Project conventions: raw contents of CLAUDE.md, CONTRIBUTING.md, README (if present)
 
-**Team Learnings — Conventions (from Step 0.5).** If Step 0.5 recalled a **Conventions** section, append it here under a "Team Learnings — Conventions" heading. Folding it into this shared package (rather than each dispatch) injects it **once** yet reaches every reviewer. (The **Suppressions** section is NOT included here — it is held for the Step-5 judge.)
+**Team Learnings — Conventions (from Step 0.5).** If Step 0.5 recalled a **Conventions** section, append it here under a "Team Learnings — Conventions" heading. Folding it into this shared package (rather than each dispatch) injects it **once** yet reaches every reviewer. (The **Suppressions** section is NOT included here — it is held for the judge synthesis step, PR 1c.)
 
 Package this as a structured text block. You will send this same package to each reviewer — this is the shared baseline. Reviewers may explore further using their own tools, but the baseline ensures equal starting context.
 
@@ -178,7 +178,7 @@ Before launching the reviewers, assign each one a **lens** — an emphasis that 
    | Frontend components / state / styles | UI-state & accessibility |
    | Broad multi-file refactor | Cross-file impact |
 
-3. **Assign ONE specialist overlay per frontier reviewer** (Claude, Codex, Google — on top of CORE Correctness), drawing from the overlays present in the diff in this **deterministic tie-break order** (signals outrank slots): **Data-integrity → Cross-file → Performance → Config → UI → Design.** Walk the order and hand each present overlay to the next frontier reviewer that has none yet. If reviewers remain after the present overlays run out, give them **Design & maintainability** (the always-useful default). If overlays outnumber reviewers, the earliest in the order win.
+3. **Assign ONE specialist overlay per frontier reviewer** (Claude, Codex, Google — on top of CORE Correctness), drawing from the overlays present in the diff in this **deterministic tie-break order** (signals outrank slots): **Data-integrity → Cross-file → Performance → Config → UI → Design.** Walk the order and hand each present overlay to the next frontier reviewer that has none yet. Iterate the repo-capable frontier reviewers in the order **Claude, Codex, Google** when assigning overlays, so the reviewer↔overlay pairing is reproducible. If reviewers remain after the present overlays run out, give them **Design & maintainability** (the always-useful default). If overlays outnumber reviewers, the earliest in the order win.
 
 4. **Config pins override the diff-aware default.** For each lens `l` in {`security`, `correctness`, `cross_file`, `performance`, `design`, `dependency`}, Step 0 resolved `lens.<l>.enabled` and `lens.<l>.providers`:
    - `lens.<l>.enabled=false` → that lens is not assigned this run.
@@ -394,7 +394,7 @@ Before synthesis, validate each reviewer's output. Refer to `rules/orchestration
 For each reviewer's response:
 1. Check for `## Findings` (or `### Findings`) section — present?
 2. Check for `## Overall Assessment` (or `### Overall Assessment`) section — present?
-3. If Findings section exists and contains findings, check each finding has: **Severity**, **Location**, **Recommendation**
+3. If Findings section exists and contains findings, check each finding carries all required fields from `rules/orchestration.md` → Field-Level Validation (the §3.1 schema: `severity`, `confidence`, `location`, `symbol`, `concern`, `issue`, `why_it_matters`, `recommendation`, `how_to_verify`, `source`)
 4. If Findings section says "No issues found" or equivalent — mark as CLEAN
 5. If sections are missing or findings lack required fields — mark as FAILED
 
