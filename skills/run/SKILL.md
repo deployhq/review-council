@@ -32,6 +32,7 @@ rm -f "$RC_NOTES"
 - `reviewer.<p>.enabled` / `reviewer.<p>.model` for `p` in `claude`, `codex`, `google`, `perplexity`.
 - `lens.<l>.enabled` / `lens.<l>.providers` for `l` in `security`, `correctness`, `cross_file`, `performance`, `design`, `dependency` — plus `lens.security.replaces_dedicated`.
 - `settings.<k>` for `personas`, `verify`, `verify_max_findings`, `learn`, `min_reviewers`, `reviewer_timeout_seconds`, `run_budget_seconds`, `auto_retry`.
+- `static_analysis.<k>` for `enabled`, `tools`, `timeout_seconds`, `semgrep_config` — the deterministic static-scan layer consumed in **Step 2.5**. (An older reader that does not emit a `# static_analysis` section → fall back to the defaults: `enabled=true`, `tools=gitleaks,trufflehog,osv-scanner,semgrep,ruff,shellcheck,actionlint,hadolint`, `timeout_seconds=60`, `semgrep_config=auto`.)
 
 If `yq` is missing, the reader prints a `yq not found` note and falls back to defaults + env; the run proceeds normally (config files are simply ignored). `rules/config.md` documents the one-time `brew install yq` (mikefarah v4) needed to *use* config files.
 
@@ -146,7 +147,69 @@ Collect context appropriate to the detected type. This becomes the **baseline co
 
 **Team Learnings — Conventions (from Step 0.5).** If Step 0.5 recalled a **Conventions** section, append it here under a "Team Learnings — Conventions" heading. Folding it into this shared package (rather than each dispatch) injects it **once** yet reaches every reviewer. (The **Suppressions** section is NOT included here — it is held for the judge synthesis step, Step 5.)
 
-Package this as a structured text block. You will send this same package to each reviewer — this is the shared baseline. Reviewers may explore further using their own tools, but the baseline ensures equal starting context.
+Package this as a structured text block. You will send this same package to each reviewer — this is the shared baseline. Reviewers may explore further using their own tools, but the baseline ensures equal starting context. **If Step 2.5 runs the static scan, its Tier B signals are appended to this same package** (under a "PRE-EXISTING STATIC-ANALYSIS SIGNALS — corroborate or dismiss" heading) so every reviewer sees them once — hold that step's output and fold it in before dispatching Round 1.
+
+## Step 2.5: Deterministic Static Scan
+
+**Gated on `static_analysis.enabled` (resolved in Step 0).** If it is **false**, skip this step entirely — run no scan, and note `static analysis: off` in the Step-6 Pipeline header. A missing or erroring script is **never** a reason to abort (see 2.5.3): the run always continues.
+
+When enabled, run the deterministic scanners **once per run** (never per reviewer) and split their output into the two-tier evidence model:
+- **Tier A** (verified secrets, known CVEs) → carried forward **untouched** to the judge (Step 5) as pre-`[verified]` findings. Tier A **never enters Round 1** and is never sent through a reviewer prompt.
+- **Tier B** (SAST/lint signals) → folded into the **Step-2 baseline context package** so every Round-1 reviewer sees it and either corroborates or dismisses it.
+
+Static analysis is **not a voting reviewer** — it never counts toward `settings.min_reviewers`, gets no lens, and is never refuted in Step 4. See `rules/static-analysis.md` for the tool registry, tier map, per-tool install commands, and the normalize→§3.1 mapping.
+
+### 2.5.1 Dispatch the scan (one general-purpose subagent)
+
+Reuse the BASE ref and changed-file list **already computed in Step 1/2** — do NOT re-derive the diff. Determine the two refs and the changed-file list from the detected target type:
+- **PR review** → base = the PR base branch (`baseRefName`), head = the PR head branch (`headRefName`); changed files = the `changedFiles` set from `gh pr view` (or `gh pr diff --name-only`).
+- **Staged code review** → base = `HEAD`, head = the working tree (pass the worktree path, e.g. `.`); changed files = `git diff --cached --name-only`.
+- **Unstaged working changes** → base = `HEAD`, head = the working tree; changed files = `git diff --name-only`.
+- **Plan/document review** → there is no code diff; **skip Step 2.5 entirely** (nothing for the scanners to scope to) and note `static analysis: off (no code diff)`.
+
+Write the changed-file list (one repo-relative path per line) to a temp file, then dispatch **one** `general-purpose` Agent with the prompt below. Pass the effective `static_analysis.*` values resolved in Step 0 as env vars **on the invocation** (the script reads them via env, matching `rc-config.sh`'s output; do not rely on ambient env carrying across separate tool calls):
+
+> You are running the Review Council deterministic static scan. Run the bundled scanner script **once** and return its output verbatim. Do NOT interpret, summarize, re-run individual tools, or add commentary.
+>
+> Run exactly (substitute the effective values and paths given to you):
+> ```bash
+> RC_STATIC_ANALYSIS=<effective static_analysis.enabled> \
+> RC_STATIC_TOOLS=<effective static_analysis.tools, comma-joined> \
+> RC_STATIC_TIMEOUT=<effective static_analysis.timeout_seconds> \
+> RC_SEMGREP_CONFIG=<effective static_analysis.semgrep_config> \
+> "${CLAUDE_PLUGIN_ROOT}/scripts/rc-static-scan.sh" "<base-ref>" "<head-ref-or-worktree>" "<changed-files-list-file>"
+> ```
+> The script probes each configured tool (`command -v`), checks its domain trigger against the changed files, runs the present + triggered ones under a per-tool timeout, and prints a `TIER_A` block, a `TIER_B` block, and one `SKIPPED: <tool> — <reason>` line per skipped tool. It **always** exits cleanly — a tool's own non-zero "found something" exit is a normal outcome, not a script failure.
+>
+> **If the script is missing, non-executable, or errors out before producing its blocks**, do NOT abort — return exactly `STATIC-SCAN-UNAVAILABLE: <one-line reason>` and nothing else. The orchestrator treats that as "all tools skipped."
+>
+> On success, return the script's **stdout verbatim** (the `TIER_A`, `TIER_B`, and `SKIPPED:` lines) — nothing added, nothing removed. The output is already compact (normalized pipe lines `tier|tool|severity_raw|file|line|rule|message`), so return it whole.
+
+### 2.5.2 Missing CONFIGURED tools — inform + ASK (never silently drop)
+
+Before consuming the results, scan the `SKIPPED:` lines for any tool skipped with reason **`not installed`** that is in the configured `static_analysis.tools` list. The user *expects* these tools, so they must **never** be silently dropped.
+
+- **Domain-not-triggered skips stay quiet** (`SKIPPED: <tool> — not triggered (no matching files)`): nothing to install, so just fold them into the status line. Same for `disabled`, `semgrep off`, and `network-unreachable` (trufflehog's live-verification egress absent → treated as "ran, 0 findings"; not a missing tool).
+- **For each tool skipped as `not installed`:** TELL the user which configured tools are missing and **how to install each** — look up the per-tool install command in `rules/static-analysis.md` (the tool registry; e.g. `brew install gitleaks`). Then **ASK**, conversationally:
+  > *"These configured static-analysis tools aren't installed: [tool → install cmd, one per line]. Install them first (I'll pause and re-run the scan once you've installed them), or proceed without them for this run?"*
+  - **Proceed** → continue with the tools that did run; note the missing ones in the status line (`skipped: not installed — proceeding`).
+  - **Install / wait** → pause. After the user confirms they're installed, **re-dispatch the same subagent** (2.5.1) — the newly-present tools are picked up automatically by the script's `command -v` probe, no restart needed. Re-check the `SKIPPED:` lines and repeat the ASK if anything is still missing.
+
+This is still non-blocking — the user can always choose *proceed* — it just never *silently* drops an expected tool. (`setup` is print-only; this interactive proceed/pause ASK lives here, at review-run time, where a real run is about to skip a tool the user configured.)
+
+### 2.5.3 Route the results
+
+- **Tier A → to the judge (Step 5), pre-`[verified]`.** For each `TIER_A` line, build a §3.1-shaped candidate: `location` = `<file>:<line>`; `symbol` = the enclosing construct if the line names one, else `N/A`; `concern` = `<tool>:<rule>` lowercased; `source` = `<tool>`; `confidence` = `high`; `severity` = the **inherited** Tier A severity (secrets → Critical; osv-scanner → its CVSS→severity map, per `rules/static-analysis.md`). Carry these to Step 5 **untouched** — they do not enter Round 1, are exempt from the suggestion cap, and the judge does **not** downgrade them (severity is inherited, not judge-assigned). (gitleaks caveat: precision-by-rule, not live-verified — trufflehog is the live-verified secret scanner.)
+- **Tier B → into the Step-2 baseline package.** Append the `TIER_B` lines to the shared context package under a new heading **"PRE-EXISTING STATIC-ANALYSIS SIGNALS — corroborate or dismiss"**, one line per finding (`tool · rule · file:line · message`). Do **not** editorialize severity here — that's the judge's call at Step 5. Because it rides the shared package, it is injected **once** and reaches **every** reviewer (do NOT paste it separately into each dispatch).
+- **Script unavailable** → if the subagent returned `STATIC-SCAN-UNAVAILABLE:` (or nothing usable), treat it as **all tools skipped**: no Tier A, no Tier B, status line reads `Static analysis: unavailable (<reason>)`. Never abort the run.
+
+### 2.5.4 Print the status line
+
+Print a compact status line (same observable-artifact spirit as the Phase-1 lens map / routing table), one entry per configured tool — `ok, <count>` for a tool that ran, or `skipped: <reason>` otherwise:
+```
+Static analysis: gitleaks (ok, 0), osv-scanner (ok, 2 CVEs), semgrep (ok, 5 signals), ruff (skipped: no *.py in diff), shellcheck (skipped: not installed — proceeding), actionlint (skipped: no workflow changes), hadolint (skipped: no Dockerfile changes)
+```
+Carry this line into the Step-6 report header. If Step 2.5 was skipped (disabled, or a plan/document review), the header notes `static analysis: off`.
 
 ## Step 3: Round 1 — Independent Review (Parallel)
 
@@ -496,9 +559,13 @@ A single **active judge** (you, the orchestrator) makes one pass over the Round-
 
 For each finding, compute `fingerprint = <relpath>::<normalized-symbol-or-hunk>::<normalized-concern>`. The **judge** computes it — reviewers never author it (their `concern` slug is a hint only). Normalize: repo-relative path; symbol lowercased/trimmed (or the hunk range if no symbol); concern reduced to its core kebab phrase.
 
+**Tool findings included.** The Tier A candidates carried from Step 2.5 and any Tier B signals a reviewer corroborated are fingerprinted the **same way** — a *semantic* reduction, **not** a string match between a tool's rule id and an LLM's `concern` slug (a `semgrep:<rule>` id and a Codex free-text concern are never string-identical; the judge recognizes them as the same issue by file/line proximity + semantic reading, exactly as it already does for two differently-worded LLM findings). No new machinery — tool findings flow through the existing fingerprint/dedup path.
+
 ### 5.2 Semantic cross-model dedup
 
 Collapse findings with the **same fingerprint** into one. Keep the most specific/actionable text and **union** their origin-families (so a finding raised by Claude and Codex records both). This is the authoritative dedup — the Step-4 provisional clustering was only for corroboration detection.
+
+**When a Tier B tool signal and an LLM finding share a fingerprint, they collapse into one finding**; record the tool name(s) on the merged finding (this populates the ledger's `tool?` column, §5.5) and mark it tool-corroborated for §5.3. Tier A candidates also participate in dedup, but a Tier A hit is never *downgraded* by merging — see §5.3.
 
 ### 5.3 Recalibrate (§recalibration)
 
@@ -507,7 +574,9 @@ Collapse findings with the **same fingerprint** into one. Keep the most specific
 - **Keep and tag `[unverified]`** if the verdict was **INCONCLUSIVE**, or the finding was never verified at all (over the cap, or budget-degraded) — in a **multi-reviewer** run. Solo-Claude findings are already tagged `[1 reviewer · unverified]` in Step 4.0; they do not additionally get the plain `[unverified]` badge.
 - **Never demote a `critical` out of Critical** for being single-reviewer. Tag it `[1 reviewer · unverified]` and keep it Critical.
 - **Suppress** any finding whose fingerprint matches a **learnings Suppression** entry recalled in Step 0.5. **Count the suppressions.**
-- (Phase-2 note: `[verified]` + top confidence when a deterministic tool and an LLM hit the same fingerprint is **not** built in this phase.)
+- **Tier A tool finding (from Step 2.5)** → enters at its **inherited** severity (secrets → Critical; osv-scanner → its CVSS→severity map), badge **`[verified]`**, ledger `verdict = TOOL-VERIFIED` (it never went through Step-4 refutation). It is **exempt from the suggestion cap** (moot in practice — Tier A is rarely a `suggestion` — but state it for completeness) and the judge **never downgrades** it: severity is inherited, not judge-assigned. It is pre-verified evidence, not an opinion.
+- **Tier B tool finding, no LLM match on its fingerprint** → stays a `suggestion`, badge **`[tool-only:<rule>]`**, subject to the normal suggestion cap.
+- **Tier B tool finding, LLM match on the same fingerprint** → promote to **`[verified]`** at the **higher** of the tool's context-weight and the LLM's self-rated severity. This is the one place `[verified]` and `[cross-reviewed]` can coexist — a finding can be both tool-grounded and cross-family-corroborated; badge it `[verified]` (the stronger badge, see Step 6 precedence) and note the cross-review in prose.
 
 ### 5.4 Apply the what-not-to-flag filter
 
@@ -518,24 +587,28 @@ Drop any surviving finding that matches the **WHAT NOT TO FLAG** list (the same 
 Print one row per surviving finding, then the suppression count:
 ```
 Judge ledger:
-fingerprint                          | origin-families | verdict      | suppression? | tool? | final-severity | final-confidence
-auth.ts::checkauth::missing-authz    | codex,claude    | UPHELD       | no           | —     | critical       | high
-db.ts::listrows::n-plus-one          | claude          | INCONCLUSIVE | no           | —     | important      | medium
-api.ts::handler::unvalidated-input   | google          | REFUTED      | no           | —     | —              | —
+fingerprint                          | origin-families | verdict      | suppression? | tool?     | final-severity | final-confidence
+config.yml::_::hardcoded-secret      | —               | TOOL-VERIFIED| no           | gitleaks  | critical       | high
+auth.ts::checkauth::missing-authz    | codex,claude    | UPHELD       | no           | semgrep   | critical       | high
+db.ts::listrows::n-plus-one          | claude          | INCONCLUSIVE | no           | —         | important      | medium
+api.ts::handler::unvalidated-input   | google          | REFUTED      | (dropped)    | —         | —              | —
+run.sh::deploy::sc2086-word-split    | —               | TOOL-ONLY    | no           | shellcheck| suggestion     | medium
 Suppressions applied: 1
 ```
-The `tool?` column is reserved for Phase-2 deterministic-tool grounding — always `—` in this phase. Emit the ledger **before** the Step-6 prose so the judge's reasoning is auditable.
+The `tool?` column (was always `—` in Phase 1) now carries the tool name(s) whose finding hit the same fingerprint, or `—` if none did. Two verdict values are specific to static analysis: **`TOOL-VERIFIED`** for a Tier A finding (never went through Step-4 refutation) and **`TOOL-ONLY`** for a Tier B tool-only signal no reviewer corroborated (badge `[tool-only:<rule>]`). A Tier B signal a reviewer *did* corroborate merges into that reviewer's row (its `verdict` stays UPHELD/INCONCLUSIVE from Step 4, `tool?` records the tool, and it is `[verified]`). Emit the ledger **before** the Step-6 prose so the judge's reasoning is auditable.
 
 ## Step 6: Report
 
 Produce the final curated output, **grouped by severity FIRST**. Agreement is a per-finding **badge**, never the sort key.
 
 **Badges:**
+- `[verified]` — tool-grounded: a Tier A deterministic finding (secrets/CVE), or a Tier B tool signal an LLM reviewer corroborated on the same fingerprint (§5.3).
 - `[cross-reviewed]` — UPHELD by a different family, or raised by ≥2 different families.
 - `[1 reviewer · unverified]` — a single reviewer, not cross-verified (a single-reviewer `critical` keeps Critical severity **and** carries this badge).
 - `[unverified]` — verification was skipped / inconclusive / over-cap / budget-degraded, or `settings.verify` was off.
+- `[tool-only:<rule>]` — a Tier B tool signal no reviewer corroborated (stays a Suggestion, §5.3).
 
-(Phase-2 reserves `[verified]` for tool-grounded findings — not emitted here.)
+**Badge precedence** when more than one could apply — show the **strongest**, mention the rest in prose: `[verified]` > `[cross-reviewed]` > `[1 reviewer · unverified]` > `[unverified]`. (A finding that is both tool-grounded and cross-family-corroborated shows `[verified]` and notes the cross-review in prose.)
 
 The judge ledger from Step 5 is printed **before** this prose report. Then emit this format:
 
@@ -547,7 +620,7 @@ The judge ledger from Step 5 is printed **before** this prose report. Then emit 
 **Type:** [PR | Plan/Document | Code]
 **Reviewers:** [reviewers that participated] ([N] participating — [skipped: reasons])
 **Lens map:** [the per-reviewer lens assignment printed in Step 3 — e.g. `reviewer-security: Security · reviewer-claude: Correctness + Data-integrity · Codex: Correctness + Cross-file · Perplexity: Dependency`. If `settings.personas` is false, note "personas off (legacy prompt)".]
-**Pipeline:** Round 1 → well-formed check → refutation → judge → report  [append `· stopped at budget: <n>s` if the run degraded on budget; note `· refutation skipped (solo-Claude)` or `· refutation off (verify=false)` when applicable — these are the pipeline stages actually run]
+**Pipeline:** [prepend `static scan → ` when Step 2.5 ran] Round 1 → well-formed check → refutation → judge → report  [append `· stopped at budget: <n>s` if the run degraded on budget; note `· refutation skipped (solo-Claude)` or `· refutation off (verify=false)` when applicable, and `· static analysis: off` when Step 2.5 was disabled/skipped — these are the pipeline stages actually run]. Append the Step-2.5 status line (Static analysis: …) beneath this when the scan ran.
 
 ### Critical Issues
 [Every `critical` finding, each with its badge. Single-reviewer criticals stay here, tagged `[1 reviewer · unverified]`.]
