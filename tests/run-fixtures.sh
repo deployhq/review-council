@@ -52,7 +52,17 @@
 #
 # REQUIRES: the `claude` CLI on PATH (Claude Code itself — this script uses
 # `claude -p` to drive one non-interactive turn per fixture). Override the
-# binary with `CLAUDE_BIN=/path/to/claude`. Other useful env overrides:
+# binary with `CLAUDE_BIN=/path/to/claude`.
+#
+# ALSO REQUIRES (for the `config` fixture only): `yq` (mikefarah v4, the Go
+# implementation — NOT the Python kislyuk/yq) on PATH, or `RC_YQ=/path/to/yq`.
+# `rc-config.sh` parses `.review-council/config*.yml` with that exact `yq`;
+# without it, it gracefully falls back to defaults (per its own documented
+# degrade path) and the `config` fixture's `settings.min_reviewers=3` /
+# `lens.security.providers=google` / `replaces_dedicated=true` assertions
+# cannot hold — that fixture SKIPS (warns, doesn't hard-fail) when `yq` isn't
+# detected, mirroring the plugin's own graceful-degradation stance. Other
+# useful env overrides:
 #   RC_FIXTURE_TIMEOUT        per-fixture wall-clock cap in seconds
 #                             (default 900 — generous for an agy cold start
 #                             plus a full council + refutation pass).
@@ -86,6 +96,7 @@ ALL_FIXTURES="crossfile suppression config solo budget"
 
 TOTAL_PASS=0
 TOTAL_FAIL=0
+TOTAL_SKIP=0
 FIXTURE_RESULTS=()
 
 log() { printf '%s\n' "$*"; }
@@ -96,6 +107,18 @@ need_claude() {
     log "Install/verify Claude Code, or set CLAUDE_BIN=/path/to/claude."
     exit 2
   fi
+}
+
+# has_mikefarah_yq: mirrors the exact detection `rc-config.sh` uses itself —
+# a `yq` binary must be present AND its `--version` output must contain
+# "mikefarah" (the Go implementation this project's config parsing depends
+# on; the Python kislyuk/yq is treated the same as yq-absent). Respects
+# RC_YQ, same as rc-config.sh.
+has_mikefarah_yq() {
+  local yq_bin="${RC_YQ:-yq}" ver
+  command -v "$yq_bin" >/dev/null 2>&1 || return 1
+  ver="$("$yq_bin" --version 2>/dev/null)" || return 1
+  printf '%s' "$ver" | grep -q 'mikefarah'
 }
 
 fixture_header() {
@@ -116,6 +139,15 @@ fixture_result() {
     FIXTURE_RESULTS+=("FAIL  $name")
     TOTAL_FAIL=$((TOTAL_FAIL + 1))
   fi
+}
+
+# fixture_skip <name> <reason>: for prerequisite gaps (e.g. missing `yq`)
+# that make a fixture's premise untestable — warns, does NOT fail the run.
+fixture_skip() {
+  local name="$1" reason="$2"
+  log "RESULT: SKIP  ($name) — $reason"
+  FIXTURE_RESULTS+=("SKIP  $name")
+  TOTAL_SKIP=$((TOTAL_SKIP + 1))
 }
 
 # invoke_review <fixture-repo-dir> <target-relpath> <out-file>
@@ -193,8 +225,8 @@ run_fixture_crossfile() {
   fixture_header "$name"
   invoke_review "$repo" "src/pricing.py" "$out"
 
-  check "routing table printed (Step 4)" "$out" \
-    'routing table' hard || fail=1
+  check "Refutation routing table printed (Step 4)" "$out" \
+    'Refutation routing' hard || fail=1
   check "judge ledger printed (fingerprint/verdict row shape)" "$out" \
     '(fingerprint.*verdict|verdict.*fingerprint)' hard || fail=1
 
@@ -242,6 +274,17 @@ run_fixture_config() {
   repo="$FIXTURES_DIR/$name/repo"
   out="$OUT_DIR/$name.out"
   fixture_header "$name"
+
+  if ! has_mikefarah_yq; then
+    log "  [warn] mikefarah yq v4 not found on PATH (or RC_YQ) — rc-config.sh"
+    log "         gracefully falls back to defaults without it, so this"
+    log "         fixture's config.yml/config.local.yml assertions cannot"
+    log "         hold. Install yq (https://github.com/mikefarah/yq) or set"
+    log "         RC_YQ=/path/to/yq. SKIPPING rather than hard-failing."
+    fixture_skip "$name" "yq (mikefarah v4) not found"
+    return
+  fi
+
   invoke_review "$repo" "src/example.py" "$out"
 
   check "settings.verify=true (config.local wins over config.yml)" "$out" \
@@ -271,10 +314,10 @@ run_fixture_solo() {
   check "an unverified tag is present ([unverified] / [single-reviewer . unverified] / [1 reviewer . unverified])" "$out" \
     '(\[unverified\]|\[single-reviewer[^]]*unverified\]|\[1 reviewer[^]]*unverified\])' hard || fail=1
 
-  if section_has "$out" 'routing table' '.'; then
-    log "  [warn] (soft) a routing table appears present — refutation may not have been fully SKIPPED"
+  if section_has "$out" 'Refutation routing' '.'; then
+    log "  [warn] (soft) a refutation routing table appears present — refutation may not have been fully SKIPPED"
   else
-    log "  [ok]   (soft) no routing table found — consistent with refutation being skipped entirely"
+    log "  [ok]   (soft) no refutation routing table found — consistent with refutation being skipped entirely"
   fi
 
   fixture_result "$name" "$fail"
@@ -340,7 +383,7 @@ main() {
     log "  $r"
   done
   log ""
-  log "Hard-check results: $TOTAL_PASS fixture(s) PASS, $TOTAL_FAIL fixture(s) FAIL."
+  log "Hard-check results: $TOTAL_PASS fixture(s) PASS, $TOTAL_FAIL fixture(s) FAIL, $TOTAL_SKIP fixture(s) SKIP."
   log "Raw output saved under: $OUT_DIR"
 
   [ "$TOTAL_FAIL" -eq 0 ]

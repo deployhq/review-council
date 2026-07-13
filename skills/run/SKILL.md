@@ -518,10 +518,10 @@ Drop any surviving finding that matches the **WHAT NOT TO FLAG** list (the same 
 Print one row per surviving finding, then the suppression count:
 ```
 Judge ledger:
-fingerprint                          | origin-families | verdict      | suppressed? | tool? | final-severity | final-confidence
-auth.ts::checkauth::missing-authz    | codex,claude    | UPHELD       | no          | —     | critical       | high
-db.ts::listrows::n-plus-one          | claude          | INCONCLUSIVE | no          | —     | important      | medium
-api.ts::handler::unvalidated-input   | google          | REFUTED      | (dropped)   | —     | —              | —
+fingerprint                          | origin-families | verdict      | suppression? | tool? | final-severity | final-confidence
+auth.ts::checkauth::missing-authz    | codex,claude    | UPHELD       | no           | —     | critical       | high
+db.ts::listrows::n-plus-one          | claude          | INCONCLUSIVE | no           | —     | important      | medium
+api.ts::handler::unvalidated-input   | google          | REFUTED      | (dropped)    | —     | —              | —
 Suppressions applied: 1
 ```
 The `tool?` column is reserved for Phase-2 deterministic-tool grounding — always `—` in this phase. Emit the ledger **before** the Step-6 prose so the judge's reasoning is auditable.

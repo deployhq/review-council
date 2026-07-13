@@ -36,8 +36,9 @@ defaults are fine) and the source tree resolve correctly. See
 ## Assertions (what `run-fixtures.sh` checks)
 
 **Hard (marker-based, per the shared spec's artifact contract):**
-- The **routing table** is printed (Step 4 — each candidate finding routed to
-  a repo-capable, different-family verifier).
+- The **`Refutation routing`** table is printed (Step 4 — literal header
+  `Refutation routing (verify cap N):`; each candidate finding routed to a
+  repo-capable, different-family verifier).
 - The **judge ledger** is printed (Step 5 — a row per surviving finding with
   the `fingerprint | origin-families | verdict | suppression? | tool? |
   final-severity | final-confidence` shape) BEFORE the prose report.
