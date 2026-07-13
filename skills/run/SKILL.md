@@ -98,7 +98,7 @@ Recall the team's shared learnings so past decisions shape this run. **Gated on 
 If `settings.learn` is **true**, read `.review-council/learnings.md` from the **target repo** (the CWD where the review runs, alongside `.review-council/config.yml`). **If the file is absent, skip silently** — no warning, no error. A missing file is the normal case. The file has two sections (format in `rules/config.md` → learnings):
 
 - **Conventions** — project-specific rules about what not to flag (e.g. "Migrations are auto-generated; do not flag missing down-migrations"). Fold this section **into the Step-2 baseline context package** (see Step 2) under a clear "Team Learnings — Conventions" heading. Because it rides the shared package, it is injected **once** and reaches **every** reviewer — do NOT paste it separately into each dispatch.
-- **Suppressions** — known false positives keyed by fingerprint. **Hold** this section for the judge synthesis step (PR 1c). It is **not** injected into reviewer prompts in this phase; carry it forward so the judge can later down-weight/skip matching findings. Nothing consumes it yet — just pass it along.
+- **Suppressions** — known false positives keyed by fingerprint. **Hold** this section for the judge synthesis step (Step 5). It is **not** injected into reviewer prompts; carry it forward so the judge can suppress matching findings (see Step 5, §recalibration).
 
 ## Step 1: Detect Review Target
 
@@ -144,7 +144,7 @@ Collect context appropriate to the detected type. This becomes the **baseline co
 - Git blame for changed hunks
 - Project conventions: raw contents of CLAUDE.md, CONTRIBUTING.md, README (if present)
 
-**Team Learnings — Conventions (from Step 0.5).** If Step 0.5 recalled a **Conventions** section, append it here under a "Team Learnings — Conventions" heading. Folding it into this shared package (rather than each dispatch) injects it **once** yet reaches every reviewer. (The **Suppressions** section is NOT included here — it is held for the judge synthesis step, PR 1c.)
+**Team Learnings — Conventions (from Step 0.5).** If Step 0.5 recalled a **Conventions** section, append it here under a "Team Learnings — Conventions" heading. Folding it into this shared package (rather than each dispatch) injects it **once** yet reaches every reviewer. (The **Suppressions** section is NOT included here — it is held for the judge synthesis step, Step 5.)
 
 Package this as a structured text block. You will send this same package to each reviewer — this is the shared baseline. Reviewers may explore further using their own tools, but the baseline ensures equal starting context.
 
@@ -185,7 +185,7 @@ Before launching the reviewers, assign each one a **lens** — an emphasis that 
    - `lens.<l>.providers` = an explicit provider list → **pin** that lens to exactly those providers (overriding the diff-aware pick). `auto` or empty → use the diff-aware assignment above.
    - **`lens.security.replaces_dedicated=true`** together with a pinned `lens.security.providers` → the pinned provider(s) take the **Security** lens **in place of** the dedicated `reviewer-security` (do NOT run both). When it is `false` (default), the dedicated `reviewer-security` runs and any `security.providers` pin is layered as an additional security emphasis on those providers.
 
-5. **Print the chosen lens map** so the assignment is observable, and carry it into the Step 7 report header. Example:
+5. **Print the chosen lens map** so the assignment is observable, and carry it into the Step 6 report header. Example:
    ```
    Lens map (personas on):
      reviewer-security   Security (dedicated)
@@ -385,9 +385,9 @@ Dispatch a `general-purpose` Agent with this prompt:
 
 For **all** reviewers (including Claude and Security), use the delegation format from `rules/delegation-format.md` — which carries the §3.1 finding schema, the what-not-to-flag + cap policy, and the test-adequacy line. The prompt structure and review criteria are identical for every provider — only the transport and the prepended **lens block** differ. When `settings.personas` is true, prepend each reviewer's assigned lens block (from Lens Assignment) to its delegation prompt; when it is false, send every reviewer the identical non-lens prompt. The baseline context package from Step 2 (including any recalled Team Learnings — Conventions) goes into the CONTEXT section.
 
-## Step 3.5: Validate Round 1 Results & Recover
+## Step 3.5: Well-formed Check & Recover
 
-Before synthesis, validate each reviewer's output. Refer to `rules/orchestration.md` for full validation rules.
+Before the refutation pass, validate that each reviewer's output is **well-formed** — a **structural** check (required sections present; finding fields present and in-enum), NOT a truth check of whether any finding is correct. Refer to `rules/orchestration.md` → Output Validation for full rules.
 
 ### Validate
 
@@ -434,48 +434,110 @@ If retrying:
 - Merge all validated results (first-pass and retried) into a single pool
 - Proceed to Step 4 with the merged pool
 
-## Step 4: Analyze Round 1 Results
+## Step 4: Refutation Pass
 
-Once all reviewers respond, build a **synthesis**:
+Round 1 produced independent findings. Instead of asking reviewers to revise toward a shared synthesis (the old anchoring Round 2 — **deleted**), this step tries to **refute** each candidate finding with a **fresh, cross-family** verifier that has never seen the other reviewers' output. An UPHELD is then independent corroboration; a REFUTED (with counter-evidence) is a genuine counter-finding. Verdicts feed the judge (Step 5). Use the **Refutation Template** in `rules/delegation-format.md`.
 
-1. **Merge** all findings into a single list
-2. **Deduplicate** — two findings are duplicates if they reference the same location AND describe the same core concern (even if worded differently). Keep the more specific/actionable version.
-3. **Categorize** each finding:
-   - **Agreed** — Multiple reviewers flagged this (or substantially similar finding). HIGH confidence.
-   - **Unique** — Only one reviewer flagged this. MEDIUM confidence.
-   - **Conflicting** — Reviewers explicitly disagree (one says it's fine, the other says it's a problem). Needs discussion.
+**Gated on `settings.verify` (resolved in Step 0).** If `settings.verify` is **false**, skip this step entirely: carry every Round-1 finding forward tagged `[unverified]`, and go straight to the judge (Step 5).
 
-## Step 5: Round 2 — Informed Revision (If Needed)
+If `settings.verify` is true, apply these gates and rules **in order**.
 
-**Skip Round 2 if ALL of these are true:**
-- Zero conflicting findings
-- Unique findings are all "suggestion" severity (not critical or important)
-- Total unique findings <= 3
+### 4.0 Skip gates (check first, before any routing)
 
-**If Round 2 is needed**, share the Round 1 synthesis with all reviewers that participated in Round 1 and ask them to revise.
+1. **Solo-Claude mode** — if Claude is the only available reviewer, **skip refutation entirely**. Tag every finding `[single-reviewer · unverified]` and go to Step 5. Do NOT self-verify with another Claude spawn — one model refuting itself is correlated-error theatre, not cross-family evidence.
+2. **Budget check FIRST (see `rules/orchestration.md` → Budget).** Sum the **measured elapsed** the Round-1 CLI invocations reported (the CLI long pole — e.g. `agy`'s cold start; not a stopwatch you watch). If that sum has already reached `settings.run_budget_seconds`, **skip refutation**: tag all findings `[unverified]`, print `stopped at budget: <n>s`, and go straight to Step 5. Never hard-abort — degrade.
 
-### Claude (Round 2)
-Spawn a new `reviewer-claude` agent. Provide the Round 1 synthesis and ask:
-- Confirm or revise your original findings in light of the other reviewers' perspectives
-- Specifically address conflicting findings — explain your reasoning
-- Flag any new concerns triggered by other reviewers' observations
+If neither gate fires, run the pass.
 
-### Codex (Round 2)
-Dispatch a new `general-purpose` Agent subagent (same pattern as Round 1). Provide the full original context + Round 1 synthesis + Round 2 revision instructions from `rules/delegation-format.md`. For MCP mode, the subagent can use `mcp__codex__codex-reply` with `threadId` from Round 1 to continue the thread.
+### 4.1 Select candidates
 
-### Google (Antigravity / Gemini) (Round 2)
-Dispatch a new `general-purpose` Agent subagent with full context + Round 1 synthesis + revision instructions. Reuse the same tool that succeeded in Round 1 (Antigravity or Gemini); if unknown, use the `agy → gemini` order again. Same reliability rules (timeout, no compounding retries, fast-fail) apply.
+1. **Merge** all Round-1 findings into one pool. To detect cross-family agreement, cluster them provisionally by `(location, concern-slug)` — a lightweight grouping; the judge computes the authoritative fingerprint in Step 5.
+2. **Skip findings already raised by ≥2 different families** — they are already corroborated, so no verification is needed. They pass to the judge as cross-family-corroborated (eligible for the +1-tier promotion) without consuming a verifier slot.
+3. From the remaining (single-family) findings, take the **top `settings.verify_max_findings`** (default 12) by severity (critical > important > suggestion, then confidence). Any beyond the cap ship to the judge tagged `[unverified]`.
 
-### Perplexity (Round 2)
-Dispatch a new `general-purpose` Agent subagent with full context + Round 1 synthesis + revision instructions via Sonar API.
+### 4.2 Route (print the routing table)
 
-## Step 6: Round 3 (Rare — Only If Needed)
+Assign each selected candidate to a verifier that is **repo-capable** and from a **DIFFERENT family** than the finding's origin (families: **Claude-fresh / Codex / Google**). Rules:
 
-Only run Round 3 if Round 2 introduced **new critical or important conflicts**. Narrow focus to unresolved conflicts only. If still no convergence after Round 3, document both perspectives as dissenting opinions.
+- **NEVER route a code-tracing finding to Perplexity** — it is diff-only and tool-less; it cannot Read/Grep/trace, so it can neither uphold nor refute a code claim.
+- The verifier family must differ from the finding's origin family (a model does not verify its own finding).
+- If no different repo-capable family is available for a given finding (e.g. only Claude is repo-capable this run), that finding cannot be cross-verified — ship it to the judge `[unverified]` rather than self-verifying.
 
-## Step 7: Final Report
+**Print the routing table** so the assignment is observable. Example:
+```
+Refutation routing (verify cap 12):
+  finding                            origin      → verifier
+  auth.ts:42 missing-authz           Codex       → Claude-fresh
+  db.ts:88 n-plus-one                Claude      → Google
+  api.ts:20 unvalidated-input        Google      → Codex
+  [skipped: raised by ≥2 families]   payment.ts:5 race  (Claude+Codex)
+  [unverified: over cap]             util.ts:9 minor-leak
+```
 
-Produce the final output using this exact format:
+### 4.3 Dispatch — ONE fresh subagent per verifier family
+
+**Batch by verifier family:** spawn exactly **one fresh Agent per verifier family**, handing it **all** the findings routed to that family (isolation only requires hiding the synthesis, not a spawn per finding). Each subagent gets the **Refutation Template** (`rules/delegation-format.md`) with its assigned findings pasted in and the baseline context — but **NOT** any other reviewer's output or any synthesis.
+
+- **Claude-fresh** → a new `reviewer-claude` Agent (Read/Glob/Grep), refutation prompt only.
+- **Codex** → a `general-purpose` Agent that invokes the Codex CLI with the refutation prompt (same transport + reliability rules as Round 1).
+- **Google** → a `general-purpose` Agent that invokes `agy`→`gemini` with the refutation prompt (same transport + reliability rules as Round 1).
+
+**Hard rule: a verdict is only valid from a fresh Agent spawn.** If no verifier subagent actually ran for a finding (over the cap, no eligible different family, a verifier that SKIPPED/failed, or budget-degraded), that finding is **`[unverified]`** — it is **NOT** refuted. Absence of a spawn never means REFUTED.
+
+### 4.4 Collect verdicts
+
+Each verifier returns a 3-way verdict per assigned finding — **UPHELD** / **REFUTED** (with cited counter-evidence) / **INCONCLUSIVE**. Carry the verdicts (plus the ≥2-family corroboration status from 4.1) into the judge. Remember: **INCONCLUSIVE is not REFUTED** — a finding only drops on positive counter-evidence.
+
+## Step 5: Judge Synthesis
+
+A single **active judge** (you, the orchestrator) makes one pass over the Round-1 findings plus the Step-4 verdicts. It does not re-review the code — it dedups, recalibrates, suppresses, and emits a ledger.
+
+### 5.1 Compute the canonical fingerprint
+
+For each finding, compute `fingerprint = <relpath>::<normalized-symbol-or-hunk>::<normalized-concern>`. The **judge** computes it — reviewers never author it (their `concern` slug is a hint only). Normalize: repo-relative path; symbol lowercased/trimmed (or the hunk range if no symbol); concern reduced to its core kebab phrase.
+
+### 5.2 Semantic cross-model dedup
+
+Collapse findings with the **same fingerprint** into one. Keep the most specific/actionable text and **union** their origin-families (so a finding raised by Claude and Codex records both). This is the authoritative dedup — the Step-4 provisional clustering was only for corroboration detection.
+
+### 5.3 Recalibrate (§recalibration)
+
+- **+1 tier (severity or confidence)** when a finding has **cross-family corroboration** — it was raised by **≥2 different families**, **or** it was **UPHELD** in Step 4 by a **different family** (these are the two `[cross-reviewed]` paths). A same-family-only pile-up is **NOT** a promotion signal.
+- **Drop a finding ONLY if it was REFUTED with positive counter-evidence.** Never drop on absence of proof.
+- **Keep and tag `[unverified]`** if the verdict was **INCONCLUSIVE**, or the finding was never verified at all (solo-Claude mode, over the cap, or budget-degraded).
+- **Never demote a `critical` out of Critical** for being single-reviewer. Tag it `[1 reviewer · unverified]` and keep it Critical.
+- **Suppress** any finding whose fingerprint matches a **learnings Suppression** entry recalled in Step 0.5. **Count the suppressions.**
+- (Phase-2 note: `[verified]` + top confidence when a deterministic tool and an LLM hit the same fingerprint is **not** built in this phase.)
+
+### 5.4 Apply the what-not-to-flag filter
+
+Drop any surviving finding that matches the **WHAT NOT TO FLAG** list (the same policy the reviewers were given: theoretical/precondition-heavy risks, redundant defense-in-depth, pure style, out-of-blast-radius legacy, speculative-with-no-concrete-trigger).
+
+### 5.5 Emit the ledger (BEFORE the prose report)
+
+Print one row per surviving finding, then the suppression count:
+```
+Judge ledger:
+fingerprint                          | origin-families | verdict      | suppressed? | tool? | final-severity | final-confidence
+auth.ts::checkauth::missing-authz    | codex,claude    | UPHELD       | no          | —     | critical       | high
+db.ts::listrows::n-plus-one          | claude          | INCONCLUSIVE | no          | —     | important      | medium
+api.ts::handler::unvalidated-input   | google          | REFUTED      | (dropped)   | —     | —              | —
+Suppressions applied: 1
+```
+The `tool?` column is reserved for Phase-2 deterministic-tool grounding — always `—` in this phase. Emit the ledger **before** the Step-6 prose so the judge's reasoning is auditable.
+
+## Step 6: Report
+
+Produce the final curated output, **grouped by severity FIRST**. Agreement is a per-finding **badge**, never the sort key.
+
+**Badges:**
+- `[cross-reviewed]` — UPHELD by a different family, or raised by ≥2 different families.
+- `[1 reviewer · unverified]` — a single reviewer, not cross-verified (a single-reviewer `critical` keeps Critical severity **and** carries this badge).
+- `[unverified]` — verification was skipped / inconclusive / over-cap / budget-degraded, or `settings.verify` was off.
+
+(Phase-2 reserves `[verified]` for tool-grounded findings — not emitted here.)
+
+The judge ledger from Step 5 is printed **before** this prose report. Then emit this format:
 
 ---
 
@@ -483,28 +545,27 @@ Produce the final output using this exact format:
 
 **Target:** [what was reviewed — PR #N, file path, etc.]
 **Type:** [PR | Plan/Document | Code]
-**Reviewers:** [list of reviewers that participated] ([N] participating — [skipped: reasons])
-**Lens map:** [the per-reviewer lens assignment printed in Step 3 — e.g. `reviewer-security: Security · reviewer-claude: Correctness + Data-integrity · Codex: Correctness + Cross-file · Perplexity: Dependency`. Omit if `settings.personas` is false — note "personas off (legacy prompt)".]
-**Rounds:** [number of rounds run]
-**Consensus:** [Strong | Moderate | Mixed]
+**Reviewers:** [reviewers that participated] ([N] participating — [skipped: reasons])
+**Lens map:** [the per-reviewer lens assignment printed in Step 3 — e.g. `reviewer-security: Security · reviewer-claude: Correctness + Data-integrity · Codex: Correctness + Cross-file · Perplexity: Dependency`. If `settings.personas` is false, note "personas off (legacy prompt)".]
+**Pipeline:** Round 1 → well-formed check → refutation → judge → report  [append `· stopped at budget: <n>s` if the run degraded on budget; note `· refutation skipped (solo-Claude)` or `· refutation off (verify=false)` when applicable — these are the pipeline stages actually run]
 
 ### Critical Issues
-[Findings multiple reviewers agree are critical. Must fix before merging/shipping.]
+[Every `critical` finding, each with its badge. Single-reviewer criticals stay here, tagged `[1 reviewer · unverified]`.]
 
 *If none: "No critical issues identified."*
 
 ### Important Findings
-[Findings with broad agreement. Should fix.]
+[Every `important` finding, each with its badge.]
 
 *If none: "No important findings."*
 
 ### Suggestions
-[Lower-severity or single-reviewer findings worth considering.]
+[Every `suggestion` finding, each with its badge.]
 
 *If none: "No additional suggestions."*
 
 ### Dissenting Opinions
-[Unresolved disagreements with both perspectives. Only include if genuinely unresolved after discussion.]
+[Genuinely unresolved disagreement the judge could not reconcile — e.g. one family UPHELD and another REFUTED the same fingerprint. Record both perspectives. This is a report **section**, not a round.]
 
 *If none: omit this section entirely.*
 
@@ -512,6 +573,10 @@ Produce the final output using this exact format:
 [Brief — things reviewers praised. Keep to 2-3 bullet points max.]
 
 ---
+
+## Step 7: Capture Gate (Phase 3 — not built here)
+
+**Placeholder only — do not implement in this phase.** In Phase 3 (PR #3), when `settings.learn` is true, this step will walk the final findings interactively (which the author *tackles* vs. *skips* / marks as a false positive) and append the outcomes to `.review-council/learnings.md` — feeding the Step-0.5 recall and the Step-5 suppressions on future runs. This phase ships the read side (recall + suppress) only; the capture/write side lands in Phase 3.
 
 ## Step 8: Cleanup
 
@@ -525,9 +590,9 @@ Note: Subagents handle their own temp files, so this is a belt-and-suspenders cl
 
 ## Orchestration Rules
 
-- **Max 3 rounds.** If no convergence, output what you have with both perspectives noted.
+- **No debate rounds.** The pipeline is Round 1 → well-formed check (3.5) → refutation (4) → judge (5) → report (6). There is no Round 2/Round 3 and no revise-toward-consensus; unresolved disagreement is a **Dissenting Opinions** report section, not another round.
 - **Substance over style.** Aggressively filter out nitpicks, formatting opinions, and subjective preferences.
-- **Confidence from agreement.** Multiple reviewers flag it = high confidence. One reviewer = medium. Conflicting = note both.
+- **Severity is decoupled from agreement.** Agreement is a per-finding **badge** (`[cross-reviewed]` / `[1 reviewer · unverified]` / `[unverified]`), not the sort key. Cross-family corroboration (≥2 different families, or an UPHELD from a different family) can *raise* a finding one tier; a single-reviewer `critical` stays Critical. Same-family-only agreement promotes nothing.
 - **Be actionable.** Every finding must say what to do, not just what's wrong.
 - **Respect the user's time.** The output is a curated, prioritized list — not a dump of everything all reviewers said. Fewer high-quality findings > many low-quality ones.
 - **Severity definitions:**

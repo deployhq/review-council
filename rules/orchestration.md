@@ -1,34 +1,24 @@
 # Orchestration Rules
 
-## Convergence Criteria
+## Pipeline
 
-Stop iterating when ANY of these are true:
-1. All findings are agreed upon by all reviewers
-2. No new findings emerged in the latest round
-3. Maximum rounds (3) reached
+The council runs a **single** independent review round, then a judge-driven synthesis — **no debate rounds, no revise-toward-consensus.** The stages:
 
-## Round Logic
+1. **Round 1 — Independent review (Step 3).** All reviewers see the same baseline context; none see each other's output. Truly independent perspectives, each under its assigned lens.
+2. **Well-formed check (Step 3.5).** A **structural** validation of each reviewer's output (required sections present; finding fields present and in-enum) — see Output Validation below. It is NOT a truth check: it never judges whether a finding is *correct*, only whether it is well-formed. Malformed reviewers are recovered/retried per Recovery Flow.
+3. **Refutation (Step 4).** Candidate findings are routed to **fresh, cross-family** verifiers that try to refute each against the actual code (UPHELD / REFUTED / INCONCLUSIVE). Isolated (no verifier sees the synthesis), batched **one subagent per verifier family**, and budget-bounded (see Budget). Gated on `settings.verify`; skipped entirely in solo-Claude mode.
+4. **Judge synthesis (Step 5).** A single active judge computes the canonical fingerprint per finding, dedups across models, recalibrates confidence/severity from the refutation verdicts and cross-family agreement, suppresses learnings matches, and emits a per-finding ledger.
+5. **Report (Step 6).** Severity-first curated output with per-finding agreement **badges**.
 
-### Round 1: Independent Review
-- All reviewers see the same context
-- None see each other's review
-- Ensures truly independent perspectives
-
-### Round 2: Informed Revision
-- All reviewers see Round 1 synthesis
-- Each can confirm, revise, or rebut findings
-- New findings from seeing other reviewers' perspectives are welcome
-
-### Round 3: Final Resolution (rare)
-- Only if Round 2 introduced significant new disagreements
-- Focus narrowed to unresolved conflicts only
-- If still no convergence, document both perspectives
+**No Round 2, no Round 3.** The old anchoring "share the synthesis, revise toward it" mechanism is deleted. Genuine unresolved disagreement is **not** a new round — the judge records it as a **Dissenting Opinions** section in the report.
 
 ## Severity Definitions
 
 - **Critical**: Bugs, security vulnerabilities, data loss, system failures. Blocks ship.
 - **Important**: Quality, performance, or maintainability concern. Should fix.
 - **Suggestion**: Minor improvement. Nice to have.
+
+**Severity is decoupled from agreement.** Agreement across reviewers is surfaced as a per-finding **badge** (`[cross-reviewed]` / `[1 reviewer · unverified]` / `[unverified]`) — never as the sort key, and never as a reason to lower severity. A `critical` flagged by a **single** reviewer stays **Critical** (tagged `[1 reviewer · unverified]`); the judge never demotes it for lack of a second voice. Cross-family corroboration (**≥2 different families**, or an **UPHELD** from a different family in Step 4) can *raise* a finding one tier; **same-family-only** agreement raises nothing.
 
 ## Deduplication
 
@@ -37,6 +27,8 @@ Two findings are duplicates if they:
 - Use different words but the underlying issue is identical
 
 Keep the more specific/actionable version.
+
+**The judge computes the canonical fingerprint** — `<relpath>::<normalized-symbol-or-hunk>::<normalized-concern>` — in Step 5; reviewers never author it (their `concern` slug is only a hint). Semantic cross-model dedup is keyed on that fingerprint: two findings with the same fingerprint collapse to one, keeping the most specific/actionable text and **unioning** their origin-families. (Step 4 uses a lighter provisional `(location, concern)` clustering only to detect ≥2-family corroboration before the judge finalizes the fingerprint.)
 
 ## Graceful Degradation
 
@@ -48,7 +40,7 @@ If only Claude is available (no other providers detected):
 
 ## Output Validation
 
-After each reviewer returns, validate its output before including in synthesis.
+This is the **well-formed check (Step 3.5)** — a **structural** gate run after each reviewer returns and before the refutation pass. It validates that the output is well-formed (required sections present; finding fields present and in-enum); it does **not** judge whether any finding is correct (that is the refutation pass + judge, Steps 4-5).
 
 ### Section Presence
 
@@ -96,9 +88,18 @@ After Round 1 validation, the orchestrator reports results and determines next a
 - **Retried results merge into the Round 1 pool** before synthesis begins. All validated results (first-pass and retried) are treated identically.
 - **RC_AUTO_RETRY=true** skips the user prompt and retries failed reviewers automatically. Intended for CI/automated pipelines.
 
+## Budget
+
+Two caps bound a run, with **distinct roles** — do not conflate them:
+
+- **`reviewer_timeout_seconds`** (`RC_REVIEWER_TIMEOUT`, default 600) — the **HARD per-invocation** cap. A deterministic hang-stop on each individual CLI/API call (the PR-0 script's cap; enforced by the wrapper in Reviewer Timeouts & Fast-Fail below). It bounds **one** reviewer call, not the whole run.
+- **`run_budget_seconds`** (`RC_RUN_BUDGET`, default 600) — the **SOFT total-run** target. After each capped stage (Round 1, then refutation), the orchestrator sums the **measured elapsed** the CLI invocation scripts actually reported — the CLI long pole (e.g. `agy`'s cold start). It is **not** a stopwatch the LLM watches, and it excludes the Claude subagents (they are bounded by their own `maxTurns`).
+
+**Degrade between stages, never hard-abort.** The budget is checked **between** stages, on measured elapsed. If the summed elapsed has already reached `run_budget_seconds` when the orchestrator is about to start the refutation stage, it **degrades** that stage instead of aborting: skip or shrink refutation, go straight to the judge, tag the affected findings `[unverified]`, and print `stopped at budget: <n>s` in the report. A stage already in flight is never killed by the budget — that is the per-invocation timeout's job. A run therefore never aborts on budget; it only produces a shallower-but-complete report.
+
 ## Reviewer Timeouts & Fast-Fail
 
-CLI and API reviewers must fail fast. A single overloaded or quota-capped provider must never stall the council — a dead provider should return `SKIPPED` in minutes, not tens of minutes. Every CLI/API reviewer subagent (Codex, the Google slot's `agy`/`gemini`, Perplexity) follows these rules:
+CLI and API reviewers must fail fast. A single overloaded or quota-capped provider must never stall the council — a dead provider should return `SKIPPED` in minutes, not tens of minutes. This section governs the **HARD per-invocation cap** from Budget above. Every CLI/API reviewer subagent (Codex, the Google slot's `agy`/`gemini`, Perplexity) follows these rules:
 
 1. **Hard per-invocation timeout — never run a CLI unbounded.** Cap every CLI call. Prefer a tool-native cap when one exists (`curl --max-time`, agy's `--print-timeout`); otherwise wrap with `timeout`/`gtimeout`; and if **neither binary is present** (e.g. a stock macOS with no coreutils), use a pure-shell watchdog so the call still can't hang forever. Resolve the binary first and use an explicit `if`/`else` (portable across bash, sh, and zsh — do **not** use `${TO:+$TO 600}`, which word-splits in bash but stays one word in zsh):
    ```bash
