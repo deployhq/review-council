@@ -1,0 +1,34 @@
+name: Unit Tests
+
+# Tier-1 unit tests only — the deterministic shell helpers (scripts/*.sh).
+# This is TEST CI. It deliberately does NOT run any Review Council review:
+# there is no CI for review runs. Its only job is to keep the tested helpers
+# regression-free on every push to main and every pull request (including the
+# stacked PRs whose base is another feature branch).
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  bats:
+    name: bats (tests/unit)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out
+        uses: actions/checkout@v4
+
+      # Ubuntu's apt `bats` is too old (1.2.x); the suite needs >= 1.5.0
+      # (`run --separate-stderr`). Fetch a current bats-core with `npx` and run
+      # it directly — `npm install -g bats` hits EACCES writing
+      # /usr/local/share/man on the runner, and npx avoids the global bin/man
+      # linking entirely (no sudo, no extra Action). Node/npx are preinstalled.
+      # Runs every *.bats in tests/unit/, so future helpers (e.g. rc-config)
+      # are covered automatically with no workflow change.
+      - name: Run unit tests (bats-core via npx)
+        run: |
+          npx --yes bats --version
+          npx --yes bats --print-output-on-failure --timing tests/unit/
