@@ -157,6 +157,36 @@ EOF
   printf '%s\n' "$stderr" | grep -q 'yq not found'
 }
 
+@test "wrong yq flavor (Python yq, no mikefarah): files ignored, defaults + env, distinct note" {
+  # Two different tools are named `yq`: mikefarah (Go — this reader's
+  # required tag/query syntax) and a Python one (kislyuk) that prints e.g.
+  # "yq 3.4.3" with no "mikefarah". A fake shim simulates the Python yq being
+  # first on PATH: `command -v` finds *a* yq, but it's the wrong one. Config
+  # sets min_reviewers:9, but since the resolved yq isn't mikefarah v4, the
+  # reader must ignore the file entirely (not just fail individual queries)
+  # and fall back to defaults + env, exactly like the yq-absent case.
+  FAKE_YQ="$BATS_TEST_TMPDIR/yq"
+  cat >"$FAKE_YQ" <<'EOF'
+#!/usr/bin/env sh
+echo "yq 3.4.3"
+exit 0
+EOF
+  chmod +x "$FAKE_YQ"
+  printf 'settings:\n  min_reviewers: 9\n' >"$CFG/config.yml"
+  RC_YQ="$FAKE_YQ" RC_VERIFY=false run --separate-stderr "$SCRIPT" "$CFG"
+  echo "status=$status"
+  echo "stderr=<<$stderr>>"
+  [ "$status" -eq 0 ]
+  # file ignored -> min_reviewers stays default (not 9)
+  has_line "settings.min_reviewers=2"
+  # env still applies
+  has_line "settings.verify=false"
+  # defaults still emitted
+  has_line "reviewer.perplexity.model=sonar"
+  printf '%s\n' "$stderr" | grep -q 'not mikefarah'
+  printf '%s\n' "$stderr" | grep -q 'config files ignored'
+}
+
 @test "static_analysis block present -> ignored, no crash, normal output" {
   cat >"$CFG/config.yml" <<'EOF'
 static_analysis:

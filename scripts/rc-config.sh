@@ -21,6 +21,8 @@
 # YAML is parsed with `yq` (mikefarah v4); the binary is `${RC_YQ:-yq}`. Graceful
 # degradation:
 #   - yq absent               -> ignore both files; emit defaults + env; one note.
+#   - yq present but not mikefarah v4 (e.g. the Python kislyuk/yq) -> treated
+#     exactly like yq-absent: ignore both files; emit defaults + env; one note.
 #   - a file absent           -> skip it silently.
 #   - a file malformed        -> skip that file with a note; use the other layers.
 #   - a single key malformed  -> use that key's default with a note.
@@ -52,9 +54,21 @@ over_file="$config_dir/config.local.yml"  # gitignored per-machine overrides
 YQ_BIN="${RC_YQ:-yq}"
 
 yq_present=1
-command -v "$YQ_BIN" >/dev/null 2>&1 || yq_present=0
-if [ "$yq_present" -eq 0 ]; then
+if ! command -v "$YQ_BIN" >/dev/null 2>&1; then
+  yq_present=0
   echo "rc-config: yq not found; $config_dir/config*.yml ignored (using defaults + env)" >&2
+else
+  # Two different tools are named `yq`: mikefarah (Go), whose `yq e '...'` /
+  # tag-query syntax this reader relies on, and a Python one (kislyuk) that
+  # does NOT support it. If the resolved binary isn't mikefarah v4, treat it
+  # exactly like yq-absent rather than letting mikefarah-only queries fail
+  # silently and mislabel a valid config as malformed. Kept consistent with
+  # the same check in skills/setup/SKILL.md.
+  _yq_ver="$("$YQ_BIN" --version 2>/dev/null)" || _yq_ver=""
+  if ! printf '%s' "$_yq_ver" | grep -q 'mikefarah' || ! printf '%s' "$_yq_ver" | grep -qE 'version v?4'; then
+    yq_present=0
+    echo "rc-config: yq present but not mikefarah v4; config files ignored (using defaults + env)" >&2
+  fi
 fi
 
 # layer_ok <file>: prints 1 if the file is usable, else 0 (with a note when a
