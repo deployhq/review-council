@@ -51,7 +51,8 @@ flowchart TD
     D --> G
     E --> G
 
-    G --> H["Step 3: Round 1 — Lens-Differentiated Review"]
+    G --> S25["Step 2.5: Deterministic static scan<br/>gitleaks · trufflehog · osv-scanner · semgrep · ruff · shellcheck · actionlint · hadolint<br/>Tier A → judge · Tier B → Round 1 context<br/>(if static_analysis.enabled)"]
+    S25 --> H["Step 3: Round 1 — Lens-Differentiated Review"]
 
     H --> I["Claude<br/>Correctness + overlay"]
     H --> SEC["Security (dedicated)<br/>always on"]
@@ -86,6 +87,7 @@ flowchart TD
 
     style A fill:#7c3aed,color:#fff
     style Z0 fill:#7c3aed,color:#fff
+    style S25 fill:#0891b2,color:#fff
     style H fill:#2563eb,color:#fff
     style I fill:#6366f1,color:#fff
     style SEC fill:#dc2626,color:#fff
@@ -356,6 +358,10 @@ sequenceDiagram
     participant X as Codex Reviewer
     participant G as Google Reviewer
     participant P as Perplexity Reviewer
+
+    Note over O: Step 2.5 — Deterministic static scan (if static_analysis.enabled)
+    O->>O: Run gitleaks / trufflehog / osv-scanner / semgrep / … once, diff-scoped
+    O->>O: Tier A → judge (pre-verified) · Tier B → Round 1 context
 
     Note over O: Round 1 — Independent, lens-differentiated
     O->>+C: Context package + lens (Correctness + overlay)

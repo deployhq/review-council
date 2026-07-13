@@ -182,7 +182,7 @@ off this exact set — do not invent new reason strings):
 | `not installed` | `command -v` probe found nothing. The one reason the orchestrator surfaces to the user (with this file's install command) and asks whether to pause-and-install or proceed without it. |
 | `not triggered` | tool present, but no changed file matched its domain-trigger column — nothing to install, quiet skip. |
 | `disabled` | tool present and triggered, but not in the configured `static_analysis.tools` list. |
-| `semgrep-off` | `static_analysis.semgrep_config=off` (semgrep-only reason). |
+| `semgrep off` | `static_analysis.semgrep_config=off` (semgrep-only reason). |
 | `network-unreachable` | trufflehog present + triggered, but the live-verification network call couldn't complete — treated as "ran, 0 findings," never an error (see the outbound-network caveat below). |
 | `timeout` | `run_capped` killed the tool past `static_analysis.timeout_seconds`; the rest of the batch still runs. |
 
@@ -275,5 +275,5 @@ At **review-run time** (Step 2.5, `skills/run/SKILL.md`), the story is different
 is in the *configured* `static_analysis.tools` list (the user expects it) but comes back
 `SKIPPED: <tool> — not installed` is surfaced to the user with its install command from this
 file, and the orchestrator asks whether to pause for install-then-rerun or proceed without it
-for this run. A tool skipped for any other reason (`not triggered`, `disabled`, `semgrep-off`,
+for this run. A tool skipped for any other reason (`not triggered`, `disabled`, `semgrep off`,
 `network-unreachable`, `timeout`) is a quiet, expected skip — nothing to install, no ask.

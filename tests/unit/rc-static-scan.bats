@@ -120,6 +120,7 @@ case "\${OSV_MODE:-findings}" in
   hang) sleep "\${OSV_SLEEP:-30}" ;;
   clean) printf '%s' '{"results":[]}' ;;
   findings) printf '%s' '{"results":[{"source":{"path":"go.mod"},"packages":[{"package":{"name":"foo"},"vulnerabilities":[{"id":"GHSA-xxxx","summary":"RCE in foo","database_specific":{"severity":"HIGH"}}]}]}]}' ;;
+  groupsev) printf '%s' '{"results":[{"source":{"path":"go.sum"},"packages":[{"package":{"name":"bar"},"vulnerabilities":[{"id":"CVE-2024-1","summary":"vuln","severity":[{"type":"CVSS_V3","score":"CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:H"}]}],"groups":[{"ids":["CVE-2024-1"],"max_severity":"9.8"}]}]}]}' ;;
 esac
 exit "\${OSV_EXIT:-1}"
 EOF
@@ -329,6 +330,43 @@ called() { grep -qx "$1" "$CALLS"; }
   ! grep -qE '^gitleaks: detect ' "$ARGS"
 }
 
+@test "worktree-head mode (local staged/unstaged): gitleaks -> dir scan, trufflehog -> filesystem, no empty git range" {
+  setup_fakes
+  printf '%s\n' "a.py" "secret.txt" >"$CHANGED"
+  # base=HEAD, head="." (the worktree) is exactly what the orchestrator passes for
+  # a local staged/unstaged review — the git-range forms would scan 0 commits and
+  # silently report nothing. The Tier-A scanners must switch to a working-tree scan.
+  RC_STATIC_TOOLS="gitleaks,trufflehog" GITLEAKS_MODE=findings TRUFFLEHOG_MODE=findings \
+    PATH="$SANDBOX" run --separate-stderr "$SCRIPT" "HEAD" "." "$CHANGED"
+  echo "status=$status"
+  echo "args=<<$(cat "$ARGS")>>"
+  echo "output=<<$output>>"
+  [ "$status" -eq 0 ]
+  # gitleaks: modern `dir` (directory) scan, NOT a git-range scan
+  grep -qE '^gitleaks: dir ' "$ARGS"
+  ! grep -qE '^gitleaks: git ' "$ARGS"
+  ! grep -qF -- '--log-opts=' "$ARGS"
+  # trufflehog: filesystem scan, NOT the --since-commit/--branch git range
+  grep -qE '^trufflehog: filesystem ' "$ARGS"
+  ! grep -qF -- '--branch' "$ARGS"
+  ! grep -qF -- '--since-commit' "$ARGS"
+  # both actually RAN and produced their Tier A findings (not a silent 0)
+  echo "$output" | grep -qF 'TIER_A|gitleaks|critical|secret.txt'
+  echo "$output" | grep -qF 'TIER_A|trufflehog|critical|env.sh'
+}
+
+@test "worktree-head mode via base==head: gitleaks switches off the empty range" {
+  setup_fakes
+  printf '%s\n' "secret.txt" >"$CHANGED"
+  # base==head is another empty-range shape the orchestrator can produce.
+  RC_STATIC_TOOLS="gitleaks" GITLEAKS_MODE=findings PATH="$SANDBOX" \
+    run --separate-stderr "$SCRIPT" "HEAD" "HEAD" "$CHANGED"
+  echo "args=<<$(cat "$ARGS")>>"
+  [ "$status" -eq 0 ]
+  grep -qE '^gitleaks: dir ' "$ARGS"
+  ! grep -qF -- '--log-opts=' "$ARGS"
+}
+
 @test "osv-scanner: lockfile in diff triggers v2 'scan source' + Tier A CVE line" {
   setup_fakes
   printf '%s\n' "go.mod" "README.md" >"$CHANGED"
@@ -340,7 +378,22 @@ called() { grep -qx "$1" "$CALLS"; }
   [ "$status" -eq 0 ]
   grep -qE '^osv-scanner: scan source ' "$ARGS"
   grep -qF -- '--lockfile=go.mod' "$ARGS"
-  echo "$output" | grep -qxF 'TIER_A|osv-scanner|HIGH|go.mod||osv:ghsa-xxxx|GHSA-xxxx RCE in foo'
+  echo "$output" | grep -qxF 'TIER_A|osv-scanner|HIGH|go.mod||osv-scanner:ghsa-xxxx|GHSA-xxxx RCE in foo'
+}
+
+@test "osv-scanner severity fallback: groups[].max_severity, never the CVSS vector string" {
+  setup_fakes
+  printf '%s\n' "go.sum" >"$CHANGED"
+  # No .database_specific.severity; the vuln has a CVSS *vector* .severity[].score
+  # (not a level) plus a package group max_severity — the level-bearing field.
+  RC_STATIC_TOOLS="osv-scanner" OSV_VERSION=2.1.0 OSV_MODE=groupsev PATH="$SANDBOX" \
+    run --separate-stderr "$SCRIPT" "$BASE" "$HEAD" "$CHANGED"
+  echo "status=$status"
+  echo "output=<<$output>>"
+  [ "$status" -eq 0 ]
+  # severity_raw = 9.8 (from groups[].max_severity), not the CVSS:3.1/... vector
+  echo "$output" | grep -qxF 'TIER_A|osv-scanner|9.8|go.sum||osv-scanner:cve-2024-1|CVE-2024-1 vuln'
+  ! echo "$output" | grep -qF 'CVSS:3.1'
 }
 
 @test "osv-scanner: no lockfile in diff -> not triggered, never invoked" {

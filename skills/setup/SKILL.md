@@ -206,7 +206,7 @@ If the user accepts, write **`.review-council/config.yml`** with the **full-refe
 # Every key below is shown with its built-in default. All keys are optional;
 # delete or comment any you don't need. `.review-council/config.local.yml` uses
 # this IDENTICAL schema and overrides config.yml per key. RC_* env vars win over
-# both files (settings.* only). An all-commented file = pure defaults.
+# both files (settings.* and static_analysis.* only). An all-commented file = pure defaults.
 
 # reviewers:                     # enable/disable + optional model per reviewer
 #   claude:     { enabled: true,  model: "" }        # "" = the tool's own default model
@@ -245,6 +245,12 @@ If the user accepts, write **`.review-council/config.yml`** with the **full-refe
 #   reviewer_timeout_seconds: 600      # RC_REVIEWER_TIMEOUT
 #   run_budget_seconds:       600      # RC_RUN_BUDGET
 #   auto_retry:               false    # RC_AUTO_RETRY
+
+# static_analysis:               # deterministic tool layer (each also settable via its RC_* env var, which wins)
+#   enabled: true                    # RC_STATIC_ANALYSIS
+#   tools: [gitleaks, trufflehog, osv-scanner, semgrep, ruff, shellcheck, actionlint, hadolint]   # RC_STATIC_TOOLS (comma-separated)
+#   timeout_seconds: 60              # RC_STATIC_TIMEOUT
+#   semgrep_config: auto             # RC_SEMGREP_CONFIG — auto | off | a repo-owned ruleset path
 ```
 
 And write **`.review-council/config.local.yml`** (per-machine overrides — identical schema, wins over `config.yml`):

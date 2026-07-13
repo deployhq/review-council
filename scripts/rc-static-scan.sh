@@ -142,12 +142,16 @@ TRUFFLEHOG_FILTER="$SAN"'
   | join("|")'
 
 # osv-scanner emits a single JSON object; the filter walks results/packages/vulns.
+# osv severity: prefer the advisory's level word (.database_specific.severity,
+# e.g. CRITICAL/HIGH/MEDIUM), then the package group's max_severity (a real CVSS
+# level/score). Never .severity[].score — that is a CVSS *vector* string
+# (CVSS:3.1/AV:N/...), not a level. rule id is tool-prefixed (`osv-scanner:<id>`).
 OSV_FILTER="$SAN"'
   .results[]? as $r | ($r.packages[]?) as $p | ($p.vulnerabilities[]?)
   | [$tier,$tool,
-     ((.database_specific.severity // ((.severity // [])[0].score) // "UNKNOWN")|san),
+     ((.database_specific.severity // first($p.groups[]?.max_severity) // "UNKNOWN")|san),
      (($r.source.path // "")|san),"",
-     ("osv:"+((.id//"vuln")|ascii_downcase|san)),
+     ("osv-scanner:"+((.id//"vuln")|ascii_downcase|san)),
      (((.id//"CVE")+" "+(.summary // .details // "known vulnerability"))|san)]
   | join("|")'
 
@@ -277,6 +281,27 @@ semgrep_can_baseline() {
   return 0
 }
 
+# worktree_head: true when <head-ref-or-worktree> is the working tree rather than
+# a distinct, resolvable git ref — i.e. Review Council's local staged/unstaged
+# review mode, where the orchestrator passes head="." (or a worktree path) with
+# base="HEAD". A git-RANGE scan there (gitleaks --log-opts="HEAD..", trufflehog
+# --since-commit HEAD --branch .) would cover an empty/invalid range and silently
+# report 0 findings — so the Tier-A range scanners switch to a working-tree scan
+# instead (mirroring semgrep's full-scan fallback). Also true when base==head.
+worktree_head() {
+  case "$HEAD_REF" in
+    '' | '.' | './' | /* | ./* | ../*) return 0 ;;
+  esac
+  [ -d "$HEAD_REF" ] && return 0
+  [ "$BASE_REF" = "$HEAD_REF" ] && return 0
+  # A ref we cannot resolve to a commit can't anchor a range either — treat it as
+  # worktree/unknown (only meaningful when we are inside a git work tree).
+  if git rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+    git rev-parse --verify --quiet "${HEAD_REF}^{commit}" >/dev/null 2>&1 || return 0
+  fi
+  return 1
+}
+
 # network_failed: the last tool's captured stderr shows an egress/DNS failure.
 network_failed() {
   [ -f "$STDERR_CAP" ] || return 1
@@ -366,14 +391,27 @@ run_gitleaks() {
   _gl_report="$WORKDIR/gitleaks.json"
   : >"$_gl_report"
   if gitleaks_modern; then _gl_modern=1; else _gl_modern=0; fi
-  if [ "$_gl_modern" -eq 1 ]; then
-    set -- gitleaks git
+  if worktree_head; then
+    # Local staged/unstaged mode: no distinct head ref, so a git-range scan
+    # (--log-opts="HEAD..") would cover 0 commits and silently report nothing.
+    # Scan the working-tree files directly instead (modern: `dir`; old: `detect
+    # --no-git` treats --source as a plain directory, not git history).
+    if [ "$_gl_modern" -eq 1 ]; then
+      set -- gitleaks dir
+    else
+      set -- gitleaks detect --no-git --source .
+    fi
   else
-    set -- gitleaks detect --source .
+    if [ "$_gl_modern" -eq 1 ]; then
+      set -- gitleaks git
+    else
+      set -- gitleaks detect --source .
+    fi
+    if [ -n "$BASE_REF" ]; then set -- "$@" --log-opts="$BASE_REF..$HEAD_REF"; fi
   fi
-  if [ -n "$BASE_REF" ]; then set -- "$@" --log-opts="$BASE_REF..$HEAD_REF"; fi
   set -- "$@" -f json -r "$_gl_report"
   if [ -f .gitleaks.toml ]; then set -- "$@" -c .gitleaks.toml; fi
+  # modern subcommands (git/dir) take the scan path as a trailing positional
   if [ "$_gl_modern" -eq 1 ]; then set -- "$@" .; fi
   run_report "$@"
   if hit_timeout; then
@@ -389,9 +427,15 @@ run_trufflehog() {
     return
   fi
   _th_report="$WORKDIR/trufflehog.json"
-  set -- trufflehog git "file://." --results=verified --json
-  if [ -n "$BASE_REF" ]; then set -- "$@" --since-commit "$BASE_REF"; fi
-  if [ -n "$HEAD_REF" ]; then set -- "$@" --branch "$HEAD_REF"; fi
+  if worktree_head; then
+    # Local staged/unstaged mode: no distinct head branch, so --since-commit
+    # HEAD --branch . forms an invalid/empty git range. Scan the working tree.
+    set -- trufflehog filesystem . --results=verified --json
+  else
+    set -- trufflehog git "file://." --results=verified --json
+    if [ -n "$BASE_REF" ]; then set -- "$@" --since-commit "$BASE_REF"; fi
+    if [ -n "$HEAD_REF" ]; then set -- "$@" --branch "$HEAD_REF"; fi
+  fi
   run_stdout "$_th_report" "$@"
   if hit_timeout; then
     add_skip trufflehog "timeout"
