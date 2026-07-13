@@ -15,7 +15,8 @@
 #               fallback, but the positional wins).
 #
 # Precedence (per key): env > config.local.yml > config.yml > built-in default.
-#   - Env overrides apply to the `settings.*` knobs ONLY (see the settings emit).
+#   - Env overrides apply to the `settings.*` and `static_analysis.*` knobs
+#     ONLY (see the settings/static_analysis emits).
 #   - Reviewers and lenses come from the files (and defaults) only.
 #
 # YAML is parsed with `yq` (mikefarah v4); the binary is `${RC_YQ:-yq}`. Graceful
@@ -26,7 +27,9 @@
 #   - a file absent           -> skip it silently.
 #   - a file malformed        -> skip that file with a note; use the other layers.
 #   - a single key malformed  -> use that key's default with a note.
-#   Unknown keys are ignored. A `static_analysis:` block (Phase 2) is ignored.
+#   Unknown keys are ignored (including unrecognized sub-keys under
+#   `static_analysis:`, e.g. a per-tool `enabled` block — only the four
+#   documented static_analysis.* keys are read).
 #
 # Exit: always 0 (absent files / absent yq degrade gracefully, they aren't errors).
 
@@ -288,5 +291,106 @@ emit_setting settings.min_reviewers ".settings.min_reviewers" "2" posint RC_MIN_
 emit_setting settings.reviewer_timeout_seconds ".settings.reviewer_timeout_seconds" "600" posint RC_REVIEWER_TIMEOUT
 emit_setting settings.run_budget_seconds ".settings.run_budget_seconds" "600" posint RC_RUN_BUDGET
 emit_setting settings.auto_retry ".settings.auto_retry" "false" bool RC_AUTO_RETRY
+
+# ---------------------------------------------------------------------------
+# Static analysis — files AND env (env wins), its own top-level section
+# (sibling to reviewers/lenses/settings). Previously a `static_analysis:`
+# block was parsed-but-ignored; these four keys are now read and emitted.
+# ---------------------------------------------------------------------------
+
+# is_known_tool <token>: true if <token> is one of the eight recognized
+# static-analysis tool names. Uses literal `=` comparisons in a loop (not a
+# glob-pattern substring test) so a token containing shell glob metacharacters
+# (e.g. `*`) can never falsely match.
+is_known_tool() {
+  for _ikt_known in gitleaks trufflehog osv-scanner semgrep ruff shellcheck actionlint hadolint; do
+    [ "$1" = "$_ikt_known" ] && return 0
+  done
+  return 1
+}
+
+# filter_tools <comma-separated tokens>: trims whitespace around each token,
+# drops empty tokens, and drops any token not in KNOWN_STATIC_TOOLS (with a
+# stderr note per dropped token) — a graceful per-token degradation rather
+# than rejecting the whole list for one typo. Prints the comma-joined result
+# (order preserved; may be empty if every token was invalid).
+filter_tools() {
+  _ft_out=""
+  _ft_old_ifs="$IFS"
+  IFS=','
+  # `for tok in $1` (unquoted, required for IFS word-splitting on commas) also
+  # triggers pathname expansion — an input token like `*` or `?` would
+  # otherwise be silently replaced with a listing of CWD's files instead of
+  # being split/validated as a literal string. Disable globbing for the
+  # duration of the loop and restore it after (the rest of this script never
+  # relies on pathname expansion, so this is safe to scope narrowly here).
+  set -f
+  for _ft_tok in $1; do
+    IFS="$_ft_old_ifs"
+    _ft_tok="$(printf '%s' "$_ft_tok" | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//')"
+    if [ -z "$_ft_tok" ]; then
+      :
+    elif is_known_tool "$_ft_tok"; then
+      if [ -z "$_ft_out" ]; then
+        _ft_out="$_ft_tok"
+      else
+        _ft_out="$_ft_out,$_ft_tok"
+      fi
+    else
+      echo "rc-config: static_analysis.tools: unknown tool '$_ft_tok'; dropped" >&2
+    fi
+    IFS=','
+  done
+  set +f
+  IFS="$_ft_old_ifs"
+  printf '%s' "$_ft_out"
+}
+
+# resolve_static_tools <default>: sets global STATIC_TOOLS_VALUE. Layers
+# `.static_analysis.tools` from base/over as a YAML seq (comma-joined, same
+# `!!seq` tag-check pattern as resolve_providers), then — unlike lenses'
+# providers, which have no env override at all — lets RC_STATIC_TOOLS
+# (comma-separated) win over both files if set. Every source is passed
+# through filter_tools for known-token validation.
+resolve_static_tools() {
+  STATIC_TOOLS_VALUE="$1"
+  for _rst_layer in base over; do
+    eval "_rst_ok=\$${_rst_layer}_ok"
+    [ "$_rst_ok" -eq 1 ] || continue
+    eval "_rst_file=\$${_rst_layer}_file"
+    _rst_tag="$("$YQ_BIN" '.static_analysis.tools | tag' "$_rst_file" 2>/dev/null)" || continue
+    case "$_rst_tag" in
+      '!!null')
+        continue
+        ;;
+      '!!seq')
+        _rst_joined="$("$YQ_BIN" '.static_analysis.tools | join(",")' "$_rst_file" 2>/dev/null)" || continue
+        if valid_str "$_rst_joined"; then
+          STATIC_TOOLS_VALUE="$(filter_tools "$_rst_joined")"
+        else
+          note_bad "static_analysis.tools" "$_rst_joined"
+        fi
+        ;;
+      *)
+        echo "rc-config: static_analysis.tools: not a list; using '$STATIC_TOOLS_VALUE'" >&2
+        ;;
+    esac
+  done
+  _rst_env="${RC_STATIC_TOOLS:-}"
+  if [ -n "$_rst_env" ]; then
+    if valid_str "$_rst_env"; then
+      STATIC_TOOLS_VALUE="$(filter_tools "$_rst_env")"
+    else
+      echo "rc-config: static_analysis.tools: invalid RC_STATIC_TOOLS='$_rst_env'; ignoring env override" >&2
+    fi
+  fi
+}
+
+echo "# static_analysis"
+emit_setting static_analysis.enabled ".static_analysis.enabled" "true" bool RC_STATIC_ANALYSIS
+resolve_static_tools "gitleaks,trufflehog,osv-scanner,semgrep,ruff,shellcheck,actionlint,hadolint"
+printf 'static_analysis.tools=%s\n' "$STATIC_TOOLS_VALUE"
+emit_setting static_analysis.timeout_seconds ".static_analysis.timeout_seconds" "60" posint RC_STATIC_TIMEOUT
+emit_setting static_analysis.semgrep_config ".static_analysis.semgrep_config" "auto" str RC_SEMGREP_CONFIG
 
 exit 0

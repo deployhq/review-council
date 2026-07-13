@@ -39,6 +39,12 @@ has_line() {
   has_line "settings.run_budget_seconds=600"
   has_line "settings.min_reviewers=2"
   has_line "settings.auto_retry=false"
+  # static_analysis.* is now emitted (previously: no `static_analysis:` block ->
+  # the whole thing was ignored, no lines at all). Absent block -> defaults.
+  has_line "static_analysis.enabled=true"
+  has_line "static_analysis.tools=gitleaks,trufflehog,osv-scanner,semgrep,ruff,shellcheck,actionlint,hadolint"
+  has_line "static_analysis.timeout_seconds=60"
+  has_line "static_analysis.semgrep_config=auto"
 }
 
 @test "provider enable/disable from config.yml" {
@@ -187,7 +193,11 @@ EOF
   printf '%s\n' "$stderr" | grep -q 'config files ignored'
 }
 
-@test "static_analysis block present -> ignored, no crash, normal output" {
+@test "static_analysis block with unrecognized sub-keys -> those ignored, real keys still default, no crash" {
+  # `semgrep:` (a per-tool sub-block) and `eslint:` are NOT among the four
+  # documented static_analysis.* keys (enabled/tools/timeout_seconds/
+  # semgrep_config) -> ignored like any other unknown key, without erroring
+  # the rest of the file. The four real keys still emit their defaults.
   cat >"$CFG/config.yml" <<'EOF'
 static_analysis:
   semgrep:
@@ -201,8 +211,139 @@ EOF
   [ "$status" -eq 0 ]
   has_line "settings.verify=false"
   has_line "reviewer.claude.enabled=true"
-  # no static_analysis.* keys leak into output
-  ! printf '%s\n' "$output" | grep -q 'static_analysis'
+  # the four real static_analysis.* keys are emitted with their defaults
+  has_line "static_analysis.enabled=true"
+  has_line "static_analysis.tools=gitleaks,trufflehog,osv-scanner,semgrep,ruff,shellcheck,actionlint,hadolint"
+  has_line "static_analysis.timeout_seconds=60"
+  has_line "static_analysis.semgrep_config=auto"
+}
+
+@test "static_analysis.enabled: config.yml sets false, then RC_STATIC_ANALYSIS env overrides back to true" {
+  printf 'static_analysis:\n  enabled: false\n' >"$CFG/config.yml"
+  run --separate-stderr "$SCRIPT" "$CFG"
+  [ "$status" -eq 0 ]
+  has_line "static_analysis.enabled=false"
+
+  RC_STATIC_ANALYSIS=true run --separate-stderr "$SCRIPT" "$CFG"
+  [ "$status" -eq 0 ]
+  has_line "static_analysis.enabled=true"
+}
+
+@test "static_analysis.tools: explicit list from config.yml" {
+  printf 'static_analysis:\n  tools: [gitleaks, semgrep]\n' >"$CFG/config.yml"
+  run --separate-stderr "$SCRIPT" "$CFG"
+  [ "$status" -eq 0 ]
+  has_line "static_analysis.tools=gitleaks,semgrep"
+}
+
+@test "static_analysis.tools: RC_STATIC_TOOLS env overrides the config.yml list" {
+  printf 'static_analysis:\n  tools: [gitleaks, semgrep]\n' >"$CFG/config.yml"
+  RC_STATIC_TOOLS="ruff,shellcheck" run --separate-stderr "$SCRIPT" "$CFG"
+  [ "$status" -eq 0 ]
+  has_line "static_analysis.tools=ruff,shellcheck"
+}
+
+@test "static_analysis.tools: unknown tool token dropped with a note, valid ones kept" {
+  printf 'static_analysis:\n  tools: [gitleaks, eslint, semgrep]\n' >"$CFG/config.yml"
+  run --separate-stderr "$SCRIPT" "$CFG"
+  echo "stderr=<<$stderr>>"
+  [ "$status" -eq 0 ]
+  has_line "static_analysis.tools=gitleaks,semgrep"
+  printf '%s\n' "$stderr" | grep -q "unknown tool 'eslint'"
+}
+
+@test "static_analysis.tools: unknown token in RC_STATIC_TOOLS env also dropped with a note" {
+  RC_STATIC_TOOLS="gitleaks, bogus-tool ,ruff" run --separate-stderr "$SCRIPT" "$CFG"
+  echo "stderr=<<$stderr>>"
+  [ "$status" -eq 0 ]
+  # valid tokens kept (and env-provided whitespace around tokens trimmed)
+  has_line "static_analysis.tools=gitleaks,ruff"
+  printf '%s\n' "$stderr" | grep -q "unknown tool 'bogus-tool'"
+}
+
+@test "static_analysis.tools: glob-metacharacter token is treated literally, not pathname-expanded" {
+  # Regression guard: an unquoted `for tok in $list` (needed to split on
+  # commas) would otherwise let a token like `*` undergo pathname expansion
+  # against the CWD's files instead of being validated as a literal string.
+  RC_STATIC_TOOLS='*' run --separate-stderr "$SCRIPT" "$CFG"
+  echo "stderr=<<$stderr>>"
+  [ "$status" -eq 0 ]
+  has_line "static_analysis.tools="
+  printf '%s\n' "$stderr" | grep -qF "unknown tool '*'"
+}
+
+@test "static_analysis.timeout_seconds: default, config override, malformed->default, env override" {
+  run --separate-stderr "$SCRIPT" "$CFG"
+  [ "$status" -eq 0 ]
+  has_line "static_analysis.timeout_seconds=60"
+
+  printf 'static_analysis:\n  timeout_seconds: 30\n' >"$CFG/config.yml"
+  run --separate-stderr "$SCRIPT" "$CFG"
+  [ "$status" -eq 0 ]
+  has_line "static_analysis.timeout_seconds=30"
+
+  printf 'static_analysis:\n  timeout_seconds: abc\n' >"$CFG/config.yml"
+  run --separate-stderr "$SCRIPT" "$CFG"
+  echo "stderr=<<$stderr>>"
+  [ "$status" -eq 0 ]
+  has_line "static_analysis.timeout_seconds=60"
+  printf '%s\n' "$stderr" | grep -q 'static_analysis.timeout_seconds'
+
+  rm -f "$CFG/config.yml"
+  RC_STATIC_TIMEOUT=45 run --separate-stderr "$SCRIPT" "$CFG"
+  [ "$status" -eq 0 ]
+  has_line "static_analysis.timeout_seconds=45"
+}
+
+@test "static_analysis.semgrep_config: default auto, off, custom path, env override" {
+  run --separate-stderr "$SCRIPT" "$CFG"
+  [ "$status" -eq 0 ]
+  has_line "static_analysis.semgrep_config=auto"
+
+  printf 'static_analysis:\n  semgrep_config: "off"\n' >"$CFG/config.yml"
+  run --separate-stderr "$SCRIPT" "$CFG"
+  [ "$status" -eq 0 ]
+  has_line "static_analysis.semgrep_config=off"
+
+  printf 'static_analysis:\n  semgrep_config: .semgrep/custom.yml\n' >"$CFG/config.yml"
+  run --separate-stderr "$SCRIPT" "$CFG"
+  [ "$status" -eq 0 ]
+  has_line "static_analysis.semgrep_config=.semgrep/custom.yml"
+
+  RC_SEMGREP_CONFIG=p/ci run --separate-stderr "$SCRIPT" "$CFG"
+  [ "$status" -eq 0 ]
+  has_line "static_analysis.semgrep_config=p/ci"
+}
+
+@test "static_analysis.*: precedence env > config.local.yml > config.yml > default holds" {
+  printf 'static_analysis:\n  timeout_seconds: 30\n' >"$CFG/config.yml"
+  printf 'static_analysis:\n  timeout_seconds: 45\n' >"$CFG/config.local.yml"
+  run --separate-stderr "$SCRIPT" "$CFG"
+  [ "$status" -eq 0 ]
+  has_line "static_analysis.timeout_seconds=45"
+
+  RC_STATIC_TIMEOUT=90 run --separate-stderr "$SCRIPT" "$CFG"
+  [ "$status" -eq 0 ]
+  has_line "static_analysis.timeout_seconds=90"
+}
+
+@test "static_analysis.semgrep_config with embedded newline -> default + note, no injected stdout line" {
+  # Same control-char-free validation as reviewer.<p>.model: an embedded
+  # newline would otherwise inject a fabricated key=value stdout line.
+  cat >"$CFG/config.yml" <<'EOF'
+static_analysis:
+  semgrep_config: "auto\ninjected.line=malicious"
+EOF
+  run --separate-stderr "$SCRIPT" "$CFG"
+  echo "status=$status"
+  echo "output=<<$output>>"
+  echo "stderr=<<$stderr>>"
+  [ "$status" -eq 0 ]
+  # crafted value rejected -> falls back to the default ("auto")
+  has_line "static_analysis.semgrep_config=auto"
+  printf '%s\n' "$stderr" | grep -q 'static_analysis.semgrep_config'
+  ! printf '%s\n' "$output" | grep -q 'injected.line'
+  ! printf '%s\n' "$output" | grep -vE '^#|='
 }
 
 @test "string value with embedded newline -> default + note, no injected stdout line" {

@@ -30,9 +30,9 @@ env  >  config.local.yml  >  config.yml  >  built-in default
 
 - Start from the built-in default, override with `config.yml`, override with
   `config.local.yml`, override with environment variables.
-- **Env (`RC_*`) overrides apply to `settings.*` only** (see the settings table). Reviewers
-  and lenses are controlled by the files (and defaults) only — there is no env override for
-  the roster or lenses.
+- **Env (`RC_*`) overrides apply to `settings.*` and `static_analysis.*` only** (see their
+  respective tables). Reviewers and lenses are controlled by the files (and defaults) only —
+  there is no env override for the roster or lenses.
 
 ## `reviewers:` block
 
@@ -116,6 +116,39 @@ settings:
 
 Booleans must be `true`/`false`; the four numeric knobs must be positive integers.
 
+## `static_analysis:` block
+
+Controls the deterministic static-analysis layer (Phase 2) — the tool runner that scans
+the diff with `gitleaks`, `trufflehog`, `osv-scanner`, `semgrep`, `ruff`, `shellcheck`,
+`actionlint`, and `hadolint` before the council reviews it. Despite reading visually like
+its own top-level block (a sibling of `reviewers:`/`lenses:`/`settings:`), it behaves
+exactly like `settings:` — files **and** env, env wins.
+
+```yaml
+static_analysis:
+  tools: [gitleaks, semgrep, ruff]   # narrow the default 8-tool list
+  timeout_seconds: 90
+```
+
+| Key | Default | Env override | Purpose |
+|---|---|---|---|
+| `static_analysis.enabled` | `true` | `RC_STATIC_ANALYSIS` | Turn the whole static-analysis layer on/off. |
+| `static_analysis.tools` | `gitleaks,trufflehog,osv-scanner,semgrep,ruff,shellcheck,actionlint,hadolint` | `RC_STATIC_TOOLS` | Which tools run (comma-separated when set via env). |
+| `static_analysis.timeout_seconds` | `60` | `RC_STATIC_TIMEOUT` | Per-tool wall-clock cap (seconds). |
+| `static_analysis.semgrep_config` | `auto` | `RC_SEMGREP_CONFIG` | `auto` (registry rules), `off` (skip semgrep), or a repo-owned ruleset path. |
+
+- **`tools` is a list**, like `lenses.<lens>.providers` — but unlike lenses, it **does**
+  have an env override: `RC_STATIC_TOOLS` (comma-separated) fully replaces the
+  files-derived list when set, it does not merge with it.
+- Each entry in `tools` is validated against the known set of eight names above; an
+  unrecognized entry is **dropped with a stderr note**, not a hard failure — the rest of
+  the list still takes effect.
+- `trufflehog` is **default-on**. Its `--results=verified` mode makes live outbound
+  network calls that authenticate with any credential it finds, to confirm it's real. Drop
+  `trufflehog` from `tools` to opt out if that outbound call is undesirable in your
+  environment (see `rules/static-analysis.md`).
+- `semgrep_config: off` skips semgrep unconditionally, regardless of `tools`.
+
 ## Validation & graceful degradation
 
 The reader (`scripts/rc-config.sh`) is defensive by design — a broken config never aborts a
@@ -126,7 +159,9 @@ review, it degrades to the next layer down:
   falls back to that key's default, with a note on **stderr**.
 - **A malformed file** (YAML parse error) is skipped with a stderr note; the other layers
   still apply.
-- **A `static_analysis:` block** (a Phase 2 feature) is ignored — it does not error.
+- **Unrecognized `static_analysis:` sub-keys** (e.g. a per-tool `enabled:` block, or any
+  key other than the four documented ones) are ignored like any other unknown key — they
+  do not error, and the four real keys still resolve normally.
 
 The reader prints the **effective config** as `key=value` lines to **stdout** and all
 diagnostics to **stderr**, and always exits `0`.
@@ -173,6 +208,9 @@ uncomment only what you want to change.
 # settings:
 #   verify: false             # skip the verification pass
 #   min_reviewers: 3          # require 3 participating reviewers
+
+# static_analysis:
+#   tools: [gitleaks, semgrep, ruff]   # narrow the default 8-tool list
 ```
 
 ### (2) Full reference — every option, with defaults
@@ -182,7 +220,7 @@ uncomment only what you want to change.
 # Every key below is shown with its built-in default. All keys are optional;
 # delete or comment any you don't need. `.review-council/config.local.yml` uses
 # this IDENTICAL schema and overrides config.yml per key. RC_* env vars win over
-# both files (settings.* only). An all-commented file = pure defaults.
+# both files (settings.* and static_analysis.* only). An all-commented file = pure defaults.
 
 # reviewers:                     # enable/disable + optional model per reviewer
 #   claude:     { enabled: true,  model: "" }        # "" = the tool's own default model
@@ -221,6 +259,12 @@ uncomment only what you want to change.
 #   reviewer_timeout_seconds: 600      # RC_REVIEWER_TIMEOUT
 #   run_budget_seconds:       600      # RC_RUN_BUDGET
 #   auto_retry:               false    # RC_AUTO_RETRY
+
+# static_analysis:               # deterministic tool layer (each also settable via its RC_* env var, which wins)
+#   enabled: true                    # RC_STATIC_ANALYSIS
+#   tools: [gitleaks, trufflehog, osv-scanner, semgrep, ruff, shellcheck, actionlint, hadolint]   # RC_STATIC_TOOLS (comma-separated)
+#   timeout_seconds: 60              # RC_STATIC_TIMEOUT
+#   semgrep_config: auto             # RC_SEMGREP_CONFIG — auto | off | a repo-owned ruleset path
 ```
 
 See `skills/run/SKILL.md` Step 0 for how the orchestrator reads and applies this, and
