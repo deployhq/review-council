@@ -115,11 +115,31 @@ CLI and API reviewers must fail fast. A single overloaded or quota-capped provid
    - **Persistent overload** — HTTP 503 / `high demand` that continues past the timeout.
 4. **Fallback, not retry — with one narrow, budget-bounded exception for `agy` empty output.** For the Google slot, a **hard** fast-fail of `agy` (auth/quota) or an `agy` timeout means move on to `gemini` (its fallback), not retry `agy`. **The one exception:** if `agy` returns **empty/malformed output *quickly*** (exit 0 with no stdout, back in well under the budget — the cold-start quirk), **retry `agy` once** before falling back, and **time-box that retry to the *remaining* budget, not a fresh `RC_REVIEWER_TIMEOUT`** (first-try + retry must fit inside one budget). If instead the empty result arrived **near the cap** — a slow call that completed but printed nothing — treat it like a timeout: **do not retry**, fall straight to `gemini`. The warm retry almost always succeeds, and `gemini` is a dead end for Workspace/Dasher accounts (`IneligibleTierError: DASHER_USER`), so burning the slot on it wastes the whole Google reviewer. When no tool remains, return the `SKIPPED` sentinel **attributed to the primary tool** (`agy` when installed) — not mislabeled as a `gemini` auth failure. That `SKIPPED` (and any successful Google result) is **terminal for the round**: the internal `agy` retry already consumed the slot's one allowed retry, so the Google reviewer is **not eligible for the Step 3.5 reviewer-level retry** — never re-run it externally on an `agy`-empty-after-retry, `agy`-timeout, or `gemini`-ineligible reason. Let the council proceed with the remaining reviewers (subject to `RC_MIN_REVIEWERS`).
 
-## Environment Variables
+## Run Settings
+
+Run knobs come from the **config reader** (`scripts/rc-config.sh`, read in Step 0 of `skills/run/SKILL.md`), which reconciles the config files, `RC_*` environment variables, and built-in defaults. Precedence is applied **per key**:
+
+```
+env (RC_*)  >  .review-council/config.local.yml  >  .review-council/config.yml  >  built-in default
+```
+
+Read the effective values from the reader's `settings.*` output — do **not** re-read the bare `RC_*` env vars directly (the reader already folded them in at the correct precedence). With no config files (or no `yq` installed), the effective values are the defaults + any `RC_*` overrides — byte-identical to prior behavior. Full schema: `rules/config.md`.
+
+| Setting (`settings.*`) | Default | Env override | Purpose |
+|---|---|---|---|
+| `personas` | `true` | `RC_PERSONAS` | Use reviewer personas when prompting reviewers. |
+| `verify` | `true` | `RC_VERIFY` | Run the verification pass over findings. |
+| `verify_max_findings` | `12` | `RC_VERIFY_CAP` | Cap on findings sent to the verification pass. |
+| `learn` | `true` | `RC_LEARN` | Enable the learning/memory mechanism. |
+| `min_reviewers` | `2` | `RC_MIN_REVIEWERS` | Minimum participating reviewers for council mode. |
+| `reviewer_timeout_seconds` | `600` | `RC_REVIEWER_TIMEOUT` | Per-invocation wall-clock cap (**seconds**) for CLI/API reviewers. |
+| `run_budget_seconds` | `600` | `RC_RUN_BUDGET` | Total wall-clock budget (**seconds**) for the whole run. |
+| `auto_retry` | `false` | `RC_AUTO_RETRY` | Retry failed reviewers without asking (CI-friendly). |
+
+**`reviewer_timeout_seconds` / `RC_REVIEWER_TIMEOUT`** is sized to cover `agy`'s multi-minute cold start; `agy`'s own `--print-timeout` must be raised to match, as a **unit-suffixed** duration — `"${RC_REVIEWER_TIMEOUT}s"` or `10m`, never a bare `600` (see the timeout wrapper above). Raise for very large diffs or slow networks.
+
+One additional env var is **not** part of the config schema (it has no `settings.*` key and is read directly):
 
 | Variable | Default | Purpose |
 |---|---|---|
-| `RC_CLAUDE_MAX_TURNS` | `30` | Max turns for Claude reviewer subagent |
-| `RC_MIN_REVIEWERS` | `2` | Minimum successful reviewers for council mode |
-| `RC_AUTO_RETRY` | `false` | If `true`, retry failed reviewers without asking |
-| `RC_REVIEWER_TIMEOUT` | `600` | Per-invocation wall-clock cap (**seconds**, 10 min) for CLI/API reviewers; sized to cover `agy`'s multi-minute cold start. `agy`'s own `--print-timeout` must be raised to match, as a **unit-suffixed** duration — `"${RC_REVIEWER_TIMEOUT}s"` or `10m`, never a bare `600`. Raise for very large diffs or slow networks. |
+| `RC_CLAUDE_MAX_TURNS` | `30` | Max turns for the Claude reviewer subagent. |

@@ -58,6 +58,26 @@ which gh 2>/dev/null && gh auth status 2>&1 | head -3
 - If authenticated: "GitHub CLI ............ authenticated"
 - If not: "GitHub CLI ............. not found or not authenticated (PR reviews disabled)"
 
+### Config-file support (yq) — optional
+
+Review Council reads an optional `.review-council/config.yml` (see `rules/config.md`). Parsing needs **[mikefarah/yq](https://github.com/mikefarah/yq) v4**. It is **optional**: without it, the plugin runs on built-in defaults + `RC_*` env vars (config files are ignored). Detect it — and confirm it's the *right* `yq` (there is a different Python tool also named `yq`):
+
+```bash
+if command -v yq >/dev/null 2>&1 && yq --version 2>&1 | grep -q 'mikefarah' && yq --version 2>&1 | grep -qE 'version v?4'; then
+  echo "yq: mikefarah v4 present ($(yq --version 2>&1))"
+elif command -v yq >/dev/null 2>&1; then
+  echo "yq: found, but NOT mikefarah v4 ($(yq --version 2>&1)) — config files need mikefarah/yq v4"
+else
+  echo "yq: not found"
+fi
+```
+
+- **mikefarah v4 present** → "Config files (yq) ..... available"
+- **present but wrong yq** (Python `yq`, or a v3) → "Config files (yq) ..... wrong yq — need mikefarah/yq v4"
+- **not found** → "Config files (yq) ..... not installed (using defaults + RC_* env)"
+
+When it's missing or the wrong `yq`, **print** the install instruction — do **not** install it (same norm the plugin uses for providers): `brew install yq` (macOS), or see <https://github.com/mikefarah/yq#install> for other platforms. State that it is optional — needed only to *use* config files; without it the plugin uses built-in defaults + `RC_*` overrides.
+
 ## Step 2: Summary
 
 Print:
@@ -74,6 +94,9 @@ Reviewers:
 Prerequisites:
   - GitHub CLI (gh) ........... [authenticated | not found]
 
+Optional:
+  - Config files (yq) ......... [available | wrong yq — need mikefarah/yq v4 | not installed (using defaults + RC_* env)]
+
 [N] of 4 reviewer slots available. [Convergence mode ready. | Single-reviewer mode — install at least one additional provider.]
 
 (Antigravity and Gemini share the Google slot — `agy` preferred, `gemini` fallback — so they count as one reviewer, not two.)
@@ -85,7 +108,85 @@ Usage:
   /review-council:run docs/plan.md review a plan or document
 ```
 
-## Step 3: Guidance (if needed)
+## Step 3: Offer a config scaffold (optional)
+
+Offer to create the config files so the user can customize the roster, lenses, and settings. **Only offer for files that don't already exist — never overwrite.** An all-commented file behaves exactly like no file (pure defaults), so the scaffold is safe to accept and edit later. The full schema lives in `rules/config.md`; the scaffold below is its reference blocks.
+
+```bash
+mkdir -p .review-council
+if [ -e .review-council/config.yml ]; then
+  echo ".review-council/config.yml already exists — leaving it untouched."
+else
+  echo "(offer to create .review-council/config.yml)"
+fi
+if [ -e .review-council/config.local.yml ]; then
+  echo ".review-council/config.local.yml already exists — leaving it untouched."
+else
+  echo "(offer to create .review-council/config.local.yml)"
+fi
+```
+
+If the user accepts, write **`.review-council/config.yml`** with this commented template (identical to the reference blocks in `rules/config.md` — an all-commented file = built-in defaults; uncomment only what you want to change):
+
+```yaml
+# .review-council/config.yml — Review Council configuration (committed team defaults).
+# Everything is optional. An all-commented file = built-in defaults.
+# Full schema + precedence: rules/config.md. Precedence per key:
+#   env (RC_*) > config.local.yml > config.yml > built-in default.
+# Config files are parsed with mikefarah/yq v4; without yq they're ignored.
+
+# reviewers:                     # enable/disable + optional model per reviewer
+#   claude:     { enabled: true,  model: "" }        # "" = the tool's own default model
+#   codex:      { enabled: true,  model: "" }
+#   google:     { enabled: true,  model: "" }
+#   perplexity: { enabled: true,  model: sonar }
+
+# lenses:                        # review perspectives
+#   # `providers` is ALWAYS a list; OMIT it for `auto` (diff-aware selection).
+#   # Pinning security.providers REPLACES the dedicated security reviewer (not additive).
+#   security:
+#     enabled: true
+#     # providers: [google, claude]     # omit -> auto
+#   correctness:  { enabled: true }      # add `providers: [claude]` to pin; omit -> auto
+#   cross_file:   { enabled: true }
+#   performance:  { enabled: true }
+#   design:       { enabled: true }
+#   dependency:   { enabled: true }      # providers defaults to [perplexity] when omitted
+
+# settings:                      # run knobs (each also settable via its RC_* env var, which wins)
+#   personas:                 true     # RC_PERSONAS
+#   verify:                   true     # RC_VERIFY
+#   verify_max_findings:      12       # RC_VERIFY_CAP
+#   learn:                    true     # RC_LEARN
+#   min_reviewers:            2        # RC_MIN_REVIEWERS
+#   reviewer_timeout_seconds: 600      # RC_REVIEWER_TIMEOUT
+#   run_budget_seconds:       600      # RC_RUN_BUDGET
+#   auto_retry:               false    # RC_AUTO_RETRY
+```
+
+And write **`.review-council/config.local.yml`** (per-machine overrides — identical schema, wins over `config.yml`):
+
+```yaml
+# .review-council/config.local.yml — per-machine overrides (NOT committed).
+# Identical schema to config.yml; overrides it per key. All-commented = no overrides.
+# Example:
+# settings:
+#   verify: false
+```
+
+Then add `config.local.yml` to the target repo's `.gitignore` so per-machine overrides are never committed (append only if not already present, and don't duplicate):
+
+```bash
+# add the ignore entry once, if missing
+if ! grep -qxF '.review-council/config.local.yml' .gitignore 2>/dev/null; then
+  printf '\n# Review Council per-machine config (not shared)\n.review-council/config.local.yml\n' >> .gitignore
+  echo "Added .review-council/config.local.yml to .gitignore"
+fi
+```
+
+Confirm to the user: config files created (or already present), and `config.local.yml` is gitignored. Remind them the files are optional and everything works on defaults without them.
+
+## Step 4: Guidance (if needed)
 
 If fewer than 2 providers are available, suggest the easiest one to add based on what the user likely already has:
 - If they have Node.js: suggest Codex (`npm install -g @openai/codex`)

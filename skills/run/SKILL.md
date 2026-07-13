@@ -8,9 +8,34 @@ allowed-tools: Agent, Bash, Read, Glob, Grep, Write, mcp__codex__codex, mcp__cod
 
 You are the **Orchestrator** of a review council. Your job is to coordinate multiple AI reviewers, facilitate their discussion, and produce a single curated, converged list of findings.
 
-## Step 0: Detect Available Providers
+## Step 0: Read Config & Detect Available Providers
 
-Before doing anything else, probe which reviewers are available. Refer to `rules/providers.md` for detection methods.
+Two independent gates decide the reviewer roster: **configuration** (which reviewers/lenses are *enabled*, from the config files) and **detection** (which reviewers are *available* on this machine). A reviewer participates only if it is **both** enabled and available. Do 0.1 and 0.2, then reconcile in 0.3.
+
+### 0.1 Read the effective configuration
+
+Run the bundled config reader and capture its `key=value` output. It reconciles `.review-council/config.yml`, `.review-council/config.local.yml`, `RC_*` env vars, and built-in defaults — precedence **env > config.local.yml > config.yml > built-in default** — and prints the effective config to stdout (diagnostics to stderr). It always exits `0`: absent files or absent `yq` degrade to defaults. See `rules/config.md` for the full schema.
+
+```bash
+# Read from the TARGET repo's .review-council/ (the CWD where the review runs).
+# ${CLAUDE_PLUGIN_ROOT} is the plugin's own install dir — must be double-quoted.
+CONFIG_OUT="$("${CLAUDE_PLUGIN_ROOT}/scripts/rc-config.sh" .review-council 2>/tmp/rc-config-notes)"
+printf '%s\n' "$CONFIG_OUT"
+# Surface any reader diagnostics (malformed keys, yq-not-found, skipped files):
+[ -s /tmp/rc-config-notes ] && { echo "--- rc-config notes ---"; cat /tmp/rc-config-notes; }
+```
+
+**Echo the effective, reconciled config to the user before applying it.** This printed block is the observable artifact of what the run resolved — show what you resolved, never silently eyeball the YAML. Parse the `key=value` lines (one per line, no spaces around `=`; `#` lines are section comments). The keys are:
+
+- `reviewer.<p>.enabled` / `reviewer.<p>.model` for `p` in `claude`, `codex`, `google`, `perplexity`.
+- `lens.<l>.enabled` / `lens.<l>.providers` for `l` in `security`, `correctness`, `cross_file`, `performance`, `design`, `dependency` — plus `lens.security.replaces_dedicated`.
+- `settings.<k>` for `personas`, `verify`, `verify_max_findings`, `learn`, `min_reviewers`, `reviewer_timeout_seconds`, `run_budget_seconds`, `auto_retry`.
+
+If `yq` is missing, the reader prints a `yq not found` note and falls back to defaults + env; the run proceeds normally (config files are simply ignored). `rules/config.md` documents the one-time `brew install yq` (mikefarah v4) needed to *use* config files.
+
+### 0.2 Detect available providers
+
+Probe which reviewers are available on this machine. Refer to `rules/providers.md` for detection methods.
 
 **Run this detection command verbatim — do not hand-roll or abbreviate it.** The `agy` probe is the one most often dropped when detection is improvised, which silently collapses the Google slot to a `gemini` that cannot authenticate on Google Workspace accounts (`IneligibleTierError: DASHER_USER`). `agy` is the **default** Google reviewer and MUST be probed explicitly — including its known install path (`~/.local/bin/agy`), in case it isn't on `PATH`:
 
@@ -50,7 +75,17 @@ Interpret the output (each value is on its own line — read the whole line as t
    Never count this as two reviewers. Pass the resolved primary tool **and its path**, plus the fallback tool **and its path**, to the Google reviewer subagent.
 4. **Perplexity**: `perplexity=set` → available; `unset` → unavailable.
 
-Announce: "**Review Council** — [N] reviewers available: [list]. [Skipped: reason for each unavailable provider]". When the Google slot is available, name the actual tool — e.g. "Google (Antigravity)" — so it's clear `agy` (not `gemini`) is the one running.
+### 0.3 Apply the configuration to the roster
+
+Reconcile the config (0.1) with detection (0.2):
+
+- **Roster (reviewers).** Drop any provider whose `reviewer.<p>.enabled=false` — it does not participate even if installed. Of the reviewers that remain enabled, those that detection found available make up the participating roster. Config gates the roster; detection gates availability — **both** must pass.
+- **Models.** Where `reviewer.<p>.model` is non-empty, pass that model to that reviewer's invocation (e.g. the Google slot's model, or the Perplexity model — default `sonar`). An empty model means "use the tool's own default" — pass nothing.
+- **Lens bindings (record for Round 1).** Record each `lens.<l>.enabled` and `lens.<l>.providers` (`auto`, or a comma-joined provider list). The actual lens dispatch lands in **PR 1b** — here you only **read and record** the bindings. Note `lens.security.replaces_dedicated`: when `true`, the pinned `security.providers` *replace* the dedicated security reviewer (do not run both); when `false`, security stays on its default/`auto` path.
+- **Settings.** Load the `settings.*` values for this run and use them wherever the orchestration rules reference a run knob (`min_reviewers`, `reviewer_timeout_seconds`, `run_budget_seconds`, `auto_retry`, etc.). These **supersede** any ad-hoc reading of the bare `RC_*` env vars — the reader already folded `RC_*` in at the correct precedence, so read them from the reader's output, not from the environment directly.
+- **Absent config / absent `yq` → today's defaults**, byte-identical to pre-config behavior. Disabling reviewers still honors `settings.min_reviewers`: if too few remain to reach it, the existing min-reviewers handling applies (single-reviewer mode or the usual prompt).
+
+Announce: "**Review Council** — [N] reviewers available: [list]. [Skipped: reason for each unavailable **or config-disabled** provider]". When the Google slot is available, name the actual tool — e.g. "Google (Antigravity)" — so it's clear `agy` (not `gemini`) is the one running.
 
 If only Claude is available, proceed in **single-reviewer mode** and note it in the output. Suggest running `/review-council:setup` to see how to add more reviewers.
 
