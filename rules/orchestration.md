@@ -58,10 +58,17 @@ The output must contain:
 
 ### Field-Level Validation
 
-Each finding must include:
-- **Severity** (critical/important/suggestion)
-- **Location** (file:line or section reference)
-- **Recommendation** (concrete fix or alternative)
+This is a **structural** check (fields present, in the right shape) — not a truth/quality check. Each finding must include these fields, using the exact names from the finding schema in `rules/delegation-format.md`:
+- **severity** — critical/important/suggestion
+- **confidence** — high/medium/low
+- **location** — file:line or section reference
+- **symbol** — enclosing function/class/section ("N/A" is an acceptable value when none applies)
+- **concern** — free-form hint slug (any non-empty value passes; it is a hint, not a validated fingerprint)
+- **issue** — one sentence describing what's wrong
+- **why_it_matters** — impact if unaddressed
+- **recommendation** — concrete fix or alternative
+- **how_to_verify** — a concrete, human-runnable check (command/input/trace) + expected observation
+- **source** — reviewer id
 
 Findings missing any required field mark the entire reviewer output as FAILED.
 
