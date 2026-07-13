@@ -1,0 +1,11 @@
+# Fixture data for the `config` Tier-2 fixture — NOT a real project config.
+# Per-machine override layer (`config.local.yml`). Normally gitignored in a
+# real target repo; committed here only because this IS the fixture data.
+#
+# This file exists to prove `config.local.yml` wins over `config.yml` on a
+# key they both set (`settings.verify`), while a key ONLY `config.yml` sets
+# (`settings.min_reviewers`) is untouched here and must still come from
+# `config.yml`, not fall back to the built-in default.
+
+settings:
+  verify: true    # expect: wins over config.yml's `false` -> effective true

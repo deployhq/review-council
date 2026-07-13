@@ -1,0 +1,13 @@
+# Fixture data for the `solo` Tier-2 fixture — NOT a real project config.
+#
+# Forces solo-Claude mode DETERMINISTICALLY, regardless of what's actually
+# installed on the machine running the harness: per Step 0.3 of
+# `skills/run/SKILL.md`, "Drop any provider whose reviewer.<p>.enabled=false
+# — it does not participate even if installed." Disabling all three
+# external reviewers here means the roster is Claude (+ the always-on
+# dedicated `reviewer-security`) no matter what CLIs/keys are present.
+
+reviewers:
+  codex:      { enabled: false }
+  google:     { enabled: false }
+  perplexity: { enabled: false }
