@@ -91,6 +91,15 @@ Announce: "**Review Council** — [N] reviewers available: [list]. [Skipped: rea
 
 If only Claude is available, proceed in **single-reviewer mode** and note it in the output. Suggest running `/review-council:setup` to see how to add more reviewers.
 
+## Step 0.5: Recall Learnings
+
+Recall the team's shared learnings so past decisions shape this run. **Gated on `settings.learn`** (resolved in Step 0): if `settings.learn` is **false**, skip this step entirely.
+
+If `settings.learn` is **true**, read `.review-council/learnings.md` from the **target repo** (the CWD where the review runs, alongside `.review-council/config.yml`). **If the file is absent, skip silently** — no warning, no error. A missing file is the normal case. The file has two sections (format in `rules/config.md` → learnings):
+
+- **Conventions** — project-specific rules about what not to flag (e.g. "Migrations are auto-generated; do not flag missing down-migrations"). Fold this section **into the Step-2 baseline context package** (see Step 2) under a clear "Team Learnings — Conventions" heading. Because it rides the shared package, it is injected **once** and reaches **every** reviewer — do NOT paste it separately into each dispatch.
+- **Suppressions** — known false positives keyed by fingerprint. **Hold** this section for the Step-5 judge (a later PR). It is **not** injected into reviewer prompts in this phase; carry it forward so the judge can later down-weight/skip matching findings. Nothing consumes it yet — just pass it along.
+
 ## Step 1: Detect Review Target
 
 Analyze the user's input: `$ARGUMENTS`
@@ -135,11 +144,58 @@ Collect context appropriate to the detected type. This becomes the **baseline co
 - Git blame for changed hunks
 - Project conventions: raw contents of CLAUDE.md, CONTRIBUTING.md, README (if present)
 
+**Team Learnings — Conventions (from Step 0.5).** If Step 0.5 recalled a **Conventions** section, append it here under a "Team Learnings — Conventions" heading. Folding it into this shared package (rather than each dispatch) injects it **once** yet reaches every reviewer. (The **Suppressions** section is NOT included here — it is held for the Step-5 judge.)
+
 Package this as a structured text block. You will send this same package to each reviewer — this is the shared baseline. Reviewers may explore further using their own tools, but the baseline ensures equal starting context.
 
 ## Step 3: Round 1 — Independent Review (Parallel)
 
 Launch **all available reviewers in parallel**. They must not see each other's output — this ensures truly independent perspectives.
+
+### Lens Assignment (before dispatching)
+
+Before launching the reviewers, assign each one a **lens** — an emphasis that diversifies coverage. Assignment is deterministic and diff-aware. This step decides *which* lens each reviewer gets; `rules/delegation-format.md` supplies the exact per-reviewer lens block text to prepend.
+
+**If `settings.personas` is `false`:** skip lens assignment. Every reviewer gets the identical non-lens prompt (legacy behavior) — omit the `## LENS` section from each dispatch. The dedicated `reviewer-security` still runs. Then go straight to the dispatch blocks below.
+
+**Otherwise, assign lenses:**
+
+1. **Invariants (fixed, not diff-driven):**
+   - `reviewer-security` → **Security** (dedicated, always).
+   - **Correctness & concurrency → CORE** for every repo-capable frontier reviewer: `reviewer-claude`, Codex, and Google. They always carry Correctness; the specialist overlay below layers on top.
+   - Perplexity → **Dependency / CVE / best-practices** (diff-only — it has no repo tools).
+
+2. **Classify the diff → specialist overlays.** Scan the changed files/hunks (from Step 2) against the signal table and collect the overlays whose signals are present:
+
+   | Diff signal | Overlay to hoist |
+   |---|---|
+   | Migrations, schema, SQL, constraints, ORM models | Data-integrity & migration |
+   | New endpoints/routes, request parsing, auth/crypto | (Security — dedicated) + boost input-validation + Cross-file |
+   | Exported signatures, response shapes, serializers, protobuf/OpenAPI | Cross-file / API-contract |
+   | Hot paths, loops, queries, caching, concurrency | Performance & reliability / concurrency |
+   | Dependency manifests / lockfiles | Dependency/CVE → Perplexity |
+   | `.github/workflows/`, CI config, Dockerfiles, IaC | Config/workflow correctness |
+   | Frontend components / state / styles | UI-state & accessibility |
+   | Broad multi-file refactor | Cross-file impact |
+
+3. **Assign ONE specialist overlay per frontier reviewer** (Claude, Codex, Google — on top of CORE Correctness), drawing from the overlays present in the diff in this **deterministic tie-break order** (signals outrank slots): **Data-integrity → Cross-file → Performance → Config → UI → Design.** Walk the order and hand each present overlay to the next frontier reviewer that has none yet. If reviewers remain after the present overlays run out, give them **Design & maintainability** (the always-useful default). If overlays outnumber reviewers, the earliest in the order win.
+
+4. **Config pins override the diff-aware default.** For each lens `l` in {`security`, `correctness`, `cross_file`, `performance`, `design`, `dependency`}, Step 0 resolved `lens.<l>.enabled` and `lens.<l>.providers`:
+   - `lens.<l>.enabled=false` → that lens is not assigned this run.
+   - `lens.<l>.providers` = an explicit provider list → **pin** that lens to exactly those providers (overriding the diff-aware pick). `auto` or empty → use the diff-aware assignment above.
+   - **`lens.security.replaces_dedicated=true`** together with a pinned `lens.security.providers` → the pinned provider(s) take the **Security** lens **in place of** the dedicated `reviewer-security` (do NOT run both). When it is `false` (default), the dedicated `reviewer-security` runs and any `security.providers` pin is layered as an additional security emphasis on those providers.
+
+5. **Print the chosen lens map** so the assignment is observable, and carry it into the Step 7 report header. Example:
+   ```
+   Lens map (personas on):
+     reviewer-security   Security (dedicated)
+     reviewer-claude     Correctness + Data-integrity & migration
+     Codex               Correctness + Cross-file / API-contract
+     Google              Correctness + Performance & reliability
+     Perplexity          Dependency / CVE / best-practices
+   ```
+
+6. **Prepend each reviewer's lens block** to its dispatch prompt — the `## LENS` section for the native subagents (Claude, Security), and the delegation prompt written to the temp file for the CLI/API wrappers (Codex, Google, Perplexity). Every lens block states the emphasis **and** the floor obligation: *lens = emphasis, not blinders — still flag any critical you see outside your lens.*
 
 ### Reviewer: Claude (native subagent) — Always
 
@@ -151,6 +207,9 @@ If the `RC_CLAUDE_MAX_TURNS` environment variable is set, override the default m
 
 > ## TASK
 > [Review type]: Review the following [PR/plan/code] as one member of a multi-agent review council. Other AI models are reviewing the same material simultaneously.
+>
+> ## LENS
+> [If `settings.personas` is true, prepend the per-reviewer **lens block** assigned in Step 3 (Lens Assignment) — use the exact block text from `rules/delegation-format.md`. The lens names your emphasis (Correctness & concurrency as CORE, plus one specialist overlay). **Lens = emphasis, not blinders** — still flag any *critical* issue you see outside your lens. If `settings.personas` is false, omit this section: every reviewer gets the identical non-lens prompt.]
 >
 > ## REVIEW PROCESS
 > Follow these steps in order:
@@ -170,24 +229,39 @@ If the `RC_CLAUDE_MAX_TURNS` environment variable is set, override the default m
 > - You have Read, Glob, and Grep tools available. Review the provided context and produce your structured findings FIRST. Then use tools to verify concerns and explore for issues the context may have missed (e.g., check callers of a changed function, look for side effects). Always produce your structured output — exploration supplements the review, it does not replace it.
 >
 > ## MUST DO
-> - Provide specific file:line or section references
-> - Explain WHY each finding matters — include the impact, not just the symptom
-> - Suggest a concrete fix for each finding
-> - Rate severity (critical/important/suggestion) and confidence (high/medium/low)
-> - Quality over quantity — 3 important findings beat 10 nitpicks
+> - Provide specific file:line or section references, and explain WHY each finding matters — the impact, not just the symptom.
+> - Suggest a concrete fix for each finding.
+> - Also assess test adequacy: are the change's new/changed behaviors covered by tests, and are the important edge cases tested? Flag material gaps (not trivial coverage).
+> - Quality over quantity — a few well-substantiated findings beat a long list of nitpicks.
+> - Explore only after reviewing the provided context and producing your findings — exploration supplements the review, it does not replace it.
 >
-> ## MUST NOT DO
-> - Flag style/formatting nitpicks
-> - Flag pre-existing issues not in the diff — only review what changed
-> - Provide vague feedback without actionable recommendations
-> - Exceed 10 findings
-> - Explore the codebase without first reviewing the provided context and producing findings
+> ## WHAT NOT TO FLAG
+> - Theoretical risks requiring unlikely preconditions.
+> - Defense-in-depth when the primary defense is already adequate.
+> - Pure style / formatting / naming preference.
+> - Pre-existing issues outside the change's blast radius (review what the change *affects*, including unshown callers — not unrelated legacy).
+> - Speculative "could be a problem" with no concrete trigger.
+> - Anything matching a recalled learnings suppression (unless you argue the context changed).
+>
+> ## FINDINGS CAP
+> Cap **suggestions** at ~5. **NEVER** cap critical or important findings — report every one you find. (The single judge does final curation in a later pass.)
 >
 > ## OUTPUT FORMAT
 > You MUST produce output with these exact sections:
 >
 > ### Findings
-> For each finding (max 10): Severity, Confidence, Location, Issue, Why it matters, Recommendation.
+> For **each** finding, emit every field below (these exact field names):
+> - **severity:** critical | important | suggestion
+> - **confidence:** high | medium | low   — your own, pre-synthesis
+> - **location:** <relpath>:<line>
+> - **symbol:** <enclosing function/class/section, if any>
+> - **concern:** <free-form kebab slug, e.g. missing-null-check>   — HINT ONLY; do NOT author a fingerprint (the single judge computes the canonical one)
+> - **issue:** one sentence — what's wrong
+> - **why_it_matters:** impact if unaddressed
+> - **recommendation:** concrete fix / alternative
+> - **how_to_verify:** a concrete HUMAN-runnable check (command/input/trace) + expected observation — nothing executes it in this phase
+> - **source:** <reviewer-id>
+>
 > If no issues: write "No issues found."
 >
 > ### What's Good
@@ -195,6 +269,16 @@ If the `RC_CLAUDE_MAX_TURNS` environment variable is set, override the default m
 >
 > ### Overall Assessment
 > One paragraph: readiness, biggest risk, most important thing to address.
+
+### Reviewer: Security (native subagent) — Always
+
+Use the `Agent` tool with `subagent_type: "reviewer-security"`. This dedicated security reviewer is **always** dispatched — in parallel with Claude and every available frontier reviewer, independent of which external providers are present. Its lens is fixed to **Security** (authz/authn, injection, secrets/PII, SSRF, path traversal, unsafe deserialization, missing input validation, insecure defaults, session handling, supply-chain).
+
+Use the **same inline template as the Claude reviewer above** (TASK / LENS / REVIEW PROCESS / CONTEXT / CONSTRAINTS / MUST DO / WHAT NOT TO FLAG / FINDINGS CAP / OUTPUT FORMAT) — including the §3.1 finding schema, the what-not-to-flag + cap policy, and the test-adequacy line — with the **Security** lens block prepended in the `## LENS` section. Embed the full baseline context package the same way.
+
+If `RC_CLAUDE_MAX_TURNS` is set, pass it to the Agent tool as maxTurns, same as the Claude reviewer.
+
+**Exception — a security pin replaces the dedicated reviewer.** If Step 0 resolved `lens.security.replaces_dedicated=true` **and** `lens.security.providers` names one or more providers, do **NOT** dispatch `reviewer-security`. Instead assign the Security lens to those pinned provider(s) and dispatch them with it (see Lens Assignment, step 4). Otherwise the dedicated `reviewer-security` always runs.
 
 ### Reviewer: Codex — If Available
 
@@ -217,7 +301,9 @@ Dispatch a `general-purpose` Agent with this prompt:
 >
 > **If both fail**: Return "SKIPPED: Codex unavailable — [error details]"
 >
-> Return the full structured review output (Findings, What's Good, Overall Assessment).
+> **Output contract (the delegation prompt you write in Step 2 already specifies this — preserve it):** Codex's review must have a `Findings` section where **every finding carries all of these fields, by these exact names** — `severity` (critical|important|suggestion), `confidence` (high|medium|low), `location` (`<relpath>:<line>`), `symbol`, `concern` (free-form kebab slug — a HINT only; no fingerprint), `issue`, `why_it_matters`, `recommendation`, `how_to_verify` (a human-runnable check + expected observation), `source` — plus the `What's Good` and `Overall Assessment` sections. Same **what-not-to-flag** rules and **cap policy** (cap suggestions at ~5; **never** cap critical/important), and include the **test-adequacy** line: "Also assess test adequacy: are the change's new/changed behaviors covered by tests, and are the important edge cases tested? Flag material gaps (not trivial coverage)." If a **lens block** was assigned in Step 3, it is already prepended to the delegation prompt — keep it (lens = emphasis, not blinders; still flag any critical outside the lens).
+>
+> Return Codex's full structured review output verbatim (Findings with all the fields above, What's Good, Overall Assessment).
 
 ### Reviewer: Google (Antigravity / Gemini) — If Available
 
@@ -252,7 +338,9 @@ Dispatch a `general-purpose` Agent with this prompt. Pass the ordered tool list 
 > - **This is a terminal outcome for the slot.** Once you've done the one allowed `agy` retry (or skipped it per the rule above) and, if needed, tried `gemini`, the Google reviewer's result — success or `SKIPPED` — is **final for this round**. Do not let the orchestrator's Step 3.5 reviewer-level retry re-run it (see Step 3.5: the Google slot is not eligible for external retry once its internal retry/fallback is exhausted).
 > - **`gemini` is a dead end for Workspace/Dasher accounts:** `gemini -p` fast-fails near-instantly with `IneligibleTierError` (`reasonCode: DASHER_USER`, "not eligible for Gemini Code Assist for individuals") for any Google Workspace-domain account and any account without a `GEMINI_API_KEY`/Vertex/enterprise license. Treat that as the slot being unavailable — it is expected, not a bug to retry.
 >
-> **On success:** Return the full structured review output (Findings, What's Good, Overall Assessment), and note which tool produced it — prefix your answer with `TOOL: Antigravity` (for `agy`) or `TOOL: Gemini` (for `gemini`).
+> **Output contract (the delegation prompt you write in Step 2 already specifies this — preserve it):** the review must have a `Findings` section where **every finding carries all of these fields, by these exact names** — `severity` (critical|important|suggestion), `confidence` (high|medium|low), `location` (`<relpath>:<line>`), `symbol`, `concern` (free-form kebab slug — a HINT only; no fingerprint), `issue`, `why_it_matters`, `recommendation`, `how_to_verify` (a human-runnable check + expected observation), `source` — plus the `What's Good` and `Overall Assessment` sections. Same **what-not-to-flag** rules and **cap policy** (cap suggestions at ~5; **never** cap critical/important), and include the **test-adequacy** line: "Also assess test adequacy: are the change's new/changed behaviors covered by tests, and are the important edge cases tested? Flag material gaps (not trivial coverage)." If a **lens block** was assigned in Step 3, it is already prepended to the delegation prompt — keep it (lens = emphasis, not blinders; still flag any critical outside the lens).
+>
+> **On success:** Return the full structured review output (Findings with all the fields above, What's Good, Overall Assessment), and note which tool produced it — prefix your answer with `TOOL: Antigravity` (for `agy`) or `TOOL: Gemini` (for `gemini`).
 >
 > **If every tool fails**: Return a SKIPPED message attributed to the **primary** tool, with a per-tool status — e.g. "SKIPPED: Google (Antigravity) unavailable — agy: empty output after retry; gemini fallback: ineligible (Workspace/Dasher account, IneligibleTierError)". Lead with `agy` whenever it was installed. Do **NOT** report the slot as a bare "Gemini auth failure" when `agy` was the intended reviewer — that misleads a user whose `agy` works fine interactively.
 
@@ -289,11 +377,13 @@ Dispatch a `general-purpose` Agent with this prompt:
 >
 > **If curl or jq fails**: Return "SKIPPED: Perplexity unavailable — [error details]"
 >
-> Return the full structured review output (Findings, What's Good, Overall Assessment).
+> **Output contract (the `$PROMPT` delegation text in Step 1 already specifies this — preserve it):** the review must have a `Findings` section where **every finding carries all of these fields, by these exact names** — `severity` (critical|important|suggestion), `confidence` (high|medium|low), `location` (`<relpath>:<line>`), `symbol`, `concern` (free-form kebab slug — a HINT only; no fingerprint), `issue`, `why_it_matters`, `recommendation`, `how_to_verify` (a human-runnable check + expected observation), `source` — plus the `What's Good` and `Overall Assessment` sections. Same **what-not-to-flag** rules and **cap policy** (cap suggestions at ~5; **never** cap critical/important), and include the **test-adequacy** line: "Also assess test adequacy: are the change's new/changed behaviors covered by tests, and are the important edge cases tested? Flag material gaps (not trivial coverage)." As the diff-only **Dependency / CVE / best-practices** reviewer, Perplexity's lens block is already prepended to `$PROMPT` (lens = emphasis, not blinders; still flag any critical outside the lens).
+>
+> Return the full structured review output verbatim (Findings with all the fields above, What's Good, Overall Assessment).
 
 ### Delegation Prompt
 
-For **all** reviewers (including Claude), use the delegation format from `rules/delegation-format.md`. The prompt structure and review criteria are identical for every provider — only the transport differs. The baseline context package from Step 2 goes into the CONTEXT section.
+For **all** reviewers (including Claude and Security), use the delegation format from `rules/delegation-format.md` — which carries the §3.1 finding schema, the what-not-to-flag + cap policy, and the test-adequacy line. The prompt structure and review criteria are identical for every provider — only the transport and the prepended **lens block** differ. When `settings.personas` is true, prepend each reviewer's assigned lens block (from Lens Assignment) to its delegation prompt; when it is false, send every reviewer the identical non-lens prompt. The baseline context package from Step 2 (including any recalled Team Learnings — Conventions) goes into the CONTEXT section.
 
 ## Step 3.5: Validate Round 1 Results & Recover
 
@@ -394,6 +484,7 @@ Produce the final output using this exact format:
 **Target:** [what was reviewed — PR #N, file path, etc.]
 **Type:** [PR | Plan/Document | Code]
 **Reviewers:** [list of reviewers that participated] ([N] participating — [skipped: reasons])
+**Lens map:** [the per-reviewer lens assignment printed in Step 3 — e.g. `reviewer-security: Security · reviewer-claude: Correctness + Data-integrity · Codex: Correctness + Cross-file · Perplexity: Dependency`. Omit if `settings.personas` is false — note "personas off (legacy prompt)".]
 **Rounds:** [number of rounds run]
 **Consensus:** [Strong | Moderate | Mixed]
 
