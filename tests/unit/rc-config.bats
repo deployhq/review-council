@@ -172,3 +172,61 @@ EOF
   # no static_analysis.* keys leak into output
   ! printf '%s\n' "$output" | grep -q 'static_analysis'
 }
+
+@test "string value with embedded newline -> default + note, no injected stdout line" {
+  # A model value with an embedded newline would split into a second, fabricated
+  # key=value line, breaking the one-per-line output contract. It must be
+  # rejected like any malformed value: default + stderr note.
+  cat >"$CFG/config.yml" <<'EOF'
+reviewers:
+  google:
+    model: "abc\ninjected.line=malicious"
+EOF
+  run --separate-stderr "$SCRIPT" "$CFG"
+  echo "status=$status"
+  echo "output=<<$output>>"
+  echo "stderr=<<$stderr>>"
+  [ "$status" -eq 0 ]
+  # crafted value rejected -> model falls back to its default (empty)
+  has_line "reviewer.google.model="
+  # stderr note names the offending key
+  printf '%s\n' "$stderr" | grep -q 'reviewer.google.model'
+  # NO fabricated key=value line reached stdout
+  ! printf '%s\n' "$output" | grep -q 'injected.line'
+  # contract intact: every stdout line is a `# comment` or a `key=value` pair
+  ! printf '%s\n' "$output" | grep -vE '^#|='
+}
+
+@test "providers entry with embedded newline -> default + note, no injected stdout line" {
+  cat >"$CFG/config.yml" <<'EOF'
+lenses:
+  security:
+    providers: ["google\ninjected.line=x"]
+EOF
+  run --separate-stderr "$SCRIPT" "$CFG"
+  echo "status=$status"
+  echo "output=<<$output>>"
+  echo "stderr=<<$stderr>>"
+  [ "$status" -eq 0 ]
+  # rejected pin -> providers falls back to the default (auto), not a partial pin
+  has_line "lens.security.providers=auto"
+  has_line "lens.security.replaces_dedicated=false"
+  printf '%s\n' "$stderr" | grep -q 'lens.security.providers'
+  ! printf '%s\n' "$output" | grep -q 'injected.line'
+  # contract intact: no fabricated non-key=value stdout line
+  ! printf '%s\n' "$output" | grep -vE '^#|='
+}
+
+@test "layered-invalid: higher layer invalid keeps lower layer's valid value" {
+  # config.yml sets a VALID value; config.local.yml sets an INVALID one for the
+  # same key. The higher-precedence-but-invalid value must NOT clobber the lower
+  # valid one — the valid config.yml value stands, with a stderr note.
+  printf 'settings:\n  min_reviewers: 3\n' >"$CFG/config.yml"
+  printf 'settings:\n  min_reviewers: abc\n' >"$CFG/config.local.yml"
+  run --separate-stderr "$SCRIPT" "$CFG"
+  echo "status=$status"
+  echo "stderr=<<$stderr>>"
+  [ "$status" -eq 0 ]
+  has_line "settings.min_reviewers=3"
+  printf '%s\n' "$stderr" | grep -q 'min_reviewers'
+}

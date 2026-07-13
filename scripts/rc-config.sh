@@ -92,12 +92,25 @@ valid_posint() {
   [ "$1" -gt 0 ]
 }
 
+# valid_str <val>: a free-form string value is valid only if it contains NO
+# control characters (newline, CR, tab, etc.). This is a security guard: the
+# output contract is one `key=value` per line, so a value with an embedded
+# newline (e.g. model: "abc\ninjected.line=x") would otherwise inject a second,
+# fabricated key=value line into stdout. Reject it -> caller falls back to the
+# key's default + note, exactly like an out-of-shape bool/int.
+valid_str() {
+  case "$1" in
+    *[[:cntrl:]]*) return 1 ;;
+  esac
+  return 0
+}
+
 # valid_kind <val> <kind>: bool|posint|str
 valid_kind() {
   case "$2" in
     bool) valid_bool "$1" ;;
     posint) valid_posint "$1" ;;
-    str) return 0 ;;
+    str) valid_str "$1" ;;
   esac
 }
 
@@ -126,6 +139,9 @@ resolve() {
     if valid_kind "$_rs_raw" "$_rs_kind"; then
       _rs_val="$_rs_raw"
     else
+      # Layered-invalid: a higher-precedence layer (over) that sets an INVALID
+      # value does NOT clobber a valid value already taken from a lower layer
+      # (base) or the default — we note it and keep the last valid value.
       note_bad "$_rs_key" "$_rs_raw"
     fi
   done
@@ -180,8 +196,16 @@ resolve_providers() {
         ;;
       '!!seq')
         _rp_joined="$(yq ".lenses.$_rp_lens.providers | join(\",\")" "$_rp_file" 2>/dev/null)" || continue
-        PROVIDERS_VALUE="$_rp_joined"
-        PROVIDERS_EXPLICIT=1
+        # Guard the joined value against control chars (a list entry containing
+        # a newline would inject a second key=value line into stdout, breaking
+        # the one-per-line contract). If any entry is unsafe, treat the pin as
+        # malformed: note and keep the prior value (default / lower layer).
+        if valid_str "$_rp_joined"; then
+          PROVIDERS_VALUE="$_rp_joined"
+          PROVIDERS_EXPLICIT=1
+        else
+          note_bad "lens.$_rp_lens.providers" "$_rp_joined"
+        fi
         ;;
       *)
         # present but not a list — malformed; keep the prior value.
