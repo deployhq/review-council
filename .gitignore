@@ -2,3 +2,6 @@
 node_modules/
 *.log
 .idea/
+
+# Claude Code worktree scratch dir (used by the stacked-PR build workflow)
+.claude/worktrees/
