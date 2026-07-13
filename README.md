@@ -1,6 +1,8 @@
 # Review Council
 
-Multi-agent convergence review for Claude Code. Multiple AI models independently review your PR, code, or plan — then discuss until they converge on a curated list of what actually needs changing.
+<!-- rc:description:start -->
+Multi-agent code review for Claude Code. Multiple AI models review your PR, code, or plan independently; a cross-family refutation pass and an active judge then distill the findings into a curated, severity-ranked list of what actually needs changing.
+<!-- rc:description:end -->
 
 ## Why
 
@@ -128,7 +130,7 @@ graph LR
 | **Google** (Antigravity / Gemini) | CLI — `agy` preferred, `gemini` fallback | `which agy` or `which gemini` |
 | **Perplexity** | Sonar API (`curl`) | `PERPLEXITY_API_KEY` env var |
 
-Minimum 2 reviewers needed for convergence mode (`settings.min_reviewers`, default 2). With only Claude, runs in single-reviewer mode. Providers are auto-detected at runtime — no manual configuration needed.
+Minimum 2 reviewers needed for council mode (`settings.min_reviewers`, default 2). With only Claude, runs in single-reviewer mode. Providers are auto-detected at runtime — no manual configuration needed.
 
 **Lens-differentiated Round 1.** Every reviewer is assigned a lens before dispatch: the dedicated Security reviewer always carries the Security lens; every repo-capable frontier reviewer (Claude, Codex, Google) carries Correctness & concurrency as its core, plus one diff-aware specialist overlay chosen from what actually changed (Cross-file/API-contract, Performance & reliability, Design & maintainability, Data-integrity & migration, Config/workflow, or UI-state & accessibility); tool-less Perplexity always carries Dependency/CVE/best-practices. **Lens = emphasis, not blinders** — every reviewer still flags any critical issue it notices outside its lens. The chosen lens map is printed before Round 1 and again in the final report header. `.review-council/config.yml` can pin a lens to specific providers or disable it (see [Configuration](#configuration)); `settings.personas: false` reverts every reviewer to the identical legacy (non-lens) prompt.
 
@@ -145,7 +147,7 @@ Two behaviors keep the Google slot robust:
 
 - [Claude Code](https://claude.ai/code) CLI
 - [GitHub CLI](https://cli.github.com/) (`gh`) — for PR reviews (optional)
-- At least one additional reviewer for convergence mode:
+- At least one additional reviewer for council mode:
   - [Codex CLI](https://github.com/openai/codex) — `npm install -g @openai/codex && codex login`
   - [Antigravity CLI](https://antigravity.google) (`agy`) — `curl -fsSL https://antigravity.google/cli/install.sh | bash` (preferred Google reviewer)
   - [Gemini CLI](https://github.com/google-gemini/gemini-cli) — `npm install -g @google/gemini-cli` (fallback; needs `GEMINI_API_KEY`, Vertex, or an enterprise Code Assist license — consumer "Sign in with Google" was sunset 2026-06-18)

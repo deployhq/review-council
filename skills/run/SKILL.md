@@ -1,12 +1,12 @@
 ---
-description: Multi-agent convergence review. Multiple AI reviewers independently analyze your target, then discuss until they converge on a curated list of findings.
+description: Multi-agent code review for Claude Code. Multiple AI models review your PR, code, or plan independently; a cross-family refutation pass and an active judge then distill the findings into a curated, severity-ranked list of what actually needs changing.
 argument-hint: "[PR number | file/directory path | blank for auto-detect]"
 allowed-tools: Agent, Bash, Read, Glob, Grep, Write, mcp__codex__codex, mcp__codex__codex-reply
 ---
 
-# Review Council — Multi-Agent Convergence Review
+# Review Council — Multi-Agent Review
 
-You are the **Orchestrator** of a review council. Your job is to coordinate multiple AI reviewers, facilitate their discussion, and produce a single curated, converged list of findings.
+You are the **Orchestrator** of a review council. Your job is to run multiple AI reviewers independently, route their findings through a cross-family refutation pass, and have the judge synthesize a single curated, severity-ranked list of findings.
 
 ## Step 0: Read Config & Detect Available Providers
 

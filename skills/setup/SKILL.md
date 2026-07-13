@@ -113,7 +113,7 @@ Prerequisites:
 Optional:
   - Config files (yq) ......... [available (mikefarah v4 detected) | installed just now (mikefarah v4) | wrong yq — need mikefarah/yq v4 | not installed (using defaults + RC_* env)]
 
-[N] of 4 reviewer slots available. [Convergence mode ready. | Single-reviewer mode — install at least one additional provider.]
+[N] of 4 reviewer slots available. [Council mode ready. | Single-reviewer mode — install at least one additional provider.]
 
 (Antigravity and Gemini share the Google slot — `agy` preferred, `gemini` fallback — so they count as one reviewer, not two.)
 

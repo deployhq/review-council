@@ -1,10 +1,12 @@
 # Review Council
 
-Multi-agent convergence review plugin for Claude Code. Multiple AI reviewers independently analyze your PR, code, or plan, then discuss until they converge on a curated list of findings.
+<!-- rc:description:start -->
+Multi-agent code review for Claude Code. Multiple AI models review your PR, code, or plan independently; a cross-family refutation pass and an active judge then distill the findings into a curated, severity-ranked list of what actually needs changing.
+<!-- rc:description:end -->
 
 ## Commands
 
-- `/review-council:run [target]` — Run a convergence review (auto-detects target type and available providers)
+- `/review-council:run [target]` — Run a multi-agent review (auto-detects target type and available providers)
 - `/review-council:setup` — Show provider status and prerequisites
 - `/review-council:uninstall` — Remove configuration
 
@@ -32,7 +34,7 @@ Everything below is orchestrated locally inside a single Claude Code session and
 | Google (Antigravity / Gemini) | CLI — `agy` preferred, `gemini` fallback | `which agy` or `which gemini` |
 | Perplexity | Sonar API (`curl`) | `PERPLEXITY_API_KEY` env var |
 
-Minimum 2 reviewers needed for convergence mode (`settings.min_reviewers`, default 2). With only Claude, runs in single-reviewer mode. Antigravity and Gemini share one Google slot (`agy` preferred, `gemini` fallback) — they count as one reviewer, not two.
+Minimum 2 reviewers needed for council mode (`settings.min_reviewers`, default 2). With only Claude, runs in single-reviewer mode. Antigravity and Gemini share one Google slot (`agy` preferred, `gemini` fallback) — they count as one reviewer, not two.
 
 Round 1 is **lens-differentiated**: the dedicated Security reviewer always carries the Security lens; every repo-capable frontier reviewer (Claude, Codex, Google) carries Correctness & concurrency as its core plus one diff-aware specialist overlay (Cross-file/API-contract, Performance & reliability, Design & maintainability, Data-integrity & migration, Config/workflow, or UI-state & accessibility); tool-less Perplexity always carries Dependency/CVE/best-practices. Lens = emphasis, not blinders — every reviewer still flags any critical issue it notices outside its lens. The roster, lens bindings, and run settings are configurable per-repo via `.review-council/config.yml` / `config.local.yml` — see `rules/config.md`.
 
