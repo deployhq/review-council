@@ -19,10 +19,12 @@ Run the bundled config reader and capture its `key=value` output. It reconciles 
 ```bash
 # Read from the TARGET repo's .review-council/ (the CWD where the review runs).
 # ${CLAUDE_PLUGIN_ROOT} is the plugin's own install dir — must be double-quoted.
-CONFIG_OUT="$("${CLAUDE_PLUGIN_ROOT}/scripts/rc-config.sh" .review-council 2>/tmp/rc-config-notes)"
+RC_NOTES="$(mktemp "${TMPDIR:-/tmp}/rc-config-notes.XXXXXX")"
+CONFIG_OUT="$("${CLAUDE_PLUGIN_ROOT}/scripts/rc-config.sh" .review-council 2>"$RC_NOTES")"
 printf '%s\n' "$CONFIG_OUT"
 # Surface any reader diagnostics (malformed keys, yq-not-found, skipped files):
-[ -s /tmp/rc-config-notes ] && { echo "--- rc-config notes ---"; cat /tmp/rc-config-notes; }
+[ -s "$RC_NOTES" ] && { echo "--- rc-config notes ---"; cat "$RC_NOTES"; }
+rm -f "$RC_NOTES"
 ```
 
 **Echo the effective, reconciled config to the user before applying it.** This printed block is the observable artifact of what the run resolved — show what you resolved, never silently eyeball the YAML. Parse the `key=value` lines (one per line, no spaces around `=`; `#` lines are section comments). The keys are:
@@ -82,7 +84,7 @@ Reconcile the config (0.1) with detection (0.2):
 - **Roster (reviewers).** Drop any provider whose `reviewer.<p>.enabled=false` — it does not participate even if installed. Of the reviewers that remain enabled, those that detection found available make up the participating roster. Config gates the roster; detection gates availability — **both** must pass.
 - **Models.** Where `reviewer.<p>.model` is non-empty, pass that model to that reviewer's invocation (e.g. the Google slot's model, or the Perplexity model — default `sonar`). An empty model means "use the tool's own default" — pass nothing.
 - **Lens bindings (record for Round 1).** Record each `lens.<l>.enabled` and `lens.<l>.providers` (`auto`, or a comma-joined provider list). The actual lens dispatch lands in **PR 1b** — here you only **read and record** the bindings. Note `lens.security.replaces_dedicated`: when `true`, the pinned `security.providers` *replace* the dedicated security reviewer (do not run both); when `false`, security stays on its default/`auto` path.
-- **Settings.** Load the `settings.*` values for this run and use them wherever the orchestration rules reference a run knob (`min_reviewers`, `reviewer_timeout_seconds`, `run_budget_seconds`, `auto_retry`, etc.). These **supersede** any ad-hoc reading of the bare `RC_*` env vars — the reader already folded `RC_*` in at the correct precedence, so read them from the reader's output, not from the environment directly.
+- **Settings.** Load the `settings.*` values for this run and use them wherever the orchestration rules reference a run knob (`min_reviewers`, `reviewer_timeout_seconds`, `run_budget_seconds`, `auto_retry`, etc.). The reader already folded any `RC_*` env override into each value at the correct precedence, so treat each resolved `settings.*` as the **effective** value of its `RC_*` knob. When a later step *consumes* an `RC_*` env var (e.g. the reviewer timeout wrapper), pass that effective value on the invocation — e.g. `RC_REVIEWER_TIMEOUT=<effective settings.reviewer_timeout_seconds> <cli> …` — rather than relying on the ambient environment carrying across separate tool calls. See `rules/orchestration.md` → "Run Settings".
 - **Absent config / absent `yq` → today's defaults**, byte-identical to pre-config behavior. Disabling reviewers still honors `settings.min_reviewers`: if too few remain to reach it, the existing min-reviewers handling applies (single-reviewer mode or the usual prompt).
 
 Announce: "**Review Council** — [N] reviewers available: [list]. [Skipped: reason for each unavailable **or config-disabled** provider]". When the Google slot is available, name the actual tool — e.g. "Google (Antigravity)" — so it's clear `agy` (not `gemini`) is the one running.

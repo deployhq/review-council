@@ -123,7 +123,9 @@ Run knobs come from the **config reader** (`scripts/rc-config.sh`, read in Step 
 env (RC_*)  >  .review-council/config.local.yml  >  .review-council/config.yml  >  built-in default
 ```
 
-Read the effective values from the reader's `settings.*` output — do **not** re-read the bare `RC_*` env vars directly (the reader already folded them in at the correct precedence). With no config files (or no `yq` installed), the effective values are the defaults + any `RC_*` overrides — byte-identical to prior behavior. Full schema: `rules/config.md`.
+Step 0 (of `skills/run/SKILL.md`) resolves the effective `settings.*` via `rc-config.sh`, which already folds any `RC_*` environment override into each value at the correct precedence. **Throughout this document, every `RC_*` name denotes that knob's *effective* value** (its resolved `settings.*` result) — not a fresh read of the ambient environment. With no config files (or no `yq` installed), the effective values are the defaults + any `RC_*` overrides — byte-identical to prior behavior. Full schema: `rules/config.md`.
+
+When the orchestrator runs a step that **consumes** an `RC_*` env var — the timeout wrapper below, or `scripts/rc-invoke-provider.sh` in a later PR — it **supplies the effective value on that invocation**, e.g. `RC_REVIEWER_TIMEOUT=<effective settings.reviewer_timeout_seconds> <cli> …`. Do **not** rely on a shell `export` to carry a value across steps: the orchestrator is an LLM driving separate tool calls and subagents, so it carries the effective values resolved in Step 0 and passes them explicitly per-invocation.
 
 | Setting (`settings.*`) | Default | Env override | Purpose |
 |---|---|---|---|

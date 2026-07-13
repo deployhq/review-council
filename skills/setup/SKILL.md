@@ -126,14 +126,14 @@ else
 fi
 ```
 
-If the user accepts, write **`.review-council/config.yml`** with this commented template (identical to the reference blocks in `rules/config.md` — an all-commented file = built-in defaults; uncomment only what you want to change):
+If the user accepts, write **`.review-council/config.yml`** with the **full-reference block from `rules/config.md` (§Reference blocks → "Full reference"), reproduced here verbatim** — keep the two in sync. An all-commented file = built-in defaults; uncomment only what you want to change:
 
 ```yaml
-# .review-council/config.yml — Review Council configuration (committed team defaults).
-# Everything is optional. An all-commented file = built-in defaults.
-# Full schema + precedence: rules/config.md. Precedence per key:
-#   env (RC_*) > config.local.yml > config.yml > built-in default.
-# Config files are parsed with mikefarah/yq v4; without yq they're ignored.
+# ── Review Council — full configuration reference ────────────────────────────
+# Every key below is shown with its built-in default. All keys are optional;
+# delete or comment any you don't need. `.review-council/config.local.yml` uses
+# this IDENTICAL schema and overrides config.yml per key. RC_* env vars win over
+# both files (settings.* only). An all-commented file = pure defaults.
 
 # reviewers:                     # enable/disable + optional model per reviewer
 #   claude:     { enabled: true,  model: "" }        # "" = the tool's own default model
@@ -147,11 +147,21 @@ If the user accepts, write **`.review-council/config.yml`** with this commented 
 #   security:
 #     enabled: true
 #     # providers: [google, claude]     # omit -> auto
-#   correctness:  { enabled: true }      # add `providers: [claude]` to pin; omit -> auto
-#   cross_file:   { enabled: true }
-#   performance:  { enabled: true }
-#   design:       { enabled: true }
-#   dependency:   { enabled: true }      # providers defaults to [perplexity] when omitted
+#   correctness:
+#     enabled: true
+#     # providers: [claude]             # omit -> auto
+#   cross_file:
+#     enabled: true
+#     # providers: [codex]              # omit -> auto
+#   performance:
+#     enabled: true
+#     # providers: [google]             # omit -> auto
+#   design:
+#     enabled: true
+#     # providers: [claude]             # omit -> auto
+#   dependency:
+#     enabled: true
+#     # providers: [perplexity]         # default when omitted -> [perplexity]
 
 # settings:                      # run knobs (each also settable via its RC_* env var, which wins)
 #   personas:                 true     # RC_PERSONAS

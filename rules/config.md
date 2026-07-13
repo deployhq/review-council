@@ -82,8 +82,9 @@ Lenses: `security`, `correctness`, `cross_file`, `performance`, `design`, `depen
 
 - **`providers` is ALWAYS a YAML list** (e.g. `[google]` or `[google, claude]`). It is printed
   comma-joined (`lens.security.providers=google,claude`).
-- **Omitting `providers` = `auto`** — the orchestrator picks providers diff-aware (which
-  providers actually run this lens is chosen in a later PR; today the binding is recorded).
+- **Omitting `providers` = `auto`** (except `dependency`, which defaults to `perplexity`) —
+  the orchestrator picks providers diff-aware (which providers actually run this lens is
+  chosen in a later PR; today the binding is recorded).
 - **Pinning `security.providers` REPLACES the dedicated security subagent.** When you set
   `lenses.security.providers` to an explicit list, that list *becomes* the security review —
   it does **not** add a second security pass on top of the dedicated one. The reader signals
