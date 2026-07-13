@@ -1,0 +1,248 @@
+#!/usr/bin/env sh
+# rc-config.sh — deterministic, tested reader for the Review Council config.
+#
+# Reconciles the built-in defaults with two optional YAML files and env vars,
+# then prints the EFFECTIVE config as `key=value` lines to stdout (one per line,
+# no spaces around `=`). Diagnostics/skip-reasons go to stderr. No LLM, no net.
+#
+# See .superpowers/sdd/task-1a.1-rc-config-brief.md for the full spec.
+#
+# Usage:
+#   rc-config.sh [config_dir]
+#
+#   config_dir  optional; directory holding config.yml / config.local.yml.
+#               Default: .review-council (env RC_CONFIG_DIR is honored as a
+#               fallback, but the positional wins).
+#
+# Precedence (per key): env > config.local.yml > config.yml > built-in default.
+#   - Env overrides apply to the `settings.*` knobs ONLY (see the settings emit).
+#   - Reviewers and lenses come from the files (and defaults) only.
+#
+# YAML is parsed with `yq` (mikefarah v4). Graceful degradation:
+#   - yq absent               -> ignore both files; emit defaults + env; one note.
+#   - a file absent           -> skip it silently.
+#   - a file malformed        -> skip that file with a note; use the other layers.
+#   - a single key malformed  -> use that key's default with a note.
+#   Unknown keys are ignored. A `static_analysis:` block (Phase 2) is ignored.
+#
+# Exit: always 0 (absent files / absent yq degrade gracefully, they aren't errors).
+
+set -eu
+
+# ---------------------------------------------------------------------------
+# Inputs
+# ---------------------------------------------------------------------------
+
+config_dir="${1:-${RC_CONFIG_DIR:-.review-council}}"
+base_file="$config_dir/config.yml"        # committed team defaults
+over_file="$config_dir/config.local.yml"  # gitignored per-machine overrides
+
+# ---------------------------------------------------------------------------
+# Layer availability
+#
+# base_ok / over_ok are 1 only when yq is present, the file exists, AND it
+# parses. When a layer is unusable, every key from it resolves to null and thus
+# falls through to the lower layer / default.
+# ---------------------------------------------------------------------------
+
+yq_present=1
+command -v yq >/dev/null 2>&1 || yq_present=0
+if [ "$yq_present" -eq 0 ]; then
+  echo "rc-config: yq not found; $config_dir/config*.yml ignored (using defaults + env)" >&2
+fi
+
+# layer_ok <file>: prints 1 if the file is usable, else 0 (with a note when a
+# present file fails to parse). Absent files are skipped silently.
+layer_ok() {
+  _lo_f="$1"
+  [ "$yq_present" -eq 1 ] || { echo 0; return; }
+  [ -f "$_lo_f" ] || { echo 0; return; }
+  if ! yq e '.' "$_lo_f" >/dev/null 2>&1; then
+    echo "rc-config: $_lo_f is malformed YAML; skipped" >&2
+    echo 0
+    return
+  fi
+  echo 1
+}
+
+base_ok="$(layer_ok "$base_file")"
+over_ok="$(layer_ok "$over_file")"
+
+# ---------------------------------------------------------------------------
+# Small helpers
+# ---------------------------------------------------------------------------
+
+# note_bad <key> <raw>: one stderr note for a malformed key that falls back.
+note_bad() {
+  echo "rc-config: $1: invalid value '$2'; using default" >&2
+}
+
+valid_bool() {
+  case "$1" in
+    true | false) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+# positive integer (all digits, > 0)
+valid_posint() {
+  case "$1" in
+    '' | *[!0-9]*) return 1 ;;
+  esac
+  [ "$1" -gt 0 ]
+}
+
+# valid_kind <val> <kind>: bool|posint|str
+valid_kind() {
+  case "$2" in
+    bool) valid_bool "$1" ;;
+    posint) valid_posint "$1" ;;
+    str) return 0 ;;
+  esac
+}
+
+# get_raw <file> <yq-path>: echoes the scalar value; returns 1 if the node is
+# absent/null (tag !!null) or the query fails. Distinguishes an explicit empty
+# string ("" -> tag !!str, empty output, return 0) from an absent key.
+get_raw() {
+  _gr_tag="$(yq "$2 | tag" "$1" 2>/dev/null)" || return 1
+  [ "$_gr_tag" = "!!null" ] && return 1
+  yq "$2" "$1" 2>/dev/null
+}
+
+# resolve <yq-path> <default> <kind> <key-name>: layers base then over on top of
+# the default; a layer that explicitly sets an INVALID value is noted and does
+# NOT override (the lower layer / default stands). Prints the effective value.
+resolve() {
+  _rs_path="$1"
+  _rs_val="$2"
+  _rs_kind="$3"
+  _rs_key="$4"
+  for _rs_layer in base over; do
+    eval "_rs_ok=\$${_rs_layer}_ok"
+    [ "$_rs_ok" -eq 1 ] || continue
+    eval "_rs_file=\$${_rs_layer}_file"
+    _rs_raw="$(get_raw "$_rs_file" "$_rs_path")" || continue
+    if valid_kind "$_rs_raw" "$_rs_kind"; then
+      _rs_val="$_rs_raw"
+    else
+      note_bad "$_rs_key" "$_rs_raw"
+    fi
+  done
+  printf '%s' "$_rs_val"
+}
+
+# ---------------------------------------------------------------------------
+# Reviewers (roster) — files only, no env override
+# ---------------------------------------------------------------------------
+
+emit_reviewer() {
+  # $1 = provider name, $2 = default model
+  _er_p="$1"
+  _er_defmodel="$2"
+  _er_enabled="$(resolve ".reviewers.$_er_p.enabled" "true" bool "reviewer.$_er_p.enabled")"
+  _er_model="$(resolve ".reviewers.$_er_p.model" "$_er_defmodel" str "reviewer.$_er_p.model")"
+  printf 'reviewer.%s.enabled=%s\n' "$_er_p" "$_er_enabled"
+  printf 'reviewer.%s.model=%s\n' "$_er_p" "$_er_model"
+}
+
+echo "# reviewers"
+emit_reviewer claude ""
+emit_reviewer codex ""
+emit_reviewer google ""
+emit_reviewer perplexity "sonar"
+
+# ---------------------------------------------------------------------------
+# Lenses — files only, no env override
+#
+# `providers` is always a YAML list; print it comma-joined. Omitted -> `auto`.
+# For `security` only, ALSO emit `lens.security.replaces_dedicated`: true when
+# providers is explicitly pinned to a list (the pin replaces the dedicated
+# security subagent), false when it stays `auto`.
+# ---------------------------------------------------------------------------
+
+# resolve_providers <lens> <default>: sets globals PROVIDERS_VALUE (effective
+# comma-joined value) and PROVIDERS_EXPLICIT (1 if a layer pinned it to a real
+# list, else 0). Sets globals directly — must NOT run in a command substitution
+# subshell, or PROVIDERS_EXPLICIT wouldn't reach the caller.
+resolve_providers() {
+  _rp_lens="$1"
+  PROVIDERS_VALUE="$2"
+  PROVIDERS_EXPLICIT=0
+  for _rp_layer in base over; do
+    eval "_rp_ok=\$${_rp_layer}_ok"
+    [ "$_rp_ok" -eq 1 ] || continue
+    eval "_rp_file=\$${_rp_layer}_file"
+    _rp_tag="$(yq ".lenses.$_rp_lens.providers | tag" "$_rp_file" 2>/dev/null)" || continue
+    case "$_rp_tag" in
+      '!!null')
+        continue
+        ;;
+      '!!seq')
+        _rp_joined="$(yq ".lenses.$_rp_lens.providers | join(\",\")" "$_rp_file" 2>/dev/null)" || continue
+        PROVIDERS_VALUE="$_rp_joined"
+        PROVIDERS_EXPLICIT=1
+        ;;
+      *)
+        # present but not a list — malformed; keep the prior value.
+        echo "rc-config: lens.$_rp_lens.providers: not a list; using '$PROVIDERS_VALUE'" >&2
+        ;;
+    esac
+  done
+}
+
+emit_lens() {
+  # $1 = lens name, $2 = default providers
+  _el_lens="$1"
+  _el_defprov="$2"
+  _el_enabled="$(resolve ".lenses.$_el_lens.enabled" "true" bool "lens.$_el_lens.enabled")"
+  resolve_providers "$_el_lens" "$_el_defprov"
+  printf 'lens.%s.enabled=%s\n' "$_el_lens" "$_el_enabled"
+  printf 'lens.%s.providers=%s\n' "$_el_lens" "$PROVIDERS_VALUE"
+  if [ "$_el_lens" = "security" ]; then
+    if [ "$PROVIDERS_EXPLICIT" -eq 1 ]; then
+      echo "lens.security.replaces_dedicated=true"
+    else
+      echo "lens.security.replaces_dedicated=false"
+    fi
+  fi
+}
+
+echo "# lenses"
+emit_lens security "auto"
+emit_lens correctness "auto"
+emit_lens cross_file "auto"
+emit_lens performance "auto"
+emit_lens design "auto"
+emit_lens dependency "perplexity"
+
+# ---------------------------------------------------------------------------
+# Settings — files AND env (env wins). Env applies to these keys ONLY.
+# ---------------------------------------------------------------------------
+
+emit_setting() {
+  # $1 key, $2 yq-path, $3 default, $4 kind, $5 env-var name
+  _es_key="$1"
+  _es_eff="$(resolve "$2" "$3" "$4" "$1")"
+  eval "_es_env=\${$5:-}"
+  if [ -n "$_es_env" ]; then
+    if valid_kind "$_es_env" "$4"; then
+      _es_eff="$_es_env"
+    else
+      echo "rc-config: $_es_key: invalid $5='$_es_env'; ignoring env override" >&2
+    fi
+  fi
+  printf '%s=%s\n' "$_es_key" "$_es_eff"
+}
+
+echo "# settings"
+emit_setting settings.personas ".settings.personas" "true" bool RC_PERSONAS
+emit_setting settings.verify ".settings.verify" "true" bool RC_VERIFY
+emit_setting settings.verify_max_findings ".settings.verify_max_findings" "12" posint RC_VERIFY_CAP
+emit_setting settings.learn ".settings.learn" "true" bool RC_LEARN
+emit_setting settings.min_reviewers ".settings.min_reviewers" "2" posint RC_MIN_REVIEWERS
+emit_setting settings.reviewer_timeout_seconds ".settings.reviewer_timeout_seconds" "600" posint RC_REVIEWER_TIMEOUT
+emit_setting settings.run_budget_seconds ".settings.run_budget_seconds" "600" posint RC_RUN_BUDGET
+emit_setting settings.auto_retry ".settings.auto_retry" "false" bool RC_AUTO_RETRY
+
+exit 0
