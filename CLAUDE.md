@@ -91,4 +91,10 @@ review-council/
 
 ## Versioning
 
-Bump the `version` field in `.claude-plugin/plugin.json` whenever you ship a bug fix or new feature (semver: patch for fixes, minor for features, major for breaking changes). `marketplace.json` inherits from `plugin.json` via strict-mode merge — do not duplicate the version there. Pair the bump with a `chore: bump version to X.Y.Z` commit after the change.
+Bump the `version` field in `.claude-plugin/plugin.json` whenever you ship a bug fix or new feature (semver: patch for fixes, minor for features, major for breaking changes). `marketplace.json` inherits the `version` from `plugin.json` via strict-mode merge — do not duplicate the version there. Pair the bump with a `chore: bump version to X.Y.Z` commit after the change.
+
+## Short Description & Docs
+
+The plugin's one-line **short description** has a single source of truth: the `description` field in `.claude-plugin/plugin.json`. It is stamped into `README.md`, this file, `.claude-plugin/marketplace.json`, and `skills/run/SKILL.md`'s frontmatter by **`scripts/sync-metadata.sh`**. **When you change the description, edit only `plugin.json` and run `scripts/sync-metadata.sh`** to propagate it everywhere — CI's `tests/unit/sync-metadata.bats` (which runs `sync-metadata.sh --check`) fails if any copy drifts.
+
+More broadly, **when you change review-council's functionality or pipeline, review the user-facing docs** (`README.md`, this file, `skills/setup/SKILL.md`) for accuracy — and if the pitch changed, update `plugin.json`'s `description` and re-run the sync. At the close of a major phase, do a thorough user-facing-doc pass and fold the fixes into that phase's last PR.
