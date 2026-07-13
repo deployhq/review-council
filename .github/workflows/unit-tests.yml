@@ -20,6 +20,9 @@ jobs:
     steps:
       - name: Check out
         uses: actions/checkout@v4
+        with:
+          # No git operations run after checkout, so the token needn't persist.
+          persist-credentials: false
 
       # Ubuntu's apt `bats` is too old (1.2.x); the suite needs >= 1.5.0
       # (`run --separate-stderr`). Fetch a current bats-core with `npx` and run

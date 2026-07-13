@@ -59,6 +59,25 @@ prompt="$(cat "$prompt_file")"
 # ---------------------------------------------------------------------------
 
 timeout_budget="${RC_REVIEWER_TIMEOUT:-600}"
+# RC_REVIEWER_TIMEOUT must be a positive integer (seconds). `timeout 0` means
+# "no limit" (runs forever), defeating the whole point of the cap; a
+# non-integer breaks the `spent`/`T/3` arithmetic. Reject both with a usage error.
+case "$timeout_budget" in
+  '' | *[!0-9]*)
+    echo "Usage: RC_REVIEWER_TIMEOUT must be a positive integer (seconds)" >&2
+    exit 2
+    ;;
+esac
+[ "$timeout_budget" -gt 0 ] || {
+  echo "Usage: RC_REVIEWER_TIMEOUT must be > 0" >&2
+  exit 2
+}
+
+# Grace period between SIGTERM and the SIGKILL escalation that makes the cap
+# HARD: a provider that traps/ignores TERM (or is wedged) must still be stopped
+# so `wait` can't block forever. Plain constant — deliberately not an env knob.
+KILL_GRACE=3
+
 # `spent` accumulates measured whole seconds across every invocation (primary,
 # retry, fallback). It is the honest total reported as ELAPSED — on a
 # timeout-then-fallback it may legitimately exceed one budget, which is correct
@@ -121,8 +140,11 @@ label_for() {
 
 # run_capped <cap-seconds> <out-file> <cmd...>
 # Runs <cmd...> with combined stdout+stderr captured to <out-file>, capped at
-# <cap-seconds>. Sets global LAST_RC to the command's exit status (124/143 on
-# a timeout kill). Never itself fails, so it's safe to call under `set -e`.
+# <cap-seconds>. The cap is HARD: TERM at the cap, then KILL after KILL_GRACE,
+# so a TERM-ignoring/wedged child can't outlive the budget. Sets global LAST_RC
+# to the command's exit status (124/143/137 on a timeout kill). Never itself
+# fails, so it's safe to call under `set -e`. Kills the child pid only — no
+# process-group/setsid escalation (out of scope for leaf CLIs like agy/gemini).
 run_capped() {
   _rc_cap="$1"
   _rc_out="$2"
@@ -130,14 +152,19 @@ run_capped() {
   LAST_RC=0
   TO="$(command -v timeout 2>/dev/null || command -v gtimeout 2>/dev/null || true)"
   if [ -n "$TO" ]; then
-    "$TO" "$_rc_cap" "$@" >"$_rc_out" 2>&1 || LAST_RC=$?
+    # -k escalates to SIGKILL if the process is still alive KILL_GRACE seconds
+    # after the initial SIGTERM at the cap.
+    "$TO" -k "$KILL_GRACE" "$_rc_cap" "$@" >"$_rc_out" 2>&1 || LAST_RC=$?
   else
-    # no timeout binary — background + watchdog so the call is never unbounded
+    # no timeout binary — background + watchdog so the call is never unbounded.
+    # Watchdog: TERM at the cap, wait the grace, then KILL — matching -k above.
     "$@" >"$_rc_out" 2>&1 &
     pid=$!
     (
       sleep "$_rc_cap"
       kill -TERM "$pid" 2>/dev/null
+      sleep "$KILL_GRACE"
+      kill -KILL "$pid" 2>/dev/null
     ) >/dev/null 2>&1 &
     wd=$!
     wait "$pid" 2>/dev/null || LAST_RC=$?
@@ -186,13 +213,15 @@ build_and_run() {
 
 # ---------------------------------------------------------------------------
 # Classification (check order):
-#   1. TIMEOUT   — exit code 124/143 (from timeout/gtimeout or the watchdog).
+#   1. TIMEOUT   — exit code 124 (timeout), 143 (128+SIGTERM), or 137
+#                  (128+SIGKILL, from the -k escalation / watchdog KILL).
 #   2. OK        — a valid review (non-empty AND has BOTH a `Findings` and an
-#                  `Overall Assessment` section). This is checked BEFORE the
+#                  `Overall Assessment` heading-shaped line). Checked BEFORE the
 #                  hard patterns so a real review is never discarded just
 #                  because its body legitimately mentions "login"/"429"/"503"/
-#                  "oauth". Requiring both sections (providers.md's own success
-#                  definition) makes a false-OK on an error page very unlikely.
+#                  "oauth". Anchoring to heading lines (not bare substrings)
+#                  stops an error page that merely echoes a prompt mentioning
+#                  those words from false-positiving as a valid review.
 #   3. AUTH -> QUOTA -> (exhausted+quota) -> OVERLOAD — hard failures.
 #   4. EMPTY     — anything else (empty/whitespace or missing a review section).
 # ---------------------------------------------------------------------------
@@ -210,15 +239,18 @@ classify() {
   _cl_rc="$1"
   _cl_out="$2"
 
-  if [ "$_cl_rc" = 124 ] || [ "$_cl_rc" = 143 ]; then
+  if [ "$_cl_rc" = 124 ] || [ "$_cl_rc" = 143 ] || [ "$_cl_rc" = 137 ]; then
     CLASS=TIMEOUT
     return 0
   fi
 
   # A valid review wins before any hard-pattern check — see block comment.
+  # Anchor to heading-shaped lines (optionally `#`-prefixed markdown headings,
+  # ending in `:` or end-of-line) so inline prose mentioning the words doesn't
+  # count as a section.
   if [ -s "$_cl_out" ] &&
-    grep -qi 'findings' "$_cl_out" 2>/dev/null &&
-    grep -qi 'overall assessment' "$_cl_out" 2>/dev/null; then
+    grep -qiE '^[[:space:]]*(#+[[:space:]]*)?findings([[:space:]]*:|[[:space:]]*$)' "$_cl_out" 2>/dev/null &&
+    grep -qiE '^[[:space:]]*(#+[[:space:]]*)?overall assessment([[:space:]]*:|[[:space:]]*$)' "$_cl_out" 2>/dev/null; then
     CLASS=OK
     return 0
   fi
@@ -364,7 +396,17 @@ case "$primary_class" in
       if [ "$retry_class" = "OK" ]; then
         succeed "$retry_resolved" "$retry_out"
       fi
-      primary_note="empty output after retry"
+      # Preserve the retry's REAL failure class in the note — don't flatten an
+      # auth/quota/overload/timeout/absent retry into "empty output after retry"
+      # (that hid the true cause from the SKIPPED attribution).
+      case "$retry_class" in
+        AUTH) primary_note="auth failure on retry" ;;
+        QUOTA) primary_note="quota exhausted on retry" ;;
+        OVERLOAD) primary_note="overloaded on retry" ;;
+        TIMEOUT) primary_note="timed out on retry" ;;
+        ABSENT) primary_note="absent on retry" ;;
+        *) primary_note="empty output after retry" ;;
+      esac
     else
       # Slow empty: treat like a timeout — no retry.
       primary_note="empty output (slow)"

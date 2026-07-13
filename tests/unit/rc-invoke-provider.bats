@@ -29,7 +29,10 @@ setup() {
   #   auth        -> auth error, exit 1
   #   quota       -> quota error, exit 1
   #   overload    -> 503 / high demand error, exit 1
+  #   authish-prose -> inline (non-heading) Findings/Overall Assessment + auth
+  #                    error; must classify AUTH, not OK
   #   hang        -> sleep $AGY_SLEEP (default 999s) to force a wrapper kill
+  #   hang-notrap -> trap '' TERM then sleep; only SIGKILL can stop it
   # Bookkeeping (set only if the env var is exported by the test):
   #   AGY_CALLS      -> one "call" line appended per invocation (call counting)
   #   AGY_ARGS       -> one space-joined line of this call's argv appended
@@ -120,8 +123,22 @@ REVIEW_EOF
     echo "Error: 503 Service Unavailable - high demand" >&2
     exit 1
     ;;
+  authish-prose)
+    # "Findings" and "Overall Assessment" appear ONLY as inline prose (never as
+    # heading-shaped lines), alongside an auth error. Must classify AUTH (and
+    # fall back), NOT be mistaken for a valid review (regression guard for Fix D).
+    echo "Authentication failed: not authenticated. I could not generate the Findings section or the Overall Assessment for this review." >&2
+    exit 1
+    ;;
   hang)
     sleep "${AGY_SLEEP:-999}"
+    exit 0
+    ;;
+  hang-notrap)
+    # Ignore SIGTERM so ONLY the SIGKILL escalation can stop it — proves the
+    # cap is HARD, not merely a polite TERM.
+    trap '' TERM
+    sleep "${AGY_SLEEP:-40}"
     exit 0
     ;;
 esac
@@ -232,6 +249,23 @@ call_count() {
   [ "$(call_count "$GEM_CALLS")" -eq 0 ]
 }
 
+@test "inline-prose-not-headings: Findings/Overall Assessment as prose + auth error -> AUTH, falls back (not OK)" {
+  # If OK-detection used bare substrings, this auth-error response (whose body
+  # merely mentions the words inline) would false-positive as a valid review
+  # and be returned as TOOL: Antigravity. Anchoring to heading lines makes it
+  # classify AUTH, so the slot falls back to gemini instead.
+  AGY_MODE=authish-prose GEM_MODE=ok run --separate-stderr "$SCRIPT" "$AGY" "$GEMINI" "$PROMPT_FILE"
+  echo "status=$status"
+  echo "output=<<$output>>"
+  [ "$status" -eq 0 ]
+  case "$output" in
+  "TOOL: Gemini"*) : ;;
+  *) echo "expected TOOL: Gemini (inline-prose agy output must NOT be accepted as OK)" && return 1 ;;
+  esac
+  [ "$(call_count "$AGY_CALLS")" -eq 1 ]
+  [ "$(call_count "$GEM_CALLS")" -eq 1 ]
+}
+
 @test "fast-empty-then-retry-success: primary empty fast, retry succeeds, gemini never called" {
   RC_REVIEWER_TIMEOUT=6 AGY_MODE_1=empty AGY_MODE_2=ok run --separate-stderr "$SCRIPT" "$AGY" "$GEMINI" "$PROMPT_FILE"
   echo "status=$status"
@@ -242,6 +276,24 @@ call_count() {
   "TOOL: Antigravity"*) : ;;
   *) echo "expected TOOL: Antigravity" && return 1 ;;
   esac
+  [ "$(call_count "$AGY_CALLS")" -eq 2 ]
+  [ "$(call_count "$GEM_CALLS")" -eq 0 ]
+}
+
+@test "fast-empty-then-retry-auth-fail: SKIPPED note reflects the retry's auth failure, not 'empty output'" {
+  # First agy call: fast empty -> triggers the one retry. Retry: auth-fails.
+  # No fallback. The note must carry the retry's REAL class (auth), not be
+  # flattened to "empty output after retry" (regression guard for Fix E).
+  RC_REVIEWER_TIMEOUT=6 AGY_MODE_1=empty AGY_MODE_2=auth run --separate-stderr "$SCRIPT" "$AGY" "" "$PROMPT_FILE"
+  echo "status=$status"
+  echo "output=<<$output>>"
+  [ "$status" -eq 1 ]
+  case "$output" in
+  "SKIPPED: Google (Antigravity) unavailable — agy: auth failure on retry"*) : ;;
+  *) echo "expected SKIPPED note to reflect the auth failure on retry" && return 1 ;;
+  esac
+  # must NOT be flattened to the generic empty note
+  ! echo "$output" | grep -q 'empty output after retry'
   [ "$(call_count "$AGY_CALLS")" -eq 2 ]
   [ "$(call_count "$GEM_CALLS")" -eq 0 ]
 }
@@ -313,8 +365,10 @@ call_count() {
 }
 
 @test "timeout: primary hangs, wrapper kills it (TIMEOUT), no retry, fallback attempted" {
+  _t_start=$(date +%s)
   RC_REVIEWER_TIMEOUT=2 AGY_MODE=hang AGY_SLEEP=40 GEM_MODE=ok run --separate-stderr "$SCRIPT" "$AGY" "$GEMINI" "$PROMPT_FILE"
-  echo "status=$status"
+  _t_elapsed=$(( $(date +%s) - _t_start ))
+  echo "status=$status wall=${_t_elapsed}s"
   echo "output=<<$output>>"
   echo "stderr=<<$stderr>>"
   [ "$status" -eq 0 ]
@@ -324,6 +378,30 @@ call_count() {
   esac
   [ "$(call_count "$AGY_CALLS")" -eq 1 ]
   echo "$stderr" | grep -q 'ELAPSED:'
+  # Bounded: cap 2 + KILL grace 3 + gemini ~instant. Must NOT wait the 40s
+  # sleep — a generous <10s window proves the cap fired.
+  [ "$_t_elapsed" -lt 10 ]
+}
+
+@test "hard-cap: TERM-resistant primary is KILLed at the cap, fallback succeeds, bounded elapsed" {
+  # hang-notrap ignores SIGTERM, so only the SIGKILL escalation can stop it.
+  # This is what actually proves the cap is HARD (not a polite TERM).
+  _hc_start=$(date +%s)
+  RC_REVIEWER_TIMEOUT=2 AGY_MODE=hang-notrap AGY_SLEEP=40 GEM_MODE=ok run --separate-stderr "$SCRIPT" "$AGY" "$GEMINI" "$PROMPT_FILE"
+  _hc_elapsed=$(( $(date +%s) - _hc_start ))
+  echo "status=$status wall=${_hc_elapsed}s"
+  echo "output=<<$output>>"
+  echo "stderr=<<$stderr>>"
+  [ "$status" -eq 0 ]
+  case "$output" in
+  "TOOL: Gemini"*) : ;;
+  *) echo "expected TOOL: Gemini" && return 1 ;;
+  esac
+  [ "$(call_count "$AGY_CALLS")" -eq 1 ]
+  echo "$stderr" | grep -q 'ELAPSED:'
+  # cap 2 + KILL grace 3 = ~5s worst case; generous <10s window, non-flaky.
+  # Without the KILL escalation this would hang ~40s (the sleep) and fail.
+  [ "$_hc_elapsed" -lt 10 ]
 }
 
 @test "no-fallback-skipped: primary auth-fails, no fallback bin given -> SKIPPED attributed to agy" {
@@ -403,6 +481,22 @@ call_count() {
   run "$SCRIPT" "$AGY" "$GEMINI" "$PROMPT_FILE" "extra"
   echo "status=$status"
   [ "$status" -eq 2 ]
+}
+
+@test "usage-error: RC_REVIEWER_TIMEOUT=0 exits 2 (timeout 0 = no limit)" {
+  RC_REVIEWER_TIMEOUT=0 run "$SCRIPT" "$AGY" "$GEMINI" "$PROMPT_FILE"
+  echo "status=$status"
+  echo "output=<<$output>>"
+  [ "$status" -eq 2 ]
+  # agy must never be invoked when the budget is invalid
+  [ "$(call_count "$AGY_CALLS")" -eq 0 ]
+}
+
+@test "usage-error: RC_REVIEWER_TIMEOUT=abc (non-integer) exits 2" {
+  RC_REVIEWER_TIMEOUT=abc run "$SCRIPT" "$AGY" "$GEMINI" "$PROMPT_FILE"
+  echo "status=$status"
+  [ "$status" -eq 2 ]
+  [ "$(call_count "$AGY_CALLS")" -eq 0 ]
 }
 
 @test "absent: primary binary not resolvable -> ABSENT, falls back to gemini" {
