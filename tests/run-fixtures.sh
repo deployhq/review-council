@@ -311,8 +311,8 @@ run_fixture_solo() {
 
   check "single-reviewer mode announced" "$out" \
     'single-reviewer mode' hard || fail=1
-  check "an unverified tag is present ([unverified] / [single-reviewer . unverified] / [1 reviewer . unverified])" "$out" \
-    '(\[unverified\]|\[single-reviewer[^]]*unverified\]|\[1 reviewer[^]]*unverified\])' hard || fail=1
+  check "an unverified tag is present ([unverified] / [1 reviewer . unverified])" "$out" \
+    '(\[unverified\]|\[1 reviewer[^]]*unverified\])' hard || fail=1
 
   if section_has "$out" 'Refutation routing' '.'; then
     log "  [warn] (soft) a refutation routing table appears present — refutation may not have been fully SKIPPED"

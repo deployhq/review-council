@@ -7,7 +7,7 @@ LOCAL / on-demand only, never CI.
 
 `repo/.review-council/learnings.md` carries a **Suppressions** entry:
 
-```
+```text
 fingerprint: src/adapters/*::*::unchecked-any | reason: intentional, see ADR-012 | added: 2026-07-10
 ```
 

@@ -10,7 +10,7 @@ Single-model code review has blind spots. Different models catch different thing
 - **Single-reviewer findings** (one reviewer, not yet cross-verified) = worth considering, badged `[unverified]` or `[1 reviewer · unverified]` — never silently dropped for being unverified
 - **Genuine disagreements** (a reviewer's counter-evidence refutes another's finding, or an unresolved conflict survives the judge) = documented as a dropped/refuted finding or a Dissenting Opinion, not just discarded
 
-The result: fewer false positives, broader coverage, and a clear priority order. Review Council runs entirely locally, inside a single Claude Code session, and only ever prints a report — it never pushes commits, opens PRs, or posts PR comments on its own (see [GitHub Actions (Roadmap)](#github-actions-roadmap) for a possible future CI mode).
+The result: fewer false positives, broader coverage, and a clear priority order. Review Council is orchestrated locally, inside a single Claude Code session, and only ever prints a report — it never pushes commits, opens PRs, or posts PR comments on its own (see [GitHub Actions (Roadmap)](#github-actions-roadmap) for a possible future CI mode). Note the data egress this implies: when Codex, Google, or Perplexity are enabled, the gathered review context (diff, file contents, etc.) is sent to those third-party tools/APIs — only Claude (the native subagent) stays fully local.
 
 ## Quick Start
 
@@ -70,7 +70,7 @@ flowchart TD
     K2 -->|"Some failed"| K3["Retry (1x max)<br/>or ask user / degrade"]
     K3 --> L
 
-    L -->|"verify=false or solo-Claude"| M2["Skip — tag [unverified] /<br/>[single-reviewer · unverified]"]
+    L -->|"verify=false or solo-Claude"| M2["Skip — tag [unverified] /<br/>[1 reviewer · unverified]"]
     L -->|"budget spent"| M3["Skip — stopped at budget: Ns"]
     L -->|"verify"| M["Refutation pass<br/>cross-family, budget-bounded<br/>UPHELD / REFUTED / INCONCLUSIVE"]
 
@@ -325,7 +325,7 @@ sequenceDiagram
     O->>O: Verdict — UPHELD / REFUTED (counter-evidence) / INCONCLUSIVE
 
     Note over O: Judge — fingerprint, dedup, recalibrate, suppress, ledger
-    O->>O: Promote if at least two reviewer families UPHELD it, drop only if REFUTED, otherwise keep it tagged unverified
+    O->>O: Promote if raised by ≥2 reviewer families OR UPHELD by a different family, drop only if REFUTED, otherwise keep it tagged unverified
 
     Note over O: Severity-First Report — badges, dissent, lens map
 ```

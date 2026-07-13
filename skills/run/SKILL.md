@@ -444,7 +444,7 @@ If `settings.verify` is true, apply these gates and rules **in order**.
 
 ### 4.0 Skip gates (check first, before any routing)
 
-1. **Solo-Claude mode** — if Claude is the only available reviewer, **skip refutation entirely**. Tag every finding `[single-reviewer · unverified]` and go to Step 5. Do NOT self-verify with another Claude spawn — one model refuting itself is correlated-error theatre, not cross-family evidence.
+1. **Solo-Claude mode** — if Claude is the only available reviewer, **skip refutation entirely**. Tag every finding `[1 reviewer · unverified]` and go to Step 5. Do NOT self-verify with another Claude spawn — one model refuting itself is correlated-error theatre, not cross-family evidence.
 2. **Budget check FIRST (see `rules/orchestration.md` → Budget).** Sum the **measured elapsed** the Round-1 CLI invocations reported (the CLI long pole — e.g. `agy`'s cold start; not a stopwatch you watch). If that sum has already reached `settings.run_budget_seconds`, **skip refutation**: tag all findings `[unverified]`, print `stopped at budget: <n>s`, and go straight to Step 5. Never hard-abort — degrade.
 
 If neither gate fires, run the pass.
@@ -521,7 +521,7 @@ Judge ledger:
 fingerprint                          | origin-families | verdict      | suppression? | tool? | final-severity | final-confidence
 auth.ts::checkauth::missing-authz    | codex,claude    | UPHELD       | no           | —     | critical       | high
 db.ts::listrows::n-plus-one          | claude          | INCONCLUSIVE | no           | —     | important      | medium
-api.ts::handler::unvalidated-input   | google          | REFUTED      | (dropped)    | —     | —              | —
+api.ts::handler::unvalidated-input   | google          | REFUTED      | no           | —     | —              | —
 Suppressions applied: 1
 ```
 The `tool?` column is reserved for Phase-2 deterministic-tool grounding — always `—` in this phase. Emit the ledger **before** the Step-6 prose so the judge's reasoning is auditable.

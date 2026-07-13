@@ -10,7 +10,7 @@ Multi-agent convergence review plugin for Claude Code. Multiple AI reviewers ind
 
 ## How It Works
 
-Everything below runs locally inside a single Claude Code session and ends in a printed report — Review Council never pushes commits, opens PRs, or posts PR comments on its own (see `README.md` → GitHub Actions (Roadmap) for a possible future CI mode).
+Everything below is orchestrated locally inside a single Claude Code session and ends in a printed report — Review Council never pushes commits, opens PRs, or posts PR comments on its own (see `README.md` → GitHub Actions (Roadmap) for a possible future CI mode). Note the data egress this implies: when Codex, Google, or Perplexity are enabled, the gathered review context (diff, file contents, etc.) is sent to those third-party tools/APIs — only Claude (the native subagent) stays fully local.
 
 1. **Detect providers + read config** — Auto-detects which reviewers are available (CLI first, MCP fallback) and reads `.review-council/config.yml` / `config.local.yml` (via `scripts/rc-config.sh`) for the reviewer roster, lens bindings, and run settings — precedence `env > config.local.yml > config.yml > built-in default`.
 2. **Recall learnings** — If `settings.learn`, reads `.review-council/learnings.md` (if present). Its Conventions fold into the shared baseline context (Step 4 below); its Suppressions are held for the judge. Absent file → skip silently.

@@ -15,8 +15,8 @@ harness. This is what lets `solo` be reproducible across machines instead of
 depending on which providers happen to be absent.
 
 Per the shared spec (§Refutation pass): "Skip entirely in solo-Claude mode
-(only Claude available): mark findings `[single-reviewer · unverified]`; do
-NOT self-verify (correlated-error theatre)."
+(only Claude available); do NOT self-verify (correlated-error theatre)." The
+judge tags such findings `[1 reviewer · unverified]` in the report.
 
 Note the distinction from the `budget` fixture: here the skip is because
 **too few reviewer families exist to cross-verify** (solo mode is
@@ -35,10 +35,9 @@ so `.review-council/config.yml` resolves relative to the target repo.
 - The literal phrase "single-reviewer mode" is announced (Step 0.3's
   existing, already-shipped wording for the solo-mode announcement).
 - At least one of the unverified tags appears somewhere in the output:
-  `[unverified]`, `[single-reviewer · unverified]`, or
-  `[1 reviewer · unverified]` (the shared spec uses the first form at
-  refutation-skip time and the second at report-badge time — the harness
-  accepts either since exact wording is still LLM-mediated).
+  `[unverified]` or the canonical `[1 reviewer · unverified]` (exact wording is
+  still LLM-mediated, so the harness matches on the tag shape, not an exact
+  string).
 
 **Soft / best-effort:**
 - No routing-table / verifier-family chatter suggesting refutation actually
