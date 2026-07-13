@@ -18,11 +18,21 @@ Everything below is orchestrated locally inside a single Claude Code session and
 2. **Recall learnings** — If `settings.learn`, reads `.review-council/learnings.md` (if present). Its Conventions fold into the shared baseline context (the Gather step below); its Suppressions are held for the judge. Absent file → skip silently.
 3. **Detect target** — Auto-detects if you're reviewing a PR, source code, or plan/document.
 4. **Gather** — Collects relevant context (diff, files, related docs, recalled Conventions) shared identically with every reviewer.
-5. **Round 1 — lens-differentiated review** — Sends the identical context to all available reviewers in parallel, each assigned a lens (Correctness & concurrency as the shared core, plus one diff-aware specialist overlay), plus an always-on dedicated **Security** reviewer.
-6. **Well-formed check** — Validates each reviewer's output structurally (required §3.1 fields/sections present); retries once, then degrades or asks the user.
-7. **Refutation pass** — Gated on `settings.verify` and budget-bounded: candidate findings are routed to an isolated, different-family verifier that returns UPHELD / REFUTED (counter-evidence) / INCONCLUSIVE. Skipped in solo-Claude mode or once `run_budget_seconds` is spent — findings are tagged `[1 reviewer · unverified]` (solo-Claude) or `[unverified]` (budget/over-cap) instead, never dropped.
-8. **Judge** — Computes a canonical fingerprint per finding, deduplicates across models, recalibrates severity/confidence (promote on cross-family UPHELD, drop only on REFUTED, suppress known false positives from learnings), and emits a per-finding ledger.
-9. **Report** — Outputs a severity-first curated list (Critical / Important / Suggestions) with confidence badges, dissenting opinions where genuinely unresolved, and the lens map.
+5. **Static analysis** (Step 2.5, gated on `static_analysis.enabled`) — One subagent runs up to eight external tools (`gitleaks`, `trufflehog`, `osv-scanner`, `semgrep`, `ruff`, `shellcheck`, `actionlint`, `hadolint`) against the diff. **Tier A** (verified secrets/CVEs) is carried straight to the judge, pre-`[verified]`; **Tier B** (SAST/lint) is folded into the shared context above as signals for reviewers to corroborate or dismiss. Not a voting reviewer — no lens, doesn't count toward `min_reviewers`, never refuted in Step 8. See "Static Analysis" below.
+6. **Round 1 — lens-differentiated review** — Sends the identical context to all available reviewers in parallel, each assigned a lens (Correctness & concurrency as the shared core, plus one diff-aware specialist overlay), plus an always-on dedicated **Security** reviewer.
+7. **Well-formed check** — Validates each reviewer's output structurally (required §3.1 fields/sections present); retries once, then degrades or asks the user.
+8. **Refutation pass** — Gated on `settings.verify` and budget-bounded: candidate findings are routed to an isolated, different-family verifier that returns UPHELD / REFUTED (counter-evidence) / INCONCLUSIVE. Skipped in solo-Claude mode or once `run_budget_seconds` is spent — findings are tagged `[1 reviewer · unverified]` (solo-Claude) or `[unverified]` (budget/over-cap) instead, never dropped.
+9. **Judge** — Computes a canonical fingerprint per finding (LLM and tool findings alike), deduplicates across models, recalibrates severity/confidence (promote on cross-family UPHELD, drop only on REFUTED, suppress known false positives from learnings), merges in the Tier A/B static-analysis findings, and emits a per-finding ledger.
+10. **Report** — Outputs a severity-first curated list (Critical / Important / Suggestions) with confidence badges (`[verified]` > `[cross-reviewed]` > `[1 reviewer · unverified]` > `[unverified]`), dissenting opinions where genuinely unresolved, and the lens map.
+
+## Static Analysis (Step 2.5)
+
+A deterministic layer that gives the council grounded evidence, not a second vote — never a reviewer itself (no lens, doesn't count toward `min_reviewers`, never refuted in the refutation pass):
+
+- **Tier A — verified / high-precision** (`gitleaks`, `trufflehog`, `osv-scanner`): secrets and known-CVE hits go straight into the report, pre-verified, badge `[verified]`, exempt from the suggestion cap, never downgraded by the judge (severity is **inherited**, not judge-assigned). `gitleaks` is precision-by-rule (regex/entropy), not live-verified like `trufflehog` — see `rules/static-analysis.md`.
+- **Tier B — SAST / lint** (`semgrep`, `ruff`, `shellcheck`, `actionlint`, `hadolint`): folded into Round 1's shared context as "PRE-EXISTING STATIC-ANALYSIS SIGNALS — corroborate or dismiss." A reviewer match on the same (judge-computed) fingerprint promotes the finding to `[verified]`; a tool-only hit stays a capped `suggestion` badged `[tool-only:<rule>]`.
+
+Configured via `static_analysis.*` in `.review-council/config.yml` (`enabled`, `tools`, `timeout_seconds`, `semgrep_config` — see `rules/config.md`). `/review-council:setup` prints tool availability and install commands but never installs one itself (print-only, unlike the `yq` flow). **Caveat:** `trufflehog`'s verified mode makes live outbound network calls to confirm a found credential is real — it's default-on; drop it from `static_analysis.tools` (or `RC_STATIC_TOOLS`) to opt out. If a tool listed in `static_analysis.tools` isn't installed, Step 2.5 doesn't skip it silently — it tells the user and asks whether to install-and-rerun or proceed without it.
 
 ## Reviewers
 
@@ -53,6 +63,11 @@ Round 1 is **lens-differentiated**: the dedicated Security reviewer always carri
   Step 1-2: Detect target + gather baseline context
       |
       v
+  Step 2.5: Static scan (Phase 2, gated on static_analysis.enabled)
+      Tier A (verified secrets/CVEs) ----> straight to Judge, pre-[verified]
+      Tier B (SAST/lint signals) --------> folded into shared context
+      |
+      v
   Orchestrator (main Claude thread)
       |
       +---> Step 3: Round 1 (parallel, lens-differentiated) --------+
@@ -71,10 +86,11 @@ Round 1 is **lens-differentiated**: the dedicated Security reviewer always carri
       UPHELD / REFUTED / INCONCLUSIVE per finding
       |
       v
-  Step 5: Judge (fingerprint, dedup, recalibrate, suppress, ledger)
+  Step 5: Judge (fingerprint, dedup, recalibrate, merge Tier A/B, suppress, ledger)
       |
       v
-  Step 6: Severity-first report (badges, dissent, lens map)
+  Step 6: Severity-first report
+      badges [verified] > [cross-reviewed] > [1 reviewer · unverified] > [unverified]; dissent; lens map
 ```
 
 ## File Structure
@@ -84,8 +100,8 @@ review-council/
   .claude-plugin/     Plugin metadata (plugin.json is the single source of truth for version)
   skills/             Slash commands (run, setup, uninstall)
   agents/             Subagent definitions (Claude reviewer persona, dedicated Security reviewer)
-  rules/              Orchestration logic, delegation format, provider registry, config schema (rules/config.md)
-  scripts/            Config reader (rc-config.sh) and Google-slot invocation state machine (rc-invoke-provider.sh)
+  rules/              Orchestration logic, delegation format, provider registry, config schema (rules/config.md), static-analysis tool registry (rules/static-analysis.md)
+  scripts/            Config reader (rc-config.sh), static-analysis runner (rc-static-scan.sh), shared timeout lib (rc-lib-timeout.sh), Google-slot invocation state machine (rc-invoke-provider.sh)
   tests/              bats unit tests for the scripts, plus Tier-2 artifact-shape fixtures (local/on-demand, never CI)
 ```
 

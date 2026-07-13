@@ -94,6 +94,45 @@ Report the final status as one of:
 - "Config files (yq) ..... not installed (using defaults + RC_* env)" — declined, or install failed
 - "Config files (yq) ..... wrong yq — need mikefarah/yq v4" — present but wrong, and the user declined to fix it
 
+### Static Analysis Tools (Phase 2) — detect only, PRINT-ONLY bootstrap
+
+Review Council's deterministic static-analysis layer (`Step 2.5` of `/review-council:run`, gated on `static_analysis.enabled`) uses up to eight external tools, split into two tiers. Full tool registry, exact invocations, and tier semantics live in `rules/static-analysis.md`; this is just an availability check.
+
+**This block is detect-and-print only. Unlike the `yq` flow above, `setup` NEVER installs these tools — not even with consent, not even if the user says yes.** There is no install prompt for static-analysis tools, period.
+
+Probe all eight (`command -v <tool>` + a version check), grouped by tier:
+
+```bash
+# Tier A — secrets / known-CVEs (verified/high-precision; go straight to the report)
+command -v gitleaks    >/dev/null 2>&1 && gitleaks version
+command -v trufflehog  >/dev/null 2>&1 && trufflehog --version
+command -v osv-scanner >/dev/null 2>&1 && osv-scanner --version
+
+# Tier B — SAST / lint (context for reviewers, not a verdict)
+command -v semgrep     >/dev/null 2>&1 && semgrep --version
+command -v ruff        >/dev/null 2>&1 && ruff --version
+command -v shellcheck  >/dev/null 2>&1 && shellcheck --version
+command -v actionlint  >/dev/null 2>&1 && actionlint --version
+command -v hadolint    >/dev/null 2>&1 && hadolint --version
+```
+
+For each tool **found** → "available (\<version\>)". For each tool **missing** → "not found", then print its install command from this table and **stop there — no consent prompt, no execution**:
+
+| Tool | Tier | Install |
+|---|---|---|
+| `gitleaks` | A | `brew install gitleaks` |
+| `trufflehog` | A | `brew install trufflehog` (or the official install script — see the trufflehog GitHub repo's install instructions) |
+| `osv-scanner` | A | `brew install osv-scanner` |
+| `semgrep` | B | `brew install semgrep` (or `pipx install semgrep`) |
+| `ruff` | B | `brew install ruff` (or `pipx install ruff` / `uvx ruff`) |
+| `shellcheck` | B | `brew install shellcheck` |
+| `actionlint` | B | `brew install actionlint` |
+| `hadolint` | B | `brew install hadolint` |
+
+State this plainly to the user: "Install any of these you want — Review Council picks them up automatically on the next run (`command -v` probe, no restart needed). `setup` only ever detects and prints; it never installs a static-analysis tool for you, even with consent."
+
+**trufflehog outbound-network caveat.** `trufflehog`'s `--results=verified` mode makes **live outbound network calls**, authenticating with each discovered credential against its actual provider (e.g. confirming an AWS key is real by calling AWS with it) — that live check is what makes its hits verified/high-precision. Implications worth surfacing: it requires network egress from the machine running the review, and the verification call itself could trip the *credential owner's* own anomaly detection, even though the intent is benign. `trufflehog` is **default-on** (included in the default `static_analysis.tools` list) — the one-line opt-out is dropping `trufflehog` from `static_analysis.tools` in `.review-council/config.yml` (or via `RC_STATIC_TOOLS`). If the network is unreachable, the scan degrades gracefully (treated as "ran, 0 findings") — it never errors the run.
+
 ## Step 2: Summary
 
 Print:
@@ -117,6 +156,21 @@ Optional:
 Note: Claude is always available; the dedicated Security reviewer runs by default, but pinning lenses.security.providers in .review-council/config.yml replaces it with the named providers (see rules/config.md) — so it is available by default, not unconditionally. Both are the same model family (Claude), so council mode and the refutation pass still need at least one reviewer from a DIFFERENT family (Codex, Google, or Perplexity) to cross-verify against.
 
 [N] of 3 different-family reviewers available (Codex, Google, Perplexity). Council mode needs the effective roster (Claude + the dedicated Security reviewer + every enabled and available provider, after any config disables) to reach settings.min_reviewers (default 2) AND include at least one different family. [Council mode ready. | Single-reviewer mode — effective roster below min_reviewers, or no different-family reviewer.]
+
+Static Analysis (Step 2.5, Phase 2):
+  Tier A — secrets / CVEs:
+    - gitleaks .................. [available (vX.Y.Z) | not found — install: `brew install gitleaks`]
+    - trufflehog ................ [available (vX.Y.Z) | not found — install: `brew install trufflehog`]
+    - osv-scanner ............... [available (vX.Y.Z) | not found — install: `brew install osv-scanner`]
+  Tier B — SAST / lint:
+    - semgrep ................... [available (vX.Y.Z) | not found — install: `brew install semgrep`]
+    - ruff ...................... [available (vX.Y.Z) | not found — install: `brew install ruff`]
+    - shellcheck ................ [available (vX.Y.Z) | not found — install: `brew install shellcheck`]
+    - actionlint ................ [available (vX.Y.Z) | not found — install: `brew install actionlint`]
+    - hadolint .................. [available (vX.Y.Z) | not found — install: `brew install hadolint`]
+
+  [N] of 8 available; missing ones degrade gracefully — Step 2.5 informs you and asks per run (install now and re-run, or proceed without them). `setup` is print-only for these — see above.
+  Note: trufflehog makes live outbound network calls to verify found credentials — drop it from `static_analysis.tools` to opt out.
 
 (Antigravity and Gemini share the Google slot — `agy` preferred, `gemini` fallback — so they count as one reviewer, not two.)
 
