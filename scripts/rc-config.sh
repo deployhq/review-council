@@ -18,7 +18,8 @@
 #   - Env overrides apply to the `settings.*` knobs ONLY (see the settings emit).
 #   - Reviewers and lenses come from the files (and defaults) only.
 #
-# YAML is parsed with `yq` (mikefarah v4). Graceful degradation:
+# YAML is parsed with `yq` (mikefarah v4); the binary is `${RC_YQ:-yq}`. Graceful
+# degradation:
 #   - yq absent               -> ignore both files; emit defaults + env; one note.
 #   - a file absent           -> skip it silently.
 #   - a file malformed        -> skip that file with a note; use the other layers.
@@ -45,8 +46,13 @@ over_file="$config_dir/config.local.yml"  # gitignored per-machine overrides
 # falls through to the lower layer / default.
 # ---------------------------------------------------------------------------
 
+# The yq binary is resolved once via RC_YQ (default: `yq`). This lets a user
+# point at a non-standard yq, and lets tests force the absent path deterministically
+# (e.g. RC_YQ=/nonexistent/yq) regardless of any yq preinstalled on PATH.
+YQ_BIN="${RC_YQ:-yq}"
+
 yq_present=1
-command -v yq >/dev/null 2>&1 || yq_present=0
+command -v "$YQ_BIN" >/dev/null 2>&1 || yq_present=0
 if [ "$yq_present" -eq 0 ]; then
   echo "rc-config: yq not found; $config_dir/config*.yml ignored (using defaults + env)" >&2
 fi
@@ -57,7 +63,7 @@ layer_ok() {
   _lo_f="$1"
   [ "$yq_present" -eq 1 ] || { echo 0; return; }
   [ -f "$_lo_f" ] || { echo 0; return; }
-  if ! yq e '.' "$_lo_f" >/dev/null 2>&1; then
+  if ! "$YQ_BIN" e '.' "$_lo_f" >/dev/null 2>&1; then
     echo "rc-config: $_lo_f is malformed YAML; skipped" >&2
     echo 0
     return
@@ -118,9 +124,9 @@ valid_kind() {
 # absent/null (tag !!null) or the query fails. Distinguishes an explicit empty
 # string ("" -> tag !!str, empty output, return 0) from an absent key.
 get_raw() {
-  _gr_tag="$(yq "$2 | tag" "$1" 2>/dev/null)" || return 1
+  _gr_tag="$("$YQ_BIN" "$2 | tag" "$1" 2>/dev/null)" || return 1
   [ "$_gr_tag" = "!!null" ] && return 1
-  yq "$2" "$1" 2>/dev/null
+  "$YQ_BIN" "$2" "$1" 2>/dev/null
 }
 
 # resolve <yq-path> <default> <kind> <key-name>: layers base then over on top of
@@ -189,13 +195,13 @@ resolve_providers() {
     eval "_rp_ok=\$${_rp_layer}_ok"
     [ "$_rp_ok" -eq 1 ] || continue
     eval "_rp_file=\$${_rp_layer}_file"
-    _rp_tag="$(yq ".lenses.$_rp_lens.providers | tag" "$_rp_file" 2>/dev/null)" || continue
+    _rp_tag="$("$YQ_BIN" ".lenses.$_rp_lens.providers | tag" "$_rp_file" 2>/dev/null)" || continue
     case "$_rp_tag" in
       '!!null')
         continue
         ;;
       '!!seq')
-        _rp_joined="$(yq ".lenses.$_rp_lens.providers | join(\",\")" "$_rp_file" 2>/dev/null)" || continue
+        _rp_joined="$("$YQ_BIN" ".lenses.$_rp_lens.providers | join(\",\")" "$_rp_file" 2>/dev/null)" || continue
         # Guard the joined value against control chars (a list entry containing
         # a newline would inject a second key=value line into stdout, breaking
         # the one-per-line contract). If any entry is unsafe, treat the pin as

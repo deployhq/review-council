@@ -139,10 +139,12 @@ EOF
 }
 
 @test "yq-absent fallback: files ignored, defaults + env, yq-not-found note" {
-  # Config sets verify:false, but with yq stripped from PATH the file is ignored
-  # and only the env override should take effect.
+  # Force yq-absent deterministically via RC_YQ pointing at an unresolvable path.
+  # (Stripping PATH is unreliable: CI runners may ship yq in /usr/bin.)
+  # Config sets min_reviewers:9, but with no usable yq the file is ignored and
+  # only the env override should take effect.
   printf 'settings:\n  min_reviewers: 9\n' >"$CFG/config.yml"
-  PATH="/usr/bin:/bin" RC_VERIFY=false run --separate-stderr "$SCRIPT" "$CFG"
+  RC_YQ=/nonexistent/yq RC_VERIFY=false run --separate-stderr "$SCRIPT" "$CFG"
   echo "status=$status"
   echo "stderr=<<$stderr>>"
   [ "$status" -eq 0 ]

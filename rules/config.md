@@ -134,7 +134,8 @@ diagnostics to **stderr**, and always exits `0`.
 ## `yq` requirement
 
 Config files are parsed with **[mikefarah/yq](https://github.com/mikefarah/yq) v4** (the Go
-YAML processor). It must be on `PATH`.
+YAML processor). It must be on `PATH`. To use a `yq` at a non-standard location, set the
+`RC_YQ` env var to its path (default: `yq`).
 
 > **Note — the right `yq`.** There is a *different* Python tool also named `yq` (a `jq`
 > wrapper). Review Council needs **mikefarah/yq** — its `yq --version` prints a
