@@ -24,6 +24,17 @@ jobs:
           # No git operations run after checkout, so the token needn't persist.
           persist-credentials: false
 
+      # rc-config.bats parses YAML with mikefarah yq v4. The runner doesn't ship
+      # it, so install a pinned v4 to a user-writable dir (no sudo) and add it to
+      # PATH. The linux amd64 asset name is `yq_linux_amd64`.
+      - name: Install yq (mikefarah v4)
+        run: |
+          mkdir -p "$HOME/.local/bin"
+          curl -fsSL https://github.com/mikefarah/yq/releases/download/v4.44.6/yq_linux_amd64 -o "$HOME/.local/bin/yq"
+          chmod +x "$HOME/.local/bin/yq"
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+          "$HOME/.local/bin/yq" --version
+
       # Ubuntu's apt `bats` is too old (1.2.x); the suite needs >= 1.5.0
       # (`run --separate-stderr`). Fetch a current bats-core with `npx` and run
       # it directly — `npm install -g bats` hits EACCES writing

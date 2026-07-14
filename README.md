@@ -140,9 +140,16 @@ Two behaviors keep the Google slot robust:
 
 Providers are auto-detected at runtime. Run `/review-council:setup` to check which providers are available.
 
+### Optional dependencies
+
+- **[yq](https://github.com/mikefarah/yq) (mikefarah v4)** — enables the optional config file (`.review-council/config.yml`). Run `/review-council:setup` and, with your consent, it will install `yq` for you; or install it yourself with `brew install yq` (macOS) or see the [yq install guide](https://github.com/mikefarah/yq#install). **Without `yq`, config files are ignored and the plugin runs on built-in defaults + `RC_*` env overrides** — still fully functional. (Heads-up: a *different* Python tool is also named `yq`; Review Council needs **mikefarah/yq**, whose `yq --version` prints a `github.com/mikefarah/yq` URL.)
+- **[bats](https://github.com/bats-core/bats-core) + yq** — only for running the unit-test suite (`bats tests/unit/`); not needed to use the plugin.
+
 ### Configuration
 
-Optional environment variables for tuning behavior:
+Review Council works with **zero configuration**. Optionally, add a `.review-council/config.yml` to the repo to control the reviewer roster, review lenses, and run settings; a gitignored `.review-council/config.local.yml` holds per-machine overrides. Precedence is **env > config.local.yml > config.yml > built-in default**. `/review-council:setup` can scaffold both files, and the full schema is documented in [`rules/config.md`](rules/config.md). Config files are parsed with `yq` (see Optional dependencies); without it the plugin falls back to defaults + the environment variables below.
+
+Each run setting is also tunable via its `RC_*` environment variable (env wins over the config file); the full list of settings and their env overrides is in [`rules/config.md`](rules/config.md). Common ones:
 
 | Variable | Default | Purpose |
 |----------|---------|---------|
@@ -216,9 +223,15 @@ review-council/
 ├── agents/
 │   └── reviewer-claude.md   # Claude reviewer persona
 ├── rules/
-│   ├── orchestration.md     # Convergence logic, validation, env vars
+│   ├── orchestration.md     # Convergence logic, validation, run settings
 │   ├── delegation-format.md # External model prompt format
-│   └── providers.md         # Provider registry
+│   ├── providers.md         # Provider registry
+│   └── config.md            # Config schema (reviewers, lenses, settings)
+├── scripts/
+│   ├── rc-invoke-provider.sh # Google-slot invocation state machine
+│   └── rc-config.sh          # Config reader (files + env + defaults)
+├── tests/
+│   └── unit/                # bats unit tests for the scripts
 ├── CLAUDE.md                # Plugin instructions
 ├── LICENSE                  # MIT
 └── README.md                # This file
