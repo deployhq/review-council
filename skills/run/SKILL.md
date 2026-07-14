@@ -688,7 +688,9 @@ Before writing anything, show the **exact** entries that would be appended:
 ```
 The script creates `.review-council/learnings.md` (canonical §3.6 skeleton) if absent, appends under the right section, and is **idempotent** — re-approving an existing learning is a safe no-op, so the gate never has to dedupe against the file. Decline (or `settings.learn` off) → write nothing; no confirmation for a given entry → skip just that entry.
 
-Print a one-line summary of what was captured (e.g. `Captured: 1 suppression, 1 convention → .review-council/learnings.md`), the same observable-artifact spirit as the lens map / ledger. These entries feed **Step 0.5 recall** and **Step 5 suppression** on the next run.
+**Check each call's exit status before summarizing.** `rc-learn.sh` exits **0** on a successful (or idempotent no-op) write and **2** on a validation failure — a `|` or control character in the fingerprint/reason/convention, an empty field, a malformed date — printing the reason on stderr and writing **nothing**. If a call exits non-zero, **surface its stderr message to the user** and do **not** count that entry as captured (the rest still write; the run isn't blocked). Count only the entries that actually landed.
+
+Print a one-line summary of **what actually wrote** (e.g. `Captured: 1 suppression, 1 convention → .review-council/learnings.md`; note any failures, e.g. `1 skipped: reason contained "|"`), the same observable-artifact spirit as the lens map / ledger — the summary must never report a capture that didn't happen. These entries feed **Step 0.5 recall** and **Step 5 suppression** on the next run.
 
 ## Step 8: Cleanup
 
