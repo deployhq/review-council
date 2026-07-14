@@ -201,14 +201,91 @@ esac
 GEM_EOF
   chmod +x "$FAKEDIR/gemini"
 
+  # --- fake codex -------------------------------------------------------
+  # Codex has NO CLI fallback, so it is invoked as
+  #   rc-invoke-provider.sh <codex> "" <prompt-file>.
+  # The prompt reaches `codex exec` as a POSITIONAL arg (for codex, -p is
+  # --profile, not the prompt), so unlike agy/gemini this fake ignores -p and
+  # just records its full argv for the codex-profile-argv assertion.
+  # Modes (CDX_MODE, or CDX_MODE_1 / CDX_MODE_2 to vary per call):
+  #   ok          -> valid review, exit 0
+  #   empty       -> nothing, exit 0
+  #   empty-slow  -> sleep $CDX_SLEEP then nothing, exit 0
+  #   auth        -> auth error, exit 1
+  #   quota       -> quota error, exit 1
+  #   timeout     -> sleep $CDX_SLEEP (default 999s) to force a wrapper kill
+  # Bookkeeping (set only if the env var is exported by the test):
+  #   CDX_CALLS -> one "call" line appended per invocation (call counting)
+  #   CDX_ARGS  -> one space-joined line of this call's argv appended
+  cat >"$FAKEDIR/codex" <<'CDX_EOF'
+#!/usr/bin/env sh
+call_n=1
+if [ -n "${CDX_CALLS:-}" ]; then
+  echo call >>"$CDX_CALLS"
+  call_n=$(wc -l <"$CDX_CALLS" | tr -d ' ')
+fi
+
+if [ -n "${CDX_ARGS:-}" ]; then
+  {
+    printf '==CALL %s==\n' "$call_n"
+    for a in "$@"; do printf '%s ' "$a"; done
+    printf '\n'
+  } >>"$CDX_ARGS"
+fi
+
+case "$call_n" in
+  1) mode="${CDX_MODE_1:-${CDX_MODE:-ok}}" ;;
+  2) mode="${CDX_MODE_2:-${CDX_MODE:-ok}}" ;;
+  *) mode="${CDX_MODE:-ok}" ;;
+esac
+
+case "$mode" in
+  ok)
+    cat <<'REVIEW_EOF'
+Findings:
+- [P2] Example finding from codex.
+
+What's Good:
+- Reasonable structure.
+
+Overall Assessment: Looks fine.
+REVIEW_EOF
+    exit 0
+    ;;
+  empty)
+    exit 0
+    ;;
+  empty-slow)
+    sleep "${CDX_SLEEP:-1}"
+    exit 0
+    ;;
+  auth)
+    echo "Error: not authenticated. Please login to continue." >&2
+    exit 1
+    ;;
+  quota)
+    echo "Error: 429 Too Many Requests -- TerminalQuotaError" >&2
+    exit 1
+    ;;
+  timeout)
+    sleep "${CDX_SLEEP:-999}"
+    exit 0
+    ;;
+esac
+CDX_EOF
+  chmod +x "$FAKEDIR/codex"
+
   AGY="$FAKEDIR/agy"
   GEMINI="$FAKEDIR/gemini"
+  CODEX="$FAKEDIR/codex"
 
   AGY_CALLS="$BATS_TEST_TMPDIR/agy_calls"
   AGY_ARGS="$BATS_TEST_TMPDIR/agy_args"
   GEM_CALLS="$BATS_TEST_TMPDIR/gem_calls"
   GEM_ARGS="$BATS_TEST_TMPDIR/gem_args"
-  export AGY_CALLS AGY_ARGS GEM_CALLS GEM_ARGS
+  CDX_CALLS="$BATS_TEST_TMPDIR/cdx_calls"
+  CDX_ARGS="$BATS_TEST_TMPDIR/cdx_args"
+  export AGY_CALLS AGY_ARGS GEM_CALLS GEM_ARGS CDX_CALLS CDX_ARGS
 }
 
 # call_count <file>: prints 0 if the bookkeeping file doesn't exist yet.
@@ -520,4 +597,164 @@ call_count() {
   "SKIPPED: Google (Antigravity) unavailable — agy: absent"*) : ;;
   *) echo "expected SKIPPED absent attributed to agy" && return 1 ;;
   esac
+}
+
+# ===========================================================================
+# Phase 4 — Codex slot (codex primary, NO fallback) + tool-agnostic attribution
+# ===========================================================================
+
+@test "codex-success: primary codex returns a valid review -> TOOL: Codex" {
+  CDX_MODE=ok run --separate-stderr "$SCRIPT" "$CODEX" "" "$PROMPT_FILE"
+  echo "status=$status"
+  echo "output=<<$output>>"
+  echo "stderr=<<$stderr>>"
+  [ "$status" -eq 0 ]
+  case "$output" in
+  "TOOL: Codex"*) : ;;
+  *) echo "expected output to start with TOOL: Codex" && return 1 ;;
+  esac
+  echo "$output" | grep -qi 'findings'
+  echo "$stderr" | grep -q 'ELAPSED:'
+}
+
+@test "codex-no-fallback-auth: codex auth-fails, no fallback -> SKIPPED led by Codex (not Google)" {
+  CDX_MODE=auth run --separate-stderr "$SCRIPT" "$CODEX" "" "$PROMPT_FILE"
+  echo "status=$status"
+  echo "output=<<$output>>"
+  [ "$status" -eq 1 ]
+  case "$output" in
+  "SKIPPED: Codex unavailable — codex: auth failure"*) : ;;
+  *) echo "expected SKIPPED led by Codex with the codex auth note" && return 1 ;;
+  esac
+  # Attribution must have generalized: a codex SKIPPED must NOT say "Google".
+  ! echo "$output" | grep -q 'Google'
+  # no fallback clause at all
+  ! echo "$output" | grep -q 'fallback:'
+}
+
+@test "codex-profile-argv: frozen 'codex exec' argv (subcommand + read-only sandbox, positional prompt)" {
+  CDX_MODE=ok run --separate-stderr "$SCRIPT" "$CODEX" "" "$PROMPT_FILE"
+  echo "status=$status"
+  [ "$status" -eq 0 ]
+  [ -f "$CDX_ARGS" ]
+  echo "codex argv: $(cat "$CDX_ARGS")"
+  # Frozen shape: the non-interactive `exec` subcommand, then the least-privilege
+  # read-only sandbox, pinned against `codex exec --help`.
+  grep -qF -- 'exec --sandbox read-only --skip-git-repo-check' "$CDX_ARGS"
+  # Least privilege: the reviewer must NOT run with the "EXTREMELY DANGEROUS"
+  # no-sandbox flag.
+  ! grep -qF -- 'dangerously-bypass' "$CDX_ARGS"
+  # The prompt is a POSITIONAL arg for codex (NOT after -p) — prove it arrived.
+  grep -qF -- 'Please review this change' "$CDX_ARGS"
+  # And codex must NOT be handed a -p flag (that is --profile for codex exec).
+  ! grep -qE -- '(^| )-p( |$)' "$CDX_ARGS"
+}
+
+@test "codex-fast-empty-retry: codex empty-fast -> exactly one retry (shared state machine)" {
+  RC_REVIEWER_TIMEOUT=6 CDX_MODE_1=empty CDX_MODE_2=ok \
+    run --separate-stderr "$SCRIPT" "$CODEX" "" "$PROMPT_FILE"
+  echo "status=$status"
+  echo "output=<<$output>>"
+  [ "$status" -eq 0 ]
+  case "$output" in
+  "TOOL: Codex"*) : ;;
+  *) echo "expected TOOL: Codex after the one fast-empty retry" && return 1 ;;
+  esac
+  # Exactly one retry -> two codex invocations total, no more.
+  [ "$(call_count "$CDX_CALLS")" -eq 2 ]
+}
+
+@test "attribution-per-family: SKIPPED lead label maps by basename (agy->Antigravity, codex->Codex)" {
+  # agy (no fallback) auth-fails -> leads with Google (Antigravity).
+  AGY_MODE=auth run --separate-stderr "$SCRIPT" "$AGY" "" "$PROMPT_FILE"
+  echo "agy-status=$status agy-output=<<$output>>"
+  [ "$status" -eq 1 ]
+  case "$output" in
+  "SKIPPED: Google (Antigravity) unavailable"*) : ;;
+  *) echo "expected agy SKIPPED to lead with Google (Antigravity)" && return 1 ;;
+  esac
+
+  # codex (no fallback) auth-fails -> leads with Codex, never Google.
+  CDX_MODE=auth run --separate-stderr "$SCRIPT" "$CODEX" "" "$PROMPT_FILE"
+  echo "codex-status=$status codex-output=<<$output>>"
+  [ "$status" -eq 1 ]
+  case "$output" in
+  "SKIPPED: Codex unavailable"*) : ;;
+  *) echo "expected codex SKIPPED to lead with Codex" && return 1 ;;
+  esac
+  ! echo "$output" | grep -q 'Google'
+}
+
+@test "google-single-row (double-vote guard): agy present -> exactly one TOOL line, gemini only via internal fallback" {
+  AGY_MODE=ok run --separate-stderr "$SCRIPT" "$AGY" "$GEMINI" "$PROMPT_FILE"
+  echo "status=$status"
+  echo "output=<<$output>>"
+  [ "$status" -eq 0 ]
+  # The Google slot is a single dispatch unit: exactly one TOOL: line emitted.
+  [ "$(printf '%s\n' "$output" | grep -c '^TOOL:')" -eq 1 ]
+  case "$output" in
+  "TOOL: Antigravity"*) : ;;
+  *) echo "expected the single row to be TOOL: Antigravity" && return 1 ;;
+  esac
+  # gemini is reached ONLY as an internal fallback (never here, agy succeeded).
+  [ "$(call_count "$GEM_CALLS")" -eq 0 ]
+}
+
+# ===========================================================================
+# Phase 4 — --probe health check (reuses the frozen profiles + classifier)
+# ===========================================================================
+
+@test "probe-healthy: codex responds cleanly -> HEALTHY" {
+  CDX_MODE=ok run "$SCRIPT" --probe "$CODEX" ""
+  echo "status=$status"
+  echo "output=<<$output>>"
+  [ "$status" -eq 0 ]
+  [ "$output" = "HEALTHY" ]
+}
+
+@test "probe-cold-inconclusive: probe TIMEOUT -> INCONCLUSIVE, never UNHEALTHY (cold agy must survive)" {
+  _p_start=$(date +%s)
+  RC_HEALTH_PROBE_TIMEOUT=2 CDX_MODE=timeout CDX_SLEEP=40 \
+    run "$SCRIPT" --probe "$CODEX" ""
+  _p_elapsed=$(( $(date +%s) - _p_start ))
+  echo "status=$status wall=${_p_elapsed}s"
+  echo "output=<<$output>>"
+  [ "$status" -eq 0 ]
+  case "$output" in
+  "INCONCLUSIVE"*) : ;;
+  *) echo "expected INCONCLUSIVE for a probe timeout (cold start)" && return 1 ;;
+  esac
+  # A timeout must NEVER be reported as a health failure.
+  ! echo "$output" | grep -q 'UNHEALTHY'
+  # Bounded by the short probe cap + KILL grace, not the 40s sleep.
+  [ "$_p_elapsed" -lt 10 ]
+}
+
+@test "probe-unhealthy-auth: codex auth-fails -> UNHEALTHY (positive evidence)" {
+  CDX_MODE=auth run "$SCRIPT" --probe "$CODEX" ""
+  echo "status=$status"
+  echo "output=<<$output>>"
+  [ "$status" -eq 0 ]
+  case "$output" in
+  "UNHEALTHY:"*) : ;;
+  *) echo "expected UNHEALTHY: for a codex auth failure" && return 1 ;;
+  esac
+  echo "$output" | grep -qi 'auth'
+}
+
+@test "probe-google-slot-fallback: agy unhealthy, gemini healthy -> slot HEALTHY" {
+  AGY_MODE=auth GEM_MODE=ok run "$SCRIPT" --probe "$AGY" "$GEMINI"
+  echo "status=$status"
+  echo "output=<<$output>>"
+  [ "$status" -eq 0 ]
+  [ "$output" = "HEALTHY" ]
+  # The slot's own fallback logic ran: agy probed (unhealthy), gemini probed.
+  [ "$(call_count "$AGY_CALLS")" -eq 1 ]
+  [ "$(call_count "$GEM_CALLS")" -eq 1 ]
+}
+
+@test "probe usage-error: --probe with wrong arg count exits 2" {
+  run "$SCRIPT" --probe "$CODEX"
+  echo "status=$status"
+  [ "$status" -eq 2 ]
 }

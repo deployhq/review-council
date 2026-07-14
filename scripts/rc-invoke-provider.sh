@@ -1,6 +1,8 @@
 #!/usr/bin/env sh
-# rc-invoke-provider.sh — tested invocation state machine for the Google-family
-# reviewer slot (Antigravity `agy` primary, Gemini `gemini` fallback).
+# rc-invoke-provider.sh — tested invocation state machine for a single reviewer
+# slot: one primary CLI plus one optional fallback CLI. It drives the
+# Google-family slot (Antigravity `agy` primary, Gemini `gemini` fallback) and,
+# since Phase 4, the Codex slot (`codex` primary, no fallback).
 #
 # This extracts control-flow that used to live as prose in
 # rules/orchestration.md ("Reviewer Timeouts & Fast-Fail") and
@@ -8,29 +10,53 @@
 # worth of timeout/retry/attribution edge cases — into a single POSIX `sh`
 # script. See .superpowers/sdd/task-0.1-brief.md for the full spec.
 #
-# Scope: Google slot ONLY (one primary CLI + one optional fallback CLI).
-# Codex and Perplexity are out of scope — do not generalize this further.
+# Scope: any provider that is (a) one primary binary + one optional fallback
+# binary and (b) classifiable by process exit code + stderr text. Google and
+# Codex qualify; each command profile is basename-keyed and frozen against the
+# real CLI's --help (see build_and_run). Perplexity stays OUT — it is an HTTP
+# API (curl + bearer token), with no binary to resolve and an HTTP-status
+# failure taxonomy, so it keeps its own inline curl path (see plan §2.5).
 #
-# Usage:
+# Usage (review mode):
 #   rc-invoke-provider.sh <primary-bin> <fallback-bin> <prompt-file>
 #
-#   <primary-bin>   path or bare name of the primary CLI (e.g. agy). Required.
+#   <primary-bin>   path or bare name of the primary CLI (e.g. agy, codex).
+#                   Required.
 #   <fallback-bin>  path or bare name of the fallback CLI (e.g. gemini).
-#                   Pass "" for "no fallback". Required as a positional.
+#                   Pass "" for "no fallback" (Codex has none). Required
+#                   as a positional.
 #   <prompt-file>   file containing the delegation prompt text. Required.
 #
-# Env:
-#   RC_REVIEWER_TIMEOUT  total wall-clock budget for the whole slot, in
-#                        seconds. Default 600.
-#   RC_GOOGLE_ADD_DIR    optional, agy-only: appends --add-dir "<val>".
-#   RC_GOOGLE_MODEL      optional, agy-only: appends --model "<val>".
+# Usage (probe mode):
+#   rc-invoke-provider.sh --probe <primary-bin> <fallback-bin>
 #
-# stdout: on success, "TOOL: <Label>" then the raw review text.
+#   A lightweight health check: runs the primary (then the fallback, for a
+#   Google-style slot) ONCE with a trivial 1-token prompt under a short cap
+#   (RC_HEALTH_PROBE_TIMEOUT, default 20s), reusing the SAME frozen command
+#   profiles + hard-fail patterns, and prints a single machine verdict on
+#   stdout:
+#       HEALTHY | UNHEALTHY: <reason> | INCONCLUSIVE
+#   Fail-OPEN: only POSITIVE hard-fail evidence (auth / quota / overload /
+#   ineligible) yields UNHEALTHY; a TIMEOUT (agy cold start!), empty output, or
+#   network blip yields INCONCLUSIVE so a cold-but-usable provider is never
+#   dropped. Slot is HEALTHY iff the primary OR the fallback is healthy. Pass
+#   "" as <fallback-bin> for a no-fallback slot (Codex). Exit is always 0
+#   (verdict is on stdout), or 2 on a usage error.
+#
+# Env:
+#   RC_REVIEWER_TIMEOUT      review mode: total wall-clock budget for the whole
+#                            slot, in seconds. Default 600.
+#   RC_HEALTH_PROBE_TIMEOUT  probe mode: short per-tool cap, in seconds.
+#                            Default 20.
+#   RC_GOOGLE_ADD_DIR        optional, agy-only: appends --add-dir "<val>".
+#   RC_GOOGLE_MODEL          optional, agy-only: appends --model "<val>".
+#
+# stdout: review mode — on success, "TOOL: <Label>" then the raw review text;
 #         on total failure, a single "SKIPPED: ..." line attributed to the
-#         primary tool.
-# stderr: exactly one "ELAPSED: <n>" line (whole seconds spent across every
-#         invocation this script made), plus free-form diagnostic notes.
-# exit:   0 success, 1 SKIPPED, 2 usage error.
+#         primary tool. probe mode — a single verdict line (see above).
+# stderr: review mode — exactly one "ELAPSED: <n>" line (whole seconds spent
+#         across every invocation this script made), plus free-form notes.
+# exit:   0 success (or probe verdict printed), 1 SKIPPED, 2 usage error.
 
 set -eu
 
@@ -41,41 +67,63 @@ set -eu
 . "$(dirname "$0")/rc-lib-timeout.sh"
 
 # ---------------------------------------------------------------------------
-# Usage / argument handling
+# Usage / argument handling  (review mode vs. --probe mode)
 # ---------------------------------------------------------------------------
 
-if [ "$#" -ne 3 ]; then
-  echo "Usage: $0 <primary-bin> <fallback-bin> <prompt-file>" >&2
-  exit 2
+# MODE is "review" (3 positionals + prompt file) or "probe" (--probe + 2
+# positionals, trivial internal prompt). --probe is a literal first-arg token
+# (dash-safe: a real binary is never named "--probe").
+MODE=review
+if [ "${1:-}" = "--probe" ]; then
+  MODE=probe
+  shift
 fi
 
-primary_bin="$1"
-fallback_bin="$2"
-prompt_file="$3"
+if [ "$MODE" = probe ]; then
+  if [ "$#" -ne 2 ]; then
+    echo "Usage: $0 --probe <primary-bin> <fallback-bin>" >&2
+    exit 2
+  fi
+  primary_bin="$1"
+  fallback_bin="$2"
+  # Trivial 1-token health-check prompt (never a real review request).
+  prompt="ping"
+  # Probe mode uses its own short cap, independent of the review budget.
+  timeout_budget="${RC_HEALTH_PROBE_TIMEOUT:-20}"
+else
+  if [ "$#" -ne 3 ]; then
+    echo "Usage: $0 [--probe] <primary-bin> <fallback-bin> <prompt-file>" >&2
+    exit 2
+  fi
+  primary_bin="$1"
+  fallback_bin="$2"
+  prompt_file="$3"
 
-if [ ! -f "$prompt_file" ]; then
-  echo "Usage: prompt file not found: $prompt_file" >&2
-  exit 2
+  if [ ! -f "$prompt_file" ]; then
+    echo "Usage: prompt file not found: $prompt_file" >&2
+    exit 2
+  fi
+
+  prompt="$(cat "$prompt_file")"
+  timeout_budget="${RC_REVIEWER_TIMEOUT:-600}"
 fi
-
-prompt="$(cat "$prompt_file")"
 
 # ---------------------------------------------------------------------------
 # Budget state
 # ---------------------------------------------------------------------------
 
-timeout_budget="${RC_REVIEWER_TIMEOUT:-600}"
-# RC_REVIEWER_TIMEOUT must be a positive integer (seconds). `timeout 0` means
-# "no limit" (runs forever), defeating the whole point of the cap; a
-# non-integer breaks the `spent`/`T/3` arithmetic. Reject both with a usage error.
+# The cap (RC_REVIEWER_TIMEOUT / RC_HEALTH_PROBE_TIMEOUT) must be a positive
+# integer (seconds). `timeout 0` means "no limit" (runs forever), defeating the
+# whole point of the cap; a non-integer breaks the `spent`/`T/3` arithmetic.
+# Reject both with a usage error.
 case "$timeout_budget" in
   '' | *[!0-9]*)
-    echo "Usage: RC_REVIEWER_TIMEOUT must be a positive integer (seconds)" >&2
+    echo "Usage: reviewer/probe timeout must be a positive integer (seconds)" >&2
     exit 2
     ;;
 esac
 [ "$timeout_budget" -gt 0 ] || {
-  echo "Usage: RC_REVIEWER_TIMEOUT must be > 0" >&2
+  echo "Usage: reviewer/probe timeout must be > 0" >&2
   exit 2
 }
 
@@ -126,12 +174,13 @@ resolve_bin() {
   return 1
 }
 
-# label_for <bin>: "Antigravity" / "Gemini" / the bare basename.
+# label_for <bin>: "Antigravity" / "Gemini" / "Codex" / the bare basename.
 label_for() {
   _lf_bn="$(basename "$1")"
   case "$_lf_bn" in
     *agy*) echo "Antigravity" ;;
     *gemini*) echo "Gemini" ;;
+    *codex*) echo "Codex" ;;
     *) echo "$_lf_bn" ;;
   esac
 }
@@ -171,6 +220,27 @@ build_and_run() {
       ;;
     *gemini*)
       set -- "$_bar_bin" -p "$prompt" --skip-trust
+      ;;
+    *codex*)
+      # Frozen non-interactive Codex profile, pinned against `codex exec --help`
+      # (Phase 4). Three details are load-bearing:
+      #   1. `exec` is the non-interactive subcommand (interactive `codex` would
+      #      hang forever with no TTY). `exec` has no --ask-for-approval flag —
+      #      it never prompts — so no "bypass approvals" knob is needed.
+      #   2. The prompt is a POSITIONAL arg — for `codex exec`, `-p` is
+      #      `--profile`, NOT the prompt (unlike agy/gemini). It goes last.
+      #   3. `--sandbox read-only` is LEAST PRIVILEGE for a reviewer: the model's
+      #      shell commands can read the repo but cannot write or reach the
+      #      network. A code reviewer only reads, so this is sufficient — and we
+      #      deliberately do NOT use `--dangerously-bypass-approvals-and-sandbox`
+      #      (which codex's own help calls "EXTREMELY DANGEROUS": no sandbox at
+      #      all), consistent with the plugin's least-privilege posture (e.g.
+      #      Phase 3 dropped the run skill's Write grant). read-only sandbox ops
+      #      are allowed outright in `exec`, so the run stays hands-off.
+      # `--skip-git-repo-check` is defensive (lets the review run even outside a
+      # git repo). If Codex's CLI surface changes, re-pin from `codex exec
+      # --help` and update the codex-profile-argv test in lockstep.
+      set -- "$_bar_bin" exec --sandbox read-only --skip-git-repo-check "$prompt"
       ;;
     *)
       set -- "$_bar_bin" -p "$prompt"
@@ -299,11 +369,15 @@ fail() {
   _f_pnote="$1"
   _f_fnote="$2"
 
+  # Lead attribution is basename-keyed so a no-fallback Codex SKIPPED leads with
+  # "Codex", not "Google". The Google leads are locked by the existing bats
+  # suite — do not change them.
   _f_primary_bn="$(basename "$primary_bin")"
   case "$_f_primary_bn" in
     *agy*) _f_lead="Google (Antigravity)" ;;
     *gemini*) _f_lead="Google (Gemini)" ;;
-    *) _f_lead="Google" ;;
+    *codex*) _f_lead="Codex" ;;
+    *) _f_lead="$_f_primary_bn" ;;
   esac
 
   if [ -n "$_f_fnote" ]; then
@@ -317,8 +391,119 @@ fail() {
 }
 
 # ---------------------------------------------------------------------------
+# Probe mode (--probe): a single short-cap trivial run per tool -> machine
+# verdict. Reuses the frozen command profiles (build_and_run) and the hard-fail
+# patterns (AUTH/QUOTA/OVERLOAD) — no re-implementation. Distinct from the
+# review classifier in ONE way: a probe treats ANY clean exit-0 non-empty
+# response as "alive" (it does NOT require the review's Findings/Overall
+# Assessment sections, since the trivial prompt never asks for a review).
+# ---------------------------------------------------------------------------
+
+# probe_bin <bin>: sets globals PROBE_VERDICT (HEALTHY|UNHEALTHY|INCONCLUSIVE)
+# and PROBE_REASON. Fail-open: only positive hard-fail evidence -> UNHEALTHY.
+probe_bin() {
+  _pb_bin="$1"
+  PROBE_REASON=""
+
+  _pb_resolved="$(resolve_bin "$_pb_bin" || true)"
+  if [ -z "$_pb_resolved" ]; then
+    # Not resolvable. Detection (Step 0.2) already gates on installed, so this
+    # is a defensive fail-open — never a health failure on its own.
+    PROBE_VERDICT=INCONCLUSIVE
+    PROBE_REASON="not resolvable"
+    return 0
+  fi
+
+  _pb_out="$(mktemp "$WORKDIR/probe.XXXXXX")"
+  build_and_run "$_pb_resolved" "$timeout_budget" "$_pb_out"
+
+  # 1. Hard timeout / kill (cold start, network blip) -> fail-open. A cold-but-
+  #    usable agy MUST land here, never UNHEALTHY.
+  if [ "$LAST_RC" = 124 ] || [ "$LAST_RC" = 143 ] || [ "$LAST_RC" = 137 ]; then
+    PROBE_VERDICT=INCONCLUSIVE
+    PROBE_REASON="timed out"
+    return 0
+  fi
+
+  # 2. Positive hard-fail evidence -> UNHEALTHY (drop). Same patterns as the
+  #    review classifier, same precedence (auth -> quota -> overload).
+  if grep -qiE "$AUTH_PATTERN" "$_pb_out" 2>/dev/null; then
+    PROBE_VERDICT=UNHEALTHY
+    PROBE_REASON="auth failure"
+    return 0
+  fi
+  if grep -qiE "$QUOTA_PATTERN" "$_pb_out" 2>/dev/null ||
+    { grep -qi 'exhausted your' "$_pb_out" 2>/dev/null && grep -qi 'quota' "$_pb_out" 2>/dev/null; }; then
+    PROBE_VERDICT=UNHEALTHY
+    PROBE_REASON="quota exhausted"
+    return 0
+  fi
+  if grep -qiE "$OVERLOAD_PATTERN" "$_pb_out" 2>/dev/null; then
+    PROBE_VERDICT=UNHEALTHY
+    PROBE_REASON="overloaded"
+    return 0
+  fi
+
+  # 3. Clean exit with some output -> alive.
+  if [ "$LAST_RC" = 0 ] && [ -s "$_pb_out" ]; then
+    PROBE_VERDICT=HEALTHY
+    return 0
+  fi
+
+  # 4. Empty output or a generic non-zero exit with no positive evidence ->
+  #    fail-open (keep). The probe only catches DEAD providers, not cold ones.
+  PROBE_VERDICT=INCONCLUSIVE
+  PROBE_REASON="empty or unclassified response"
+}
+
+# run_probe: primary (then fallback, for a Google-style slot) -> one verdict.
+# Slot HEALTHY iff either tool is healthy; UNHEALTHY only when every probed tool
+# gives positive hard-fail evidence; otherwise INCONCLUSIVE (fail-open). Exits.
+run_probe() {
+  probe_bin "$primary_bin"
+  _rp_pv="$PROBE_VERDICT"
+  _rp_pr="$PROBE_REASON"
+
+  if [ "$_rp_pv" = HEALTHY ]; then
+    echo "HEALTHY"
+    exit 0
+  fi
+
+  if [ -n "$fallback_bin" ]; then
+    probe_bin "$fallback_bin"
+    _rp_fv="$PROBE_VERDICT"
+    _rp_fr="$PROBE_REASON"
+    if [ "$_rp_fv" = HEALTHY ]; then
+      echo "HEALTHY"
+      exit 0
+    fi
+    # Neither tool healthy. Drop (UNHEALTHY) only with positive evidence from
+    # BOTH; if either is merely INCONCLUSIVE (cold/slow), keep the slot.
+    if [ "$_rp_pv" = UNHEALTHY ] && [ "$_rp_fv" = UNHEALTHY ]; then
+      echo "UNHEALTHY: primary $_rp_pr; fallback $_rp_fr"
+    else
+      echo "INCONCLUSIVE"
+    fi
+    exit 0
+  fi
+
+  # No fallback (e.g. Codex): the single tool's verdict is the slot's.
+  if [ "$_rp_pv" = UNHEALTHY ]; then
+    echo "UNHEALTHY: $_rp_pr"
+  else
+    echo "INCONCLUSIVE"
+  fi
+  exit 0
+}
+
+# ---------------------------------------------------------------------------
 # Main state machine (see brief "Primary flow")
 # ---------------------------------------------------------------------------
+
+# Probe mode short-circuits the review state machine entirely (run_probe exits).
+if [ "$MODE" = probe ]; then
+  run_probe
+fi
 
 # Primary first call gets a full fresh budget.
 invoke_once "$primary_bin" "$timeout_budget"
