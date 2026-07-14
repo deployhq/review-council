@@ -108,7 +108,7 @@ settings:
 | `settings.personas` | `true` | `RC_PERSONAS` | Use reviewer personas when prompting reviewers. |
 | `settings.verify` | `true` | `RC_VERIFY` | Run the verification pass over findings. |
 | `settings.verify_max_findings` | `12` | `RC_VERIFY_CAP` | Cap on findings sent to the verification pass. |
-| `settings.learn` | `true` | `RC_LEARN` | Enable the learning/memory mechanism. |
+| `settings.learn` | `true` | `RC_LEARN` | Enable learnings recall (Step 0.5) and capture (Step 7) — see [Learnings](#learnings) below. |
 | `settings.min_reviewers` | `2` | `RC_MIN_REVIEWERS` | Minimum participating reviewers for council mode. |
 | `settings.reviewer_timeout_seconds` | `600` | `RC_REVIEWER_TIMEOUT` | Per-invocation wall-clock cap (seconds) for CLI/API reviewers. |
 | `settings.run_budget_seconds` | `600` | `RC_RUN_BUDGET` | Total wall-clock budget (seconds) for the whole run. |
@@ -148,6 +148,83 @@ static_analysis:
   `trufflehog` from `tools` to opt out if that outbound call is undesirable in your
   environment (see `rules/static-analysis.md`).
 - `semgrep_config: off` skips semgrep unconditionally, regardless of `tools`.
+
+## Learnings
+
+`.review-council/learnings.md` is a **committed, team-shared** file (unlike `config.local.yml`,
+it is **not** gitignored) that persists confirmed review outcomes across runs. It has a read
+side (Step 0.5 — recall) and a write side (Step 7 — capture); both are gated on the single
+`settings.learn` knob (`RC_LEARN`, default `true`) — turn it `false` and the file is neither
+read nor written.
+
+### Format (§3.6)
+
+Two sections, always both present (even when empty). `scripts/rc-learn.sh` creates this exact
+skeleton the first time it writes, if the file doesn't already exist:
+
+```markdown
+# Review Council — Learnings   (committed; team-shared; edit freely)
+
+## Conventions   (injected once into the Step-2 baseline context package)
+
+- <one-line rule, e.g. "Migrations are auto-generated; do not flag missing down-migrations">
+
+## Suppressions   (known false positives — judge down-weights/skips matches by fingerprint)
+
+- fingerprint: <path>::<symbol-or-hunk>::<concern> | reason: <one-line reason> | added: <YYYY-MM-DD>
+```
+
+- **Conventions** — a bare `- <text>` bullet: a project-specific rule about what *not* to flag.
+- **Suppressions** — a `- fingerprint: … | reason: … | added: …` bullet, one per known false
+  positive. The `fingerprint` is the judge's **canonical** fingerprint (`skills/run/SKILL.md`
+  §5.1, `<relpath>::<normalized-symbol-or-hunk>::<normalized-concern>`) — always copied
+  verbatim from the ledger, never hand-authored. `reason` and `fingerprint` may not contain
+  `|` (the field delimiter); `added` is `YYYY-MM-DD`.
+
+### Recall (Step 0.5 — read side)
+
+If `settings.learn` is true, Step 0.5 reads the file from the **target repo** (the repo being
+reviewed, alongside `.review-council/config.yml`). A missing file is skipped silently — it is
+the normal case, not a warning. Once read, the two sections travel different paths:
+
+- **Conventions** fold into the Step-2 baseline context package, under a "Team Learnings —
+  Conventions" heading — injected **once**, so every reviewer sees it (not re-pasted per
+  dispatch).
+- **Suppressions** are **held**, not injected into any reviewer prompt — they travel forward to
+  the Step-5 judge, which suppresses any surviving finding whose canonical fingerprint matches
+  one and reports `Suppressions applied: N` in the ledger.
+
+### Capture (Step 7 — write side)
+
+After the Step-6 report, if `settings.learn` is true, Step 7 runs a human-confirmed **capture
+gate**: it walks the surviving findings (driven off the Step-5 ledger) and asks the author to
+mark each **tackle** (fixing it — captures nothing), **skip** (with a one-line reason), or
+**skip all**. Only a skip with a **generalizable** reason becomes a learning — a one-off skip
+("not now / out of scope") captures nothing:
+
+- *"this specific finding is a known false positive here"* → a **Suppression**, keyed by the
+  finding's ledger fingerprint (used verbatim).
+- *"we never flag X in this repo"* (a general rule) → a **Convention**.
+- Several skips sharing one general reason this run → propose a single Convention rather than N
+  Suppressions.
+
+Nothing is written until the human explicitly approves the exact entry text. On approval, the
+orchestrator appends one entry per confirmed call via the bundled writer — never by
+hand-formatting the file itself:
+
+```bash
+"${CLAUDE_PLUGIN_ROOT}/scripts/rc-learn.sh" add-suppression "<ledger-fingerprint>" "<reason>"
+"${CLAUDE_PLUGIN_ROOT}/scripts/rc-learn.sh" add-convention  "<one-line rule>"
+```
+
+`rc-learn.sh` creates the file (the skeleton above) if it's absent, appends under the right
+section in the exact format above, and is **idempotent** — re-approving a suppression whose
+fingerprint already exists, or a convention whose normalized (trim + collapse-whitespace +
+lowercase) text already exists, is a safe no-op (stderr note, exit 0). Declining, or
+`settings.learn` being off, writes nothing.
+
+These captured entries are exactly what the **next** run's Step 0.5 recalls — Step 7 writes,
+Step 0.5 reads, closing the loop.
 
 ## Validation & graceful degradation
 

@@ -9,6 +9,7 @@ The council runs a **single** independent review round, then a judge-driven synt
 3. **Refutation (Step 4).** Candidate findings are routed to **fresh, cross-family** verifiers that try to refute each against the actual code (UPHELD / REFUTED / INCONCLUSIVE). Isolated (no verifier sees the synthesis), batched **one subagent per verifier family**, and budget-bounded (see Budget). Gated on `settings.verify`; skipped entirely in solo-Claude mode.
 4. **Judge synthesis (Step 5).** A single active judge computes the canonical fingerprint per finding, dedups across models, recalibrates confidence/severity from the refutation verdicts and cross-family agreement, suppresses learnings matches, and emits a per-finding ledger.
 5. **Report (Step 6).** Severity-first curated output with per-finding agreement **badges**.
+6. **Capture gate (Step 7).** Gated on `settings.learn`; skipped entirely when it is `false`. Record-only — never edits code, never re-runs a reviewer, never changes the report already emitted. Walks the Step-5 ledger with the author (tackle / skip / skip-all), distills a **skip with a generalizable reason** into a Suppression (keyed by the finding's canonical fingerprint, §5.1) or a Convention, and — only once the human explicitly confirms the exact entry text — writes it via `scripts/rc-learn.sh`. This is the write side of the loop whose read side is Step 0.5: what Step 7 writes here, Step 0.5 recalls on the **next** run.
 
 **No Round 2, no Round 3.** The old anchoring "share the synthesis, revise toward it" mechanism is deleted. Genuine unresolved disagreement is **not** a new round — the judge records it as a **Dissenting Opinions** section in the report.
 
@@ -144,7 +145,7 @@ When the orchestrator runs a step that **consumes** an `RC_*` env var — the ti
 | `personas` | `true` | `RC_PERSONAS` | Use reviewer personas when prompting reviewers. |
 | `verify` | `true` | `RC_VERIFY` | Run the verification pass over findings. |
 | `verify_max_findings` | `12` | `RC_VERIFY_CAP` | Cap on findings sent to the verification pass. |
-| `learn` | `true` | `RC_LEARN` | Enable the learning/memory mechanism. |
+| `learn` | `true` | `RC_LEARN` | Enable learnings recall (Step 0.5) and capture (Step 7) — see `rules/config.md` → Learnings. |
 | `min_reviewers` | `2` | `RC_MIN_REVIEWERS` | Minimum participating reviewers for council mode. |
 | `reviewer_timeout_seconds` | `600` | `RC_REVIEWER_TIMEOUT` | Per-invocation wall-clock cap (**seconds**) for CLI/API reviewers. |
 | `run_budget_seconds` | `600` | `RC_RUN_BUDGET` | Total wall-clock budget (**seconds**) for the whole run. |
