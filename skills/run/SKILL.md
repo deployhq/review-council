@@ -82,7 +82,7 @@ Interpret the output (each value is on its own line — read the whole line as t
 
 Reconcile the config (0.1) with detection (0.2):
 
-- **Roster (reviewers).** Drop any provider whose `reviewer.<p>.enabled=false` — it does not participate even if installed. Of the reviewers that remain enabled, those that detection found available make up the participating roster. Config gates the roster; detection gates availability — **both** must pass.
+- **Roster (reviewers).** Drop any provider whose `reviewer.<p>.enabled=false` — it does not participate even if installed. Of the reviewers that remain enabled, those that detection found available make up the participating roster. Config gates the roster; detection gates availability — **both** must pass. **The Google slot counts as ONE reviewer** toward `settings.min_reviewers` no matter how many Google CLIs are installed: it is a single dispatch unit (one `rc-invoke-provider.sh` call → one result), and `agy`↔`gemini` is an internal fallback, **never two reviewers** (see Step 3 → Reviewer: Google).
 - **Models.** Where `reviewer.<p>.model` is non-empty, pass that model to that reviewer's invocation (e.g. the Google slot's model, or the Perplexity model — default `sonar`). An empty model means "use the tool's own default" — pass nothing.
 - **Lens bindings (record for Round 1).** Record each `lens.<l>.enabled` and `lens.<l>.providers` (`auto`, or a comma-joined provider list). The actual lens dispatch lands in **PR 1b** — here you only **read and record** the bindings. Note `lens.security.replaces_dedicated`: when `true`, the pinned `security.providers` *replace* the dedicated security reviewer (do not run both); when `false`, security stays on its default/`auto` path.
 - **Settings.** Load the `settings.*` values for this run and use them wherever the orchestration rules reference a run knob (`min_reviewers`, `reviewer_timeout_seconds`, `run_budget_seconds`, `auto_retry`, etc.). The reader already folded any `RC_*` env override into each value at the correct precedence, so treat each resolved `settings.*` as the **effective** value of its `RC_*` knob. When a later step *consumes* an `RC_*` env var (e.g. the reviewer timeout wrapper), pass that effective value on the invocation — e.g. `RC_REVIEWER_TIMEOUT=<effective settings.reviewer_timeout_seconds> <cli> …` — rather than relying on the ambient environment carrying across separate tool calls. See `rules/orchestration.md` → "Run Settings".
@@ -347,65 +347,61 @@ If `RC_CLAUDE_MAX_TURNS` is set, pass it to the Agent tool as maxTurns, same as 
 
 **IMPORTANT:** Use an `Agent` subagent to invoke Codex. This keeps the full review response out of the orchestrator's context window — only the structured findings return.
 
-Dispatch a `general-purpose` Agent with this prompt:
+Provider dispatch goes through the tested state machine **`scripts/rc-invoke-provider.sh`** — it owns binary resolve, the hard timeout cap, the fast-empty retry, fast-fail auth/quota/overload classification, non-empty + `Findings`/`Overall Assessment` validation, and the attributed `SKIPPED:` line (all frozen and bats-tested). The subagent no longer discovers CLI syntax, hand-builds a `timeout`/`gtimeout`/watchdog wrapper, validates, retries, or classifies — the script does all of it. Codex has **no CLI fallback**, so the fallback positional is the empty string `""`. The **one** thing a shell script can't do is call the `mcp__codex__codex` MCP tool, so that fallback stays in the subagent, gated on the script's SKIPPED note class (soft → try MCP once; hard → don't).
 
-> You are invoking the Codex reviewer for a Review Council review. Your job is to call the Codex CLI, collect its response, and return the structured findings.
+Dispatch a `general-purpose` Agent with this prompt. Pass the resolved Codex CLI path from Step 0.2 (`codex=<path>`); if Codex is **MCP-only** (`codex=none` but the `mcp__codex__codex` tool is available), tell the subagent so — it skips the script and calls MCP directly (see below).
+
+> You are invoking the Codex reviewer for a Review Council review. Codex's CLI path is **`<codex-path>`** (or you were told Codex is MCP-only — jump to "MCP-only mode" below).
 >
-> **Step 1: Discover CLI syntax.** Run `codex --help` and `codex exec --help` to learn the available subcommands and flags. Do NOT assume any specific flags exist — always derive the correct invocation from the help output.
+> **Step 1: Write the delegation prompt** — the lens block (if assigned) plus the §3.1 output contract below — to a temp file, and prepare a stderr capture file:
+> ```bash
+> PF="$(mktemp "${TMPDIR:-/tmp}/rc-codex-prompt.XXXXXX")"; ERR="$(mktemp "${TMPDIR:-/tmp}/rc-codex-err.XXXXXX")"
+> # …write the delegation prompt into "$PF"…
+> ```
 >
-> **Step 2: Invoke Codex.** Write the delegation prompt to `/tmp/rc-codex-prompt.md`, then use the syntax you discovered to run Codex in non-interactive/full-auto mode with the prompt content.
+> **Step 2: Invoke via the script (CLI path), exactly once** — Codex has no fallback, so the second positional is empty:
+> ```bash
+> RC_REVIEWER_TIMEOUT=<effective settings.reviewer_timeout_seconds> \
+>   "${CLAUDE_PLUGIN_ROOT}/scripts/rc-invoke-provider.sh" "<codex-path>" "" "$PF" 2>"$ERR"
+> ```
+> On success the script prints `TOOL: Codex` then the review to **stdout**; on failure a single attributed `SKIPPED: Codex unavailable — codex: <note>` line to **stdout**; and exactly one `ELAPSED: <n>` line (plus free-form notes) to **stderr** (`$ERR`). Do **NOT** re-resolve the binary, wrap it in a timeout, validate the output, retry it, or re-attribute — the script already did all of it. Do not retry the script (its retry is internal and terminal for the slot).
 >
-> **Reliability rules — apply to every CLI call (see `rules/orchestration.md` → "Reviewer Timeouts & Fast-Fail"):**
-> - Cap each invocation so it can never hang forever. Resolve the binary first (it may be `timeout` or, on macOS, `gtimeout`, or absent), then use a portable `if`/`else` (works in bash, sh, and zsh): `TO="$(command -v timeout || command -v gtimeout || true)"` then `if [ -n "$TO" ]; then "$TO" "${RC_REVIEWER_TIMEOUT:-600}" codex …; else <pure-shell watchdog>; fi`. Do NOT use `${TO:+$TO 600}` — it word-splits in bash but not zsh. If **neither** `timeout` nor `gtimeout` exists, do NOT run bare — use the pure-shell watchdog from `rules/orchestration.md` § Reviewer Timeouts (background the call, `kill` it after the budget) so the invocation is still bounded. A non-zero exit (124 timeout / 143 SIGTERM / provider error) = failure.
-> - Do NOT loop with compounding retries. At most ONE retry, and only for a single clearly-transient blip (e.g. one network hiccup).
-> - Fast-fail immediately (return the SKIPPED sentinel, no further retries) when the output or error shows an auth failure (`not authenticated`, login/OAuth errors), a quota/rate cap (HTTP 429, `exhausted your … quota`, `rate limit`), or persistent overload (HTTP 503 / `high demand` past the timeout). A dead provider must fail in minutes, not tens of minutes.
+> **Step 3: Branch on the result:**
+> - Prints **`TOOL: Codex`** → return the script's stdout **verbatim**.
+> - Prints **`SKIPPED:` with a SOFT reason** — the reason text mentions **`timed out`** or **`empty output`** (a transient CLI blip a shell script can't route around) → try the MCP fallback **once**: call `mcp__codex__codex` with the same delegation prompt (`$PF`). On success, return its review prefixed with a `TOOL: Codex` line. On failure, return the script's `SKIPPED:` line **verbatim**.
+> - Prints **`SKIPPED:` with a HARD reason** — the reason text mentions **`auth failure`**, **`quota exhausted`**, or **`overloaded`** → do **NOT** try MCP (retrying a dead auth/quota/overload won't help); return the `SKIPPED:` line **verbatim**.
 >
-> **MCP fallback:** If the CLI call fails for a non-fatal reason (not an auth/quota fast-fail), use the `mcp__codex__codex` tool with the delegation prompt instead.
+> **MCP-only mode** (no CLI path given): skip the script entirely and call `mcp__codex__codex` with the delegation prompt directly. Return its review prefixed with `TOOL: Codex`, or `SKIPPED: Codex unavailable — <reason>` on failure.
 >
-> **If both fail**: Return "SKIPPED: Codex unavailable — [error details]"
+> **Always** append, as the **last line** of what you return, the `ELAPSED:` line captured from `$ERR` (`grep '^ELAPSED:' "$ERR"`), so the orchestrator can meter the run budget (Step 3.5 / Step 4.0). In MCP-only mode (no script ran), append `ELAPSED: notional` instead.
 >
-> **Output contract (the delegation prompt you write in Step 2 already specifies this — preserve it):** Codex's review must have a `Findings` section where **every finding carries all of these fields, by these exact names** — `severity` (critical|important|suggestion), `confidence` (high|medium|low), `location` (`<relpath>:<line>`), `symbol`, `concern` (free-form kebab slug — a HINT only; no fingerprint), `issue`, `why_it_matters`, `recommendation`, `how_to_verify` (a human-runnable check + expected observation), `source` — plus the `What's Good` and `Overall Assessment` sections. Same **what-not-to-flag** rules and **cap policy** (cap suggestions at ~5; **never** cap critical/important), and include the **test-adequacy** line: "Also assess test adequacy: are the change's new/changed behaviors covered by tests, and are the important edge cases tested? Flag material gaps (not trivial coverage)." If a **lens block** was assigned in Step 3, it is already prepended to the delegation prompt — keep it (lens = emphasis, not blinders; still flag any critical outside the lens).
->
-> Return Codex's full structured review output verbatim (Findings with all the fields above, What's Good, Overall Assessment).
+> **§3.1 output contract (write this into `$PF`; preserve it):** Codex's review must have a `Findings` section where **every finding carries all of these fields, by these exact names** — `severity` (critical|important|suggestion), `confidence` (high|medium|low), `location` (`<relpath>:<line>`), `symbol`, `concern` (free-form kebab slug — a HINT only; no fingerprint), `issue`, `why_it_matters`, `recommendation`, `how_to_verify` (a human-runnable check + expected observation), `source` — plus the `What's Good` and `Overall Assessment` sections. Same **what-not-to-flag** rules and **cap policy** (cap suggestions at ~5; **never** cap critical/important), and include the **test-adequacy** line: "Also assess test adequacy: are the change's new/changed behaviors covered by tests, and are the important edge cases tested? Flag material gaps (not trivial coverage)." If a **lens block** was assigned in Step 3, prepend it to the delegation prompt (lens = emphasis, not blinders; still flag any critical outside the lens).
 
 ### Reviewer: Google (Antigravity / Gemini) — If Available
 
-**IMPORTANT:** Use an `Agent` subagent to invoke the Google-family reviewer, same pattern as Codex — keeps the response out of the orchestrator's context. `agy` (Antigravity) and `gemini` share one slot; try `agy` first, fall back to `gemini`.
+**IMPORTANT:** Use an `Agent` subagent to invoke the Google-family reviewer, same pattern as Codex — keeps the response out of the orchestrator's context. `agy` (Antigravity) and `gemini` share **one slot**.
 
-Dispatch a `general-purpose` Agent with this prompt. Pass the ordered tool list resolved in Step 0 — `agy` then `gemini` if both are installed, or whichever single tool is available — **using the resolved paths** from Step 0's detection output (`agy=<path>` and `gemini_fallback=<path>`), not bare command names, so the subagent can invoke each even if its dir isn't on the subagent's `PATH`:
+**Double-vote invariant.** The Google slot is a **single dispatch unit — one script call, one result, counted once; `agy`↔`gemini` is an internal fallback, never two reviewers.** The subagent makes exactly one `rc-invoke-provider.sh` call and returns exactly one `TOOL:`/`SKIPPED:` result; `agy`→`gemini` fallback happens **inside** the script. There is structurally no path for the slot to emit two reviewer rows or count twice toward `settings.min_reviewers` (holds identically in Round 1 and Step 4.3 refutation).
 
-> You are invoking the Google-family reviewer (Antigravity `agy`, with Gemini `gemini` as fallback) for a Review Council review. Your job is to call the CLI, collect its response, and return the structured findings. Try the tools in this order: **[ordered tool list with resolved full paths, e.g. `/Users/you/.local/bin/agy`, then `/Users/you/.nvm/.../bin/gemini`]**. Invoke each tool by the exact full path given here — if a tool isn't found on `PATH`, use the full path provided rather than declaring it unavailable.
+Provider dispatch goes through the tested state machine **`scripts/rc-invoke-provider.sh`** — it owns every clause the old prose spelled out: binary resolve (by resolved path, not `PATH`), the hard timeout cap, `agy`'s unit-suffixed `--print-timeout "${cap}s"` (the bare-integer `missing unit in duration` bug is pinned inside), the **one** `agy` fast-empty retry (time-boxed to the remaining budget), `agy`→`gemini` fallback (fresh full budget, no fallback retry), fast-fail auth/quota/overload classification, the heading-anchored non-empty + `Findings`/`Overall Assessment` validation, and the `SKIPPED:` attribution that **leads with `agy`** whenever it was primary — six bug-fix commits' worth of edge cases. The subagent no longer resolves binaries, builds timeouts, validates, retries, or re-attributes; it never re-runs the script (its retry/fallback is internal and **terminal for the slot**).
+
+Dispatch a `general-purpose` Agent with this prompt. Pass the **resolved paths** from Step 0.2 detection — `agy=<path>` as the **primary** positional and `gemini_fallback=<path>` as the **fallback** positional (use `""` for the fallback when there is none; a `gemini`-only slot passes its `gemini=<path>` as the *primary* and `""` as the fallback). Pass the effective `settings.reviewer_timeout_seconds` as `RC_REVIEWER_TIMEOUT`, and — when Step 0 resolved them — the Google model as `RC_GOOGLE_MODEL` and the repo path as `RC_GOOGLE_ADD_DIR`, **on the invocation** (these are the only Google env passthroughs the script reads):
+
+> You are invoking the Google-family reviewer (Antigravity `agy` primary, Gemini `gemini` fallback) for a Review Council review. Write the delegation prompt — the lens block (if assigned) plus the §3.1 output contract below — to a temp file, and prepare a stderr capture file:
+> ```bash
+> PF="$(mktemp "${TMPDIR:-/tmp}/rc-google-prompt.XXXXXX")"; ERR="$(mktemp "${TMPDIR:-/tmp}/rc-google-err.XXXXXX")"
+> # …write the delegation prompt into "$PF"…
+> ```
 >
-> For each tool in order:
+> Then run the script **exactly once**:
+> ```bash
+> RC_REVIEWER_TIMEOUT=<effective settings.reviewer_timeout_seconds> \
+> [RC_GOOGLE_MODEL=<model>] [RC_GOOGLE_ADD_DIR=<repo>] \
+>   "${CLAUDE_PLUGIN_ROOT}/scripts/rc-invoke-provider.sh" "<agy-path>" "<gemini-path-or-empty>" "$PF" 2>"$ERR"
+> ```
+> Return its **stdout verbatim** — it is already `TOOL: Antigravity` (for `agy`) / `TOOL: Gemini` (for `gemini`) followed by the review, or a correctly-attributed single `SKIPPED:` line (e.g. `SKIPPED: Google (Antigravity) unavailable — agy: empty output after retry; gemini fallback: ineligible (auth/DASHER)`). Do **NOT** reword it, re-attribute it, validate it, or retry it — the script's retry/fallback is internal and **terminal for the slot** (do not let Step 3.5 re-run it). Then append, as the **last line**, the `ELAPSED:` line captured from `$ERR` (`grep '^ELAPSED:' "$ERR"`), so the orchestrator can meter the run budget (Step 3.5 / Step 4.0).
 >
-> **Step 1: Discover CLI syntax.** Run `<tool> --help` to learn the available subcommands and flags. Do NOT assume any specific flags exist — always derive the correct invocation from the help output. (Hints verified against agy 1.0.16–1.1.0: `agy -p "<prompt>"` runs one prompt non-interactively and prints the response; optional `--add-dir <repo>`, `--model <name>`, and `--dangerously-skip-permissions` to avoid blocking on approvals in a non-TTY. `gemini` uses `gemini -p "<prompt>"` and may need `--skip-trust` or `GEMINI_CLI_TRUST_WORKSPACE=true` for headless/non-TTY runs.)
->
-> **Give `agy` room for a cold start — this is the "more time" it needs.** `agy`'s **first** `-p` call in a session pays a cold-start cost (model load, auth handshake, update check) and can legitimately take **several minutes** (a warm call is ~10s). Two caps apply to it and BOTH must cover the budget, or the cold start is truncated:
-> - The outer wrapper cap = `${RC_REVIEWER_TIMEOUT:-600}` (10 min default).
-> - agy's **own** `--print-timeout`, which defaults to **just 5 minutes**. You MUST pass it sized to the budget — but its value is a **Go duration string that needs a unit suffix**: a bare integer is rejected (`agy --print-timeout 600` → exit 2, `missing unit in duration "600"`, which kills the primary Google reviewer instantly). `RC_REVIEWER_TIMEOUT` is in **seconds**, so append `s`: `--print-timeout "${RC_REVIEWER_TIMEOUT:-600}s"` (or a literal like `10m`) — never a bare `--print-timeout 600`. Not optional: without it agy cuts itself off at 5m before the wrapper and a slow cold start looks like a failure.
->
-> Treat multi-minute latency on the first `agy` call as **normal, not a hang** — do not fast-fail it for being slow. (Only auth/quota errors fast-fail; see below.)
->
-> **Step 2: Invoke the tool.** Write the delegation prompt to `/tmp/rc-google-prompt.md`, then use the syntax you discovered to run the tool in non-interactive mode with the prompt content and text output.
->
-> **Reliability rules — apply to every CLI call (see `rules/orchestration.md` → "Reviewer Timeouts & Fast-Fail"):**
-> - Cap each invocation so it can never hang forever. Resolve the binary first (it may be `timeout` or, on macOS, `gtimeout`, or absent), then use a portable `if`/`else` (works in bash, sh, and zsh): `TO="$(command -v timeout || command -v gtimeout || true)"` then `if [ -n "$TO" ]; then "$TO" "${RC_REVIEWER_TIMEOUT:-600}" <tool> …; else <pure-shell watchdog>; fi`. Do NOT use `${TO:+$TO 600}` — it word-splits in bash but not zsh. If **neither** `timeout` nor `gtimeout` exists, do NOT run bare — use the pure-shell watchdog from `rules/orchestration.md` § Reviewer Timeouts (background the call, `kill` it after the budget) so the invocation is still bounded. A non-zero exit (124 timeout / 143 SIGTERM / provider error) = failure.
-> - Do NOT loop with compounding retries. At most ONE retry per tool, and only for a single clearly-transient blip (e.g. one network hiccup). Do NOT chase a provider's own model auto-fallback across many backoff attempts.
-> - Fast-fail a tool immediately (move to the next tool, no further retries) when the output or error shows an auth failure (`no longer supported`, `not authenticated`, `please migrate to the Antigravity`, `secret keyring is locked`), a quota/rate cap (HTTP 429, `exhausted your daily quota`, `TerminalQuotaError`, `rate limit`), or persistent overload (HTTP 503 / `high demand` past the timeout). A dead provider must fail in minutes, not tens of minutes.
->
-> **Step 3: Validate the output before accepting it.** A tool counts as successful ONLY if it returned **non-empty** text containing a real `Findings` section (and `Overall Assessment`). Note: `agy -p` can exit **0 while printing nothing** in a non-TTY subprocess — so a zero exit code is not sufficient. Empty or malformed output is a **failure**, not a clean review.
->
-> **Step 4: Retry `agy` once (only if it failed *fast*), THEN fall back — this ordering is the whole point.** A transient `agy` blip must never be masked by a `gemini` that cannot succeed, but the retry must never turn into a runaway. Concretely:
-> - Retry `agy` ONCE **only when the empty/malformed result came back quickly** — as a rule of thumb, in under ~⅓ of the budget (e.g. < ~2 min of a 10 min cap). That fast-empty is the exit-0-no-stdout cold-start quirk, and the warm retry almost always succeeds. **Time-box the retry to the *remaining* budget, not a fresh `RC_REVIEWER_TIMEOUT`**, so first-try + retry together can never exceed one budget. This is the single allowed retry for `agy`.
-> - Do **NOT** retry — move straight to the fallback — when the empty result arrived **near the cap** (a slow call that completed but printed nothing: treat it exactly like a timeout — a second full attempt would nearly double the wall-clock), or when `agy` **timed out** (rc 124/143), is **absent**, or **hard-failed** (auth/quota fast-fail — retrying won't help). Never retry a tool that hard-failed on auth/quota.
-> - **This is a terminal outcome for the slot.** Once you've done the one allowed `agy` retry (or skipped it per the rule above) and, if needed, tried `gemini`, the Google reviewer's result — success or `SKIPPED` — is **final for this round**. Do not let the orchestrator's Step 3.5 reviewer-level retry re-run it (see Step 3.5: the Google slot is not eligible for external retry once its internal retry/fallback is exhausted).
-> - **`gemini` is a dead end for Workspace/Dasher accounts:** `gemini -p` fast-fails near-instantly with `IneligibleTierError` (`reasonCode: DASHER_USER`, "not eligible for Gemini Code Assist for individuals") for any Google Workspace-domain account and any account without a `GEMINI_API_KEY`/Vertex/enterprise license. Treat that as the slot being unavailable — it is expected, not a bug to retry.
->
-> **Output contract (the delegation prompt you write in Step 2 already specifies this — preserve it):** the review must have a `Findings` section where **every finding carries all of these fields, by these exact names** — `severity` (critical|important|suggestion), `confidence` (high|medium|low), `location` (`<relpath>:<line>`), `symbol`, `concern` (free-form kebab slug — a HINT only; no fingerprint), `issue`, `why_it_matters`, `recommendation`, `how_to_verify` (a human-runnable check + expected observation), `source` — plus the `What's Good` and `Overall Assessment` sections. Same **what-not-to-flag** rules and **cap policy** (cap suggestions at ~5; **never** cap critical/important), and include the **test-adequacy** line: "Also assess test adequacy: are the change's new/changed behaviors covered by tests, and are the important edge cases tested? Flag material gaps (not trivial coverage)." If a **lens block** was assigned in Step 3, it is already prepended to the delegation prompt — keep it (lens = emphasis, not blinders; still flag any critical outside the lens).
->
-> **On success:** Return the full structured review output (Findings with all the fields above, What's Good, Overall Assessment), and note which tool produced it — prefix your answer with `TOOL: Antigravity` (for `agy`) or `TOOL: Gemini` (for `gemini`).
->
-> **If every tool fails**: Return a SKIPPED message attributed to the **primary** tool, with a per-tool status — e.g. "SKIPPED: Google (Antigravity) unavailable — agy: empty output after retry; gemini fallback: ineligible (Workspace/Dasher account, IneligibleTierError)". Lead with `agy` whenever it was installed. Do **NOT** report the slot as a bare "Gemini auth failure" when `agy` was the intended reviewer — that misleads a user whose `agy` works fine interactively.
+> **§3.1 output contract (write this into `$PF`; preserve it):** the review must have a `Findings` section where **every finding carries all of these fields, by these exact names** — `severity` (critical|important|suggestion), `confidence` (high|medium|low), `location` (`<relpath>:<line>`), `symbol`, `concern` (free-form kebab slug — a HINT only; no fingerprint), `issue`, `why_it_matters`, `recommendation`, `how_to_verify` (a human-runnable check + expected observation), `source` — plus the `What's Good` and `Overall Assessment` sections. Same **what-not-to-flag** rules and **cap policy** (cap suggestions at ~5; **never** cap critical/important), and include the **test-adequacy** line: "Also assess test adequacy: are the change's new/changed behaviors covered by tests, and are the important edge cases tested? Flag material gaps (not trivial coverage)." If a **lens block** was assigned in Step 3, prepend it to the delegation prompt (lens = emphasis, not blinders; still flag any critical outside the lens).
 
 ### Reviewer: Perplexity — If Available
 
@@ -423,13 +419,15 @@ Dispatch a `general-purpose` Agent with this prompt:
 >   > /tmp/rc-perplexity-payload.json
 > ```
 >
-> **Step 2: Call the API:**
+> **Step 2: Call the API (measure elapsed around the curl for the run budget).** Perplexity stays an inline `curl` path — it is **not** routed through `rc-invoke-provider.sh` (the script is CLI-only: a binary to resolve + exit/stderr classification, whereas Perplexity is an HTTP API with an HTTP-status failure taxonomy). To still feed the Step-4.0 budget long pole, measure its wall-clock with `date` around the curl:
 > ```bash
+> RC_START=$(date +%s)
 > curl -fsS --max-time "${RC_REVIEWER_TIMEOUT:-600}" https://api.perplexity.ai/v1/chat/completions \
 >   -H "Authorization: Bearer $PERPLEXITY_API_KEY" \
 >   -H "Content-Type: application/json" \
 >   -d @/tmp/rc-perplexity-payload.json \
 >   -o /tmp/rc-perplexity-response.json
+> RC_ELAPSED=$(( $(date +%s) - RC_START ))
 > ```
 > Note: `-f` makes `curl` exit non-zero (22) on any HTTP 4xx/5xx without exposing the status code. Treat any such failure as terminal — fast-fail (return SKIPPED, no retry), do not loop. Perplexity has no fallback tool, so there's nothing to gain from distinguishing 401/403/429 from other errors. (If you ever need the exact status, capture it with `-w '%{http_code}'` and drop `-f`.)
 >
@@ -442,7 +440,7 @@ Dispatch a `general-purpose` Agent with this prompt:
 >
 > **Output contract (the `$PROMPT` delegation text in Step 1 already specifies this — preserve it):** the review must have a `Findings` section where **every finding carries all of these fields, by these exact names** — `severity` (critical|important|suggestion), `confidence` (high|medium|low), `location` (`<relpath>:<line>`), `symbol`, `concern` (free-form kebab slug — a HINT only; no fingerprint), `issue`, `why_it_matters`, `recommendation`, `how_to_verify` (a human-runnable check + expected observation), `source` — plus the `What's Good` and `Overall Assessment` sections. Same **what-not-to-flag** rules and **cap policy** (cap suggestions at ~5; **never** cap critical/important), and include the **test-adequacy** line: "Also assess test adequacy: are the change's new/changed behaviors covered by tests, and are the important edge cases tested? Flag material gaps (not trivial coverage)." As the diff-only **Dependency / CVE / best-practices** reviewer, Perplexity's lens block is already prepended to `$PROMPT` (lens = emphasis, not blinders; still flag any critical outside the lens).
 >
-> Return the full structured review output verbatim (Findings with all the fields above, What's Good, Overall Assessment).
+> Return the full structured review output verbatim (Findings with all the fields above, What's Good, Overall Assessment). Then append, as the **last line** of what you return, `ELAPSED: <RC_ELAPSED>` (the measured curl seconds from Step 2) so the orchestrator can meter the run budget — the same closure the CLI reviewers get, done inline (Perplexity uses this `date` measurement rather than the shared script; see `rules/orchestration.md` → Budget). Append the same `ELAPSED: <RC_ELAPSED>` line even on a SKIPPED (curl/jq failure); if the failure occurred before the curl ran, append `ELAPSED: notional` instead.
 
 ### Delegation Prompt
 
@@ -451,6 +449,8 @@ For **all** reviewers (including Claude and Security), use the delegation format
 ## Step 3.5: Well-formed Check & Recover
 
 **Join barrier — wait for the whole fleet before proceeding.** First, wait until **every** reviewer dispatched in Step 3 has **returned** (each is bounded by `RC_REVIEWER_TIMEOUT`, so a stuck reviewer times out rather than blocking forever — a reviewer *still running* is not the same as one that *failed*). Do NOT begin the well-formed check, and do NOT proceed to the refutation pass, with only a subset of reviewers back. Collect all Round-1 results first, then run the checks below over the full set.
+
+**Parse each reviewer's measured elapsed.** Every CLI/API reviewer subagent (Codex, Google, Perplexity) returns a trailing **`ELAPSED: <n>`** line — the whole seconds `rc-invoke-provider.sh` measured (Codex/Google) or the inline `date` delta around the curl (Perplexity). As you collect each Round-1 result, read that last line and record the reviewer's `elapsed: <n> (measured)`. If the line is **missing** or reads **`ELAPSED: notional`** (an MCP-only Codex, or a reviewer that failed before reaching its transport), record `elapsed: notional` so a missing measurement is **visible**, never silently zeroed. The native `reviewer-claude` / `reviewer-security` subagents don't emit a CLI-measured number — record them `elapsed: notional (maxTurns-bounded)`. The **max** of the *measured* values is the Round-1 long pole the Step-4.0 budget gate keys on (§4.0).
 
 Before the refutation pass, validate that each reviewer's output is **well-formed** — a **structural** check (required sections present; finding fields present and in-enum), NOT a truth check of whether any finding is correct. Refer to `rules/orchestration.md` → Output Validation for full rules.
 
@@ -510,7 +510,7 @@ If `settings.verify` is true, apply these gates and rules **in order**.
 ### 4.0 Skip gates (check first, before any routing)
 
 1. **Solo-Claude mode** — if only Claude-family reviewers (Claude + the dedicated Security reviewer) are available — i.e. no different-family reviewer to cross-verify against — **skip refutation entirely**. Tag every finding `[1 reviewer · unverified]` and go to Step 5. Do NOT self-verify with another Claude spawn — one model refuting itself is correlated-error theatre, not cross-family evidence.
-2. **Budget check FIRST (see `rules/orchestration.md` → Budget).** Because Round-1 reviewers run **concurrently**, the elapsed cost so far is the **long pole** — the **maximum** measured elapsed any single Round-1 CLI invocation reported (e.g. `agy`'s cold start) — **not** the arithmetic sum of all of them (they overlapped in wall-clock), and not a stopwatch you watch. *(Native subagents don't report CLI-measured elapsed yet — that wiring lands in Phase 4; until then treat their time as covered by the CLI long pole rather than adding a guessed number.)* If that long-pole elapsed has already reached `settings.run_budget_seconds`, **skip refutation**: tag all findings `[unverified]`, print `stopped at budget: <n>s`, and go straight to Step 5. Never hard-abort — degrade.
+2. **Budget check FIRST (see `rules/orchestration.md` → Budget).** Because Round-1 reviewers run **concurrently**, the elapsed cost so far is the **long pole** — the **maximum** measured elapsed any single Round-1 CLI/API invocation reported (e.g. `agy`'s cold start), parsed from the trailing `ELAPSED:` lines at the Step-3.5 join barrier — **not** the arithmetic sum of all of them (they overlapped in wall-clock), and not a stopwatch you watch. *(Each CLI/API reviewer returns its measured `ELAPSED`; the long pole is the max of those. Native Claude/Security subagents still don't emit a CLI-measured number — they are bounded by `maxTurns` (`settings.claude_max_turns`, Task 4.6) and, being local, are rarely the long pole, so the budget keys on the measured CLI/API max per §3.8.)* If that long-pole elapsed has already reached `settings.run_budget_seconds`, **skip refutation**: tag all findings `[unverified]`, print `stopped at budget: <n>s`, and go straight to Step 5. Never hard-abort — degrade.
 
 If neither gate fires, run the pass.
 
@@ -544,8 +544,8 @@ Refutation routing (verify cap 12):
 **Batch by verifier family:** spawn exactly **one fresh Agent per verifier family**, handing it **all** the findings routed to that family (isolation only requires hiding the synthesis, not a spawn per finding). Each subagent gets the **Refutation Template** (`rules/delegation-format.md`) with its assigned findings pasted in and the baseline context — but **NOT** any other reviewer's output or any synthesis.
 
 - **Claude-fresh** → a new `reviewer-claude` Agent (Read/Glob/Grep), refutation prompt only.
-- **Codex** → a `general-purpose` Agent that invokes the Codex CLI with the refutation prompt (same transport + reliability rules as Round 1).
-- **Google** → a `general-purpose` Agent that invokes `agy`→`gemini` with the refutation prompt (same transport + reliability rules as Round 1).
+- **Codex** → a `general-purpose` Agent that dispatches Codex through the **same collapsed pattern as Round 1** (see §Reviewer: Codex) — write the refutation prompt to `$PF`, call `"${CLAUDE_PLUGIN_ROOT}/scripts/rc-invoke-provider.sh" "<codex-path>" "" "$PF" 2>"$ERR"`, keep the soft-SKIPPED→`mcp__codex__codex`-once fallback, and append the trailing `ELAPSED:` line so a slow verifier also feeds the budget. No separate machinery — the script owns transport + reliability by reference.
+- **Google** → a `general-purpose` Agent that dispatches the Google slot through the **same collapsed pattern as Round 1** (see §Reviewer: Google) — write the refutation prompt to `$PF`, call `"${CLAUDE_PLUGIN_ROOT}/scripts/rc-invoke-provider.sh" "<agy-path>" "<gemini-path-or-empty>" "$PF" 2>"$ERR"` **once** (`agy`→`gemini` fallback is internal; the slot stays one dispatch unit, one result), and append the trailing `ELAPSED:` line.
 
 **Hard rule: a verdict is only valid from a fresh Agent spawn.** If no verifier subagent actually ran for a finding (over the cap, no eligible different family, a verifier that SKIPPED/failed, or budget-degraded), that finding is **`[unverified]`** — it is **NOT** refuted. Absence of a spawn never means REFUTED.
 
