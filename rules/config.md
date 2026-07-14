@@ -113,8 +113,15 @@ settings:
 | `settings.reviewer_timeout_seconds` | `600` | `RC_REVIEWER_TIMEOUT` | Per-invocation wall-clock cap (seconds) for CLI/API reviewers. |
 | `settings.run_budget_seconds` | `600` | `RC_RUN_BUDGET` | Total wall-clock budget (seconds) for the whole run. |
 | `settings.auto_retry` | `false` | `RC_AUTO_RETRY` | Retry failed reviewers without prompting (CI-friendly). |
+| `settings.health_probe` | `true` | `RC_HEALTH_PROBE` | Run a Step-0 health probe per provider so `available`/`min_reviewers` reflect *usable*, not merely installed. |
+| `settings.health_probe_timeout_seconds` | `20` | `RC_HEALTH_PROBE_TIMEOUT` | Short wall-clock cap (seconds) for each health probe. |
+| `settings.max_context_bytes` | `400000` | `RC_MAX_CONTEXT_BYTES` | Context-size cap (bytes, ~100k tokens) on the shared Step-2 baseline package; triggers the reduction ladder above it. |
+| `settings.max_run_tokens` | `0` | `RC_MAX_RUN_TOKENS` | Soft per-run token estimate ceiling; `0` disables the check (opt-in). |
+| `settings.claude_max_turns` | `30` | `RC_CLAUDE_MAX_TURNS` | Turn budget for the native Claude/Security reviewer subagents (today's shipped default; tighten via config to cap local cost). |
 
-Booleans must be `true`/`false`; the four numeric knobs must be positive integers.
+Booleans must be `true`/`false`; the numeric knobs must be positive integers (`settings.max_run_tokens`'s
+`0` default means "disabled" but is a hardcoded default, not a settable override — like the other
+`posint` knobs, an explicit override value must be a positive integer).
 
 ## `static_analysis:` block
 
@@ -328,14 +335,19 @@ uncomment only what you want to change.
 #     # providers: [perplexity]         # default when omitted -> [perplexity]
 
 # settings:                      # run knobs (each also settable via its RC_* env var, which wins)
-#   personas:                 true     # RC_PERSONAS
-#   verify:                   true     # RC_VERIFY
-#   verify_max_findings:      12       # RC_VERIFY_CAP
-#   learn:                    true     # RC_LEARN
-#   min_reviewers:            2        # RC_MIN_REVIEWERS
-#   reviewer_timeout_seconds: 600      # RC_REVIEWER_TIMEOUT
-#   run_budget_seconds:       600      # RC_RUN_BUDGET
-#   auto_retry:               false    # RC_AUTO_RETRY
+#   personas:                     true     # RC_PERSONAS
+#   verify:                       true     # RC_VERIFY
+#   verify_max_findings:          12       # RC_VERIFY_CAP
+#   learn:                        true     # RC_LEARN
+#   min_reviewers:                2        # RC_MIN_REVIEWERS
+#   reviewer_timeout_seconds:     600      # RC_REVIEWER_TIMEOUT
+#   run_budget_seconds:           600      # RC_RUN_BUDGET
+#   auto_retry:                   false    # RC_AUTO_RETRY
+#   health_probe:                 true     # RC_HEALTH_PROBE
+#   health_probe_timeout_seconds: 20       # RC_HEALTH_PROBE_TIMEOUT
+#   max_context_bytes:            400000   # RC_MAX_CONTEXT_BYTES
+#   max_run_tokens:               0        # RC_MAX_RUN_TOKENS (0 = disabled)
+#   claude_max_turns:             30       # RC_CLAUDE_MAX_TURNS
 
 # static_analysis:               # deterministic tool layer (each also settable via its RC_* env var, which wins)
 #   enabled: true                    # RC_STATIC_ANALYSIS
