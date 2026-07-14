@@ -58,12 +58,19 @@ The output must contain:
 
 ### Field-Level Validation
 
-Each finding must include:
-- **Severity** (critical/important/suggestion)
-- **Location** (file:line or section reference)
-- **Recommendation** (concrete fix or alternative)
+This is a **structural** check (fields present **and, where the schema constrains them, valid**) — not a truth/quality check. Each finding must include these fields, using the exact names from the finding schema in `rules/delegation-format.md`:
+- **severity** — must be exactly one of `critical`, `important`, `suggestion`
+- **confidence** — must be exactly one of `high`, `medium`, `low`
+- **location** — a resolvable `path:line` (or a clear section/hunk) reference
+- **symbol** — enclosing function/class/section ("N/A" is an acceptable value when none applies)
+- **concern** — free-form hint slug (any non-empty value passes; it is a hint, not a validated fingerprint)
+- **issue** — one sentence describing what's wrong
+- **why_it_matters** — impact if unaddressed
+- **recommendation** — concrete fix or alternative
+- **how_to_verify** — a concrete, human-runnable check (command/input/trace) + expected observation
+- **source** — reviewer id
 
-Findings missing any required field mark the entire reviewer output as FAILED.
+A finding that is **missing any required field** — or that carries an **out-of-enum `severity`/`confidence`** (e.g. `severity: typo`, `confidence: certain`) or a `location` that isn't a resolvable `path:line`/section reference — marks the entire reviewer output as FAILED. Invalid values are rejected, not just absent ones. (A fixture asserting that malformed values produce FAILED is added with the Phase-1 fixture harness in PR 1c.)
 
 ### Outcomes
 
