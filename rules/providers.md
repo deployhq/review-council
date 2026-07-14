@@ -72,7 +72,7 @@ Backward-compatible Google reviewer. Note: Gemini CLI's consumer "Sign in with G
 ## Runtime Rules
 
 1. Probe all providers at review start
-2. Minimum 2 available for convergence mode; 1 = single-reviewer mode
+2. Minimum 2 available for council mode; 1 = single-reviewer mode
 3. Report header shows availability: `Reviewers: Claude, Codex, Google (Antigravity) (3 participating — Perplexity: PERPLEXITY_API_KEY not set)`
 4. Transport fallback: CLI first, then MCP, then skip
 5. Never block a review because a provider is unavailable

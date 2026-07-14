@@ -1,0 +1,11 @@
+# Fixture data for the `config` Tier-2 fixture — NOT a real project config.
+# Team defaults layer (`config.yml`). See tests/fixtures/config/README.md.
+
+settings:
+  verify: false        # expect: overridden by config.local.yml (below) -> true
+  min_reviewers: 3      # expect: NOT overridden locally -> stays 3 (beats default 2)
+
+lenses:
+  security:
+    providers: [google]  # expect: pin survives -> lens.security.providers=google
+                          #         and lens.security.replaces_dedicated=true

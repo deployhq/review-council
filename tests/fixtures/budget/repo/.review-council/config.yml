@@ -1,0 +1,17 @@
+# Fixture data for the `budget` Tier-2 fixture — NOT a real project config.
+#
+# A tiny `run_budget_seconds` guarantees the budget is already spent by the
+# time Step 4 (refutation) does its "Budget check FIRST" (§budget in the
+# shared spec) — Round 1 alone takes far longer than 1 second, so this
+# forces the degrade path deterministically, regardless of machine speed or
+# which reviewers are installed.
+#
+# Deliberately does NOT also disable codex/google/perplexity (contrast with
+# the `solo` fixture): the intent is to isolate the BUDGET-exhausted skip
+# path from the SOLO-mode skip path. Caveat: if your machine also happens to
+# have no other reviewers installed, this fixture's roster collapses to
+# solo too — the `stopped at budget: <n>s` marker is what confirms budget
+# (not solo) actually caused the skip in that case. See README.md.
+
+settings:
+  run_budget_seconds: 1

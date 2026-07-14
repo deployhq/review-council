@@ -89,27 +89,30 @@ Different models have different defaults for verbosity, structure, and focus. Th
 - Makes deduplication possible across reviewers
 - Gives every reviewer the same structured methodology, not just the same constraints
 
-## Round 2 — Revision Template
+## Refutation Template (Step 4)
 
-When the orchestrator triggers a second round, send this to each provider along with the original context and Round 1 synthesis:
+The refutation pass (Step 4 of `skills/run/SKILL.md`) replaces the old anchoring "share the synthesis, revise toward it" round. Instead of showing a reviewer the merged result and asking it to converge, the orchestrator hands candidate findings to a **fresh, cross-family** verifier that has **never seen** any other reviewer's output or any synthesis, and asks it to try to **refute** each finding against the actual code. That isolation is the whole point: an UPHELD is then independent corroboration, and a REFUTED is a genuine counter-finding — neither is social agreement with a shown conclusion.
+
+Send this block, with the assigned findings pasted in (each given a short `<finding-id>` so verdicts map back):
 
 ```
-## ROUND 2 — REVISION
+## REFUTATION
 
-Other reviewers independently reviewed the same material. Here is the synthesized result from Round 1:
+Here are the candidate findings assigned to you. You are NOT shown any other reviewer's output or any synthesis — judge each finding only against the actual code.
 
-[Insert synthesis: agreed findings, unique findings, conflicts]
+For each finding, try to **REFUTE** it: Read/Grep the cited `location`, trace the enclosing `symbol` and its callers/callees, and gather evidence about whether the concern is real. Return exactly one verdict per finding, citing the specific line or traced symbol as evidence:
 
-Please:
-1. Confirm or revise your original findings — retain original `location` (and `symbol`) anchors for traceability
-2. For conflicts — explain your reasoning or concede if another reviewer's point is valid
-3. Flag any new concerns you missed that other reviewers caught
-4. Drop any findings you now consider less important after seeing the full picture
+- **UPHELD** — you found positive supporting evidence that the finding is real (cite the line / traced symbol).
+- **REFUTED** — you found positive **counter-evidence** that it is NOT a bug (cite it — e.g. the guard that already handles the case, the caller that never passes null).
+- **INCONCLUSIVE** — you lack the means to decide (e.g. it's a runtime/race condition you cannot execute here, or the needed context isn't in reach).
 
-Use the same output format as Round 1 (see OUTPUT FORMAT above). Keep original `location` values stable so the orchestrator can track findings across rounds.
+Do **NOT** default to REFUTED — absence of proof is **INCONCLUSIVE**, never REFUTED. Only positive counter-evidence is REFUTED.
+
+Return one line per finding:
+  <finding-id> | UPHELD | REFUTED | INCONCLUSIVE — <one-sentence evidence, with the cited location>
 ```
 
-(The confirm/revise/rebut mechanics above are a placeholder — the actual refutation pass is designed in PR 1c.)
+This pass is **isolated per verifier**: each verifier sees only the findings routed to it, plus the baseline context — never the full council output. The orchestrator batches all findings routed to a given family into **one** fresh subagent (see Step 4). A verdict is only valid from a fresh Agent spawn; a finding with no spawn is `[unverified]`, not refuted.
 
 ## Adding New Providers
 

@@ -103,6 +103,7 @@ Review Council — Provider Status
 
 Reviewers:
   - Claude (native) ........... always available
+  - Security (native, dedicated) available by default (see note below)
   - Codex ..................... [available (CLI) | available (MCP) | not found]
   - Google (agy / gemini) ..... [available (agy → gemini) | available (Antigravity) | available (Gemini) | not found]
   - Perplexity ............... [available (API) | not configured]
@@ -113,7 +114,9 @@ Prerequisites:
 Optional:
   - Config files (yq) ......... [available (mikefarah v4 detected) | installed just now (mikefarah v4) | wrong yq — need mikefarah/yq v4 | not installed (using defaults + RC_* env)]
 
-[N] of 4 reviewer slots available. [Convergence mode ready. | Single-reviewer mode — install at least one additional provider.]
+Note: Claude is always available; the dedicated Security reviewer runs by default, but pinning lenses.security.providers in .review-council/config.yml replaces it with the named providers (see rules/config.md) — so it is available by default, not unconditionally. Both are the same model family (Claude), so council mode and the refutation pass still need at least one reviewer from a DIFFERENT family (Codex, Google, or Perplexity) to cross-verify against.
+
+[N] of 3 different-family reviewers available (Codex, Google, Perplexity). Council mode needs the effective roster (Claude + the dedicated Security reviewer + every enabled and available provider, after any config disables) to reach settings.min_reviewers (default 2) AND include at least one different family. [Council mode ready. | Single-reviewer mode — effective roster below min_reviewers, or no different-family reviewer.]
 
 (Antigravity and Gemini share the Google slot — `agy` preferred, `gemini` fallback — so they count as one reviewer, not two.)
 
