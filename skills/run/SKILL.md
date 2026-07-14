@@ -213,7 +213,7 @@ Carry this line into the Step-6 report header. If Step 2.5 was skipped (disabled
 
 ## Step 3: Round 1 — Independent Review (Parallel)
 
-Launch **all available reviewers in parallel**. They must not see each other's output — this ensures truly independent perspectives.
+Launch **all available reviewers in parallel** — emit **every** reviewer's `Agent` call in a **single message** so they all run concurrently. Do **NOT** dispatch a subset and add the rest in a later message: partial batching serializes the fan-out and throws away the wall-clock savings (the slow reviewer, e.g. `agy`'s cold start, should overlap the others, not follow them). The whole fleet goes out at once. They must not see each other's output — this ensures truly independent perspectives.
 
 ### Lens Assignment (before dispatching)
 
@@ -450,6 +450,8 @@ For **all** reviewers (including Claude and Security), use the delegation format
 
 ## Step 3.5: Well-formed Check & Recover
 
+**Join barrier — wait for the whole fleet before proceeding.** First, wait until **every** reviewer dispatched in Step 3 has **returned** (each is bounded by `RC_REVIEWER_TIMEOUT`, so a stuck reviewer times out rather than blocking forever — a reviewer *still running* is not the same as one that *failed*). Do NOT begin the well-formed check, and do NOT proceed to the refutation pass, with only a subset of reviewers back. Collect all Round-1 results first, then run the checks below over the full set.
+
 Before the refutation pass, validate that each reviewer's output is **well-formed** — a **structural** check (required sections present; finding fields present and in-enum), NOT a truth check of whether any finding is correct. Refer to `rules/orchestration.md` → Output Validation for full rules.
 
 ### Validate
@@ -508,7 +510,7 @@ If `settings.verify` is true, apply these gates and rules **in order**.
 ### 4.0 Skip gates (check first, before any routing)
 
 1. **Solo-Claude mode** — if only Claude-family reviewers (Claude + the dedicated Security reviewer) are available — i.e. no different-family reviewer to cross-verify against — **skip refutation entirely**. Tag every finding `[1 reviewer · unverified]` and go to Step 5. Do NOT self-verify with another Claude spawn — one model refuting itself is correlated-error theatre, not cross-family evidence.
-2. **Budget check FIRST (see `rules/orchestration.md` → Budget).** Sum the **measured elapsed** the Round-1 CLI invocations reported (the CLI long pole — e.g. `agy`'s cold start; not a stopwatch you watch). If that sum has already reached `settings.run_budget_seconds`, **skip refutation**: tag all findings `[unverified]`, print `stopped at budget: <n>s`, and go straight to Step 5. Never hard-abort — degrade.
+2. **Budget check FIRST (see `rules/orchestration.md` → Budget).** Because Round-1 reviewers run **concurrently**, the elapsed cost so far is the **long pole** — the **maximum** measured elapsed any single Round-1 CLI invocation reported (e.g. `agy`'s cold start) — **not** the arithmetic sum of all of them (they overlapped in wall-clock), and not a stopwatch you watch. *(Native subagents don't report CLI-measured elapsed yet — that wiring lands in Phase 4; until then treat their time as covered by the CLI long pole rather than adding a guessed number.)* If that long-pole elapsed has already reached `settings.run_budget_seconds`, **skip refutation**: tag all findings `[unverified]`, print `stopped at budget: <n>s`, and go straight to Step 5. Never hard-abort — degrade.
 
 If neither gate fires, run the pass.
 
@@ -621,6 +623,13 @@ The judge ledger from Step 5 is printed **before** this prose report. Then emit 
 **Reviewers:** [reviewers that participated] ([N] participating — [skipped: reasons])
 **Lens map:** [the per-reviewer lens assignment printed in Step 3 — e.g. `reviewer-security: Security · reviewer-claude: Correctness + Data-integrity · Codex: Correctness + Cross-file · Perplexity: Dependency`. If `settings.personas` is false, note "personas off (legacy prompt)".]
 **Pipeline:** [prepend `static scan → ` when Step 2.5 ran] Round 1 → well-formed check → refutation → judge → report  [append `· stopped at budget: <n>s` if the run degraded on budget; note `· refutation skipped (solo-Claude)` or `· refutation off (verify=false)` when applicable, and `· static analysis: off` when Step 2.5 was disabled/skipped — these are the pipeline stages actually run]. Append the Step-2.5 status line (Static analysis: …) beneath this when the scan ran.
+
+**Badge legend** — each finding carries a badge for **how much corroboration it has** (strongest → weakest; when several apply, the strongest is shown and the rest noted in prose). Print this block verbatim in every report so the labels are self-explanatory; include only the rows for badges that actually appear, or the whole list — your call, but never leave a badge unexplained:
+> - `[verified]` — **tool-grounded**: a Tier A deterministic hit (secret/CVE), or a Tier B tool signal an LLM reviewer confirmed on the same fingerprint.
+> - `[cross-reviewed]` — **corroborated across model families**: raised by ≥2 different families, or UPHELD by a different family in the refutation pass.
+> - `[1 reviewer · unverified]` — **one reviewer, no cross-check available** (solo-Claude runs, where no different family exists to verify against). Severity is kept as-is — a single-reviewer `critical` stays Critical.
+> - `[unverified]` — **not cross-verified**: the refutation pass was inconclusive, skipped (over the cap or budget-degraded), or turned off. Not a knock on the finding — just uncorroborated.
+> - `[tool-only:<rule>]` — a **static-analysis (Tier B) signal no reviewer corroborated**; kept as a low-priority Suggestion.
 
 ### Critical Issues
 [Every `critical` finding, each with its badge. Single-reviewer criticals stay here, tagged `[1 reviewer · unverified]`.]
