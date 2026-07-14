@@ -224,6 +224,15 @@ config the PR author supplies" design is exactly the failure mode this rule prev
   plugin — a `.semgrep.yml`/`.gitleaks.toml`/ruleset/ast-grep-style scriptable rule pack
   sourced from the diff itself. Never resolve a tool config path from anything the diff under
   review supplies.
+- **Trust-boundary caveat (current local scope vs. a future CI gate):** in today's **local,
+  report-only** use, a committed config (`.gitleaks.toml`, a `static_analysis.semgrep_config`
+  path, `.shellcheckrc`, …) is read straight from the working tree — which is correct when you
+  are reviewing *your own* changes. When Review Council becomes a **hostile-PR CI gate** (the
+  GitHub Actions roadmap), a committed config the PR *itself modifies* is no longer trustworthy:
+  in that mode configs must be read from the **trusted base revision** (e.g.
+  `git show <base>:.gitleaks.toml`), or the run must reject/flag a config the diff under review
+  touches. Tracked for the CI-mode phase; **not enforced in local mode**, where the config is
+  the reviewer's own.
 
 ---
 

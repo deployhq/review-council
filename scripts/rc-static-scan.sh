@@ -321,6 +321,21 @@ hit_timeout() {
   esac
 }
 
+# exec_failed <accepted-codes>: true when the last capped run (LAST_RC) exited
+# with a code NOT in the space-separated <accepted-codes> list — a genuine tool
+# failure (crash, bad args, runtime error) whose partial/garbage report must NOT
+# be parsed into a tier buffer. Lint/scan tools legitimately exit non-zero when
+# they FIND something, so callers pass the tool's real accepted set (typically
+# "0 1" = clean/findings). Timeouts (124/143/137) are ruled out by hit_timeout
+# first and are not this function's concern.
+exec_failed() {
+  _xf_rc="${LAST_RC:-0}"
+  for _xf_ok in $1; do
+    if [ "$_xf_rc" = "$_xf_ok" ]; then return 1; fi
+  done
+  return 0
+}
+
 # run_report <argv...>: the tool writes its OWN structured output (via a flag in
 # argv, e.g. gitleaks -r / semgrep --output); run_capped just caps it and
 # captures its stderr/progress to STDERR_CAP.
@@ -365,15 +380,87 @@ file_in_changed() {
   return 1
 }
 
+# ± context window (lines) around a changed hunk kept by filter_changed_hunks —
+# pins the "small context window" the docs (rules/static-analysis.md, lever 3)
+# leave to the implementation. A finding within HUNK_CTX lines of a changed
+# range is treated as belonging to that change.
+HUNK_CTX=3
+
 # filter_changed <lines-file>: emit only the normalized lines whose file field
-# is a changed file — the changed-hunk post-filter for semgrep's full-scan
-# fallback (when --baseline-commit can't be used). Prints kept lines to stdout.
+# is a changed file (FILE-level). This is the graceful fallback used by
+# filter_changed_hunks when a file's changed line-ranges can't be derived
+# (git unavailable / not a repo / no diff). Prints kept lines to stdout.
 filter_changed() {
   while IFS='|' read -r _flt_tier _flt_tool _flt_sev _flt_file _flt_line _flt_rule _flt_msg || [ -n "${_flt_tier:-}" ]; do
     [ -n "${_flt_tier:-}" ] || continue
     if file_in_changed "$_flt_file"; then
       printf '%s|%s|%s|%s|%s|%s|%s\n' \
         "$_flt_tier" "$_flt_tool" "$_flt_sev" "$_flt_file" "$_flt_line" "$_flt_rule" "$_flt_msg"
+    fi
+  done <"$1"
+}
+
+# changed_ranges <file>: print the NEW-side changed-line ranges of <file> as
+# "start end" pairs (one per line), derived from git's unified=0 diff. Empty
+# output means "not derivable" (git unavailable, not a repo, or no diff for the
+# file) — callers fall back to a FILE-level keep. Hunk header @@ -a,b +c,d @@
+# gives new-side range [c, c+d-1]; d defaults to 1 when omitted; d=0 is a pure
+# deletion (no new-side lines) and is skipped.
+changed_ranges() {
+  _cr_file="$1"
+  git rev-parse --is-inside-work-tree >/dev/null 2>&1 || return 0
+  if worktree_head; then
+    # Local staged/unstaged mode: base ref vs the working tree.
+    _cr_diff="$(git diff --unified=0 "$BASE_REF" -- "$_cr_file" 2>/dev/null || true)"
+  else
+    _cr_diff="$(git diff --unified=0 "$BASE_REF" "$HEAD_REF" -- "$_cr_file" 2>/dev/null || true)"
+  fi
+  [ -n "$_cr_diff" ] || return 0
+  printf '%s\n' "$_cr_diff" | awk '
+    /^@@ / {
+      plus = $3            # the "+c,d" field of "@@ -a,b +c,d @@"
+      sub(/^\+/, "", plus)
+      n = split(plus, p, ",")
+      start = p[1] + 0
+      if (n >= 2) { d = p[2] + 0 } else { d = 1 }
+      if (d <= 0) { next }  # pure deletion — no new-side lines
+      print start, (start + d - 1)
+    }'
+}
+
+# filter_changed_hunks <lines-file>: emit only the normalized lines whose file
+# is changed AND whose line number lands within ±HUNK_CTX of one of that file's
+# changed NEW-side ranges — the changed-hunk post-filter for semgrep's full-scan
+# fallback (when --baseline-commit can't be used). If a file's ranges can't be
+# derived (no git / not a repo / no diff), it degrades to the FILE-level keep so
+# the batch is never errored and real findings are never dropped wholesale.
+filter_changed_hunks() {
+  while IFS='|' read -r _fh_tier _fh_tool _fh_sev _fh_file _fh_line _fh_rule _fh_msg || [ -n "${_fh_tier:-}" ]; do
+    [ -n "${_fh_tier:-}" ] || continue
+    file_in_changed "$_fh_file" || continue
+    _fh_ranges="$(changed_ranges "$_fh_file")"
+    _fh_keep=0
+    if [ -z "$_fh_ranges" ]; then
+      # No derivable ranges — FILE-level fallback (keep the changed file's line).
+      _fh_keep=1
+    else
+      case "$_fh_line" in
+        '' | *[!0-9]*)
+          # Unparseable line — keep rather than risk dropping a real finding.
+          _fh_keep=1
+          ;;
+        *)
+          if printf '%s\n' "$_fh_ranges" | awk -v ln="$_fh_line" -v ctx="$HUNK_CTX" '
+               { if (ln >= $1 - ctx && ln <= $2 + ctx) { f = 1 } }
+               END { exit(f ? 0 : 1) }'; then
+            _fh_keep=1
+          fi
+          ;;
+      esac
+    fi
+    if [ "$_fh_keep" -eq 1 ]; then
+      printf '%s|%s|%s|%s|%s|%s|%s\n' \
+        "$_fh_tier" "$_fh_tool" "$_fh_sev" "$_fh_file" "$_fh_line" "$_fh_rule" "$_fh_msg"
     fi
   done <"$1"
 }
@@ -391,7 +478,8 @@ run_gitleaks() {
   _gl_report="$WORKDIR/gitleaks.json"
   : >"$_gl_report"
   if gitleaks_modern; then _gl_modern=1; else _gl_modern=0; fi
-  if worktree_head; then
+  if worktree_head; then _gl_wth=1; else _gl_wth=0; fi
+  if [ "$_gl_wth" -eq 1 ]; then
     # Local staged/unstaged mode: no distinct head ref, so a git-range scan
     # (--log-opts="HEAD..") would cover 0 commits and silently report nothing.
     # Scan the working-tree files directly instead (modern: `dir`; old: `detect
@@ -418,7 +506,20 @@ run_gitleaks() {
     add_skip gitleaks "timeout"
     return
   fi
-  emit_findings "$_gl_report" "$TA" --arg tier TIER_A --arg tool gitleaks "$GITLEAKS_FILTER"
+  if exec_failed "0 1"; then
+    add_skip gitleaks "execution failed (exit ${LAST_RC:-0})"
+    return
+  fi
+  if [ "$_gl_wth" -eq 1 ]; then
+    # Working-tree scan covers UNCHANGED files too; a secret in an unchanged file
+    # must not report as if this change introduced it — keep only changed files.
+    _gl_tmp="$WORKDIR/gitleaks_lines"
+    : >"$_gl_tmp"
+    emit_findings "$_gl_report" "$_gl_tmp" --arg tier TIER_A --arg tool gitleaks "$GITLEAKS_FILTER"
+    filter_changed "$_gl_tmp" >>"$TA"
+  else
+    emit_findings "$_gl_report" "$TA" --arg tier TIER_A --arg tool gitleaks "$GITLEAKS_FILTER"
+  fi
 }
 
 run_trufflehog() {
@@ -427,7 +528,8 @@ run_trufflehog() {
     return
   fi
   _th_report="$WORKDIR/trufflehog.json"
-  if worktree_head; then
+  if worktree_head; then _th_wth=1; else _th_wth=0; fi
+  if [ "$_th_wth" -eq 1 ]; then
     # Local staged/unstaged mode: no distinct head branch, so --since-commit
     # HEAD --branch . forms an invalid/empty git range. Scan the working tree.
     set -- trufflehog filesystem . --results=verified --json
@@ -441,11 +543,33 @@ run_trufflehog() {
     add_skip trufflehog "timeout"
     return
   fi
+  # trufflehog's only clean exit is 0. A non-0 exit is either the graceful
+  # network-degrade case (a live-verification egress failure) or a genuine tool
+  # failure — distinguish them by the stderr signature, never leak a garbage
+  # report into Tier A either way.
+  if exec_failed "0"; then
+    if network_failed; then
+      add_skip trufflehog "network-unreachable"
+    else
+      add_skip trufflehog "execution failed (exit ${LAST_RC:-0})"
+    fi
+    return
+  fi
   _th_before="$(wc -l <"$TA" 2>/dev/null || echo 0)"
-  emit_findings "$_th_report" "$TA" --arg tier TIER_A --arg tool trufflehog "$TRUFFLEHOG_FILTER"
+  if [ "$_th_wth" -eq 1 ]; then
+    # Working-tree scan covers UNCHANGED files too; a secret in an unchanged file
+    # must not report as if this change introduced it — keep only changed files.
+    _th_tmp="$WORKDIR/trufflehog_lines"
+    : >"$_th_tmp"
+    emit_findings "$_th_report" "$_th_tmp" --arg tier TIER_A --arg tool trufflehog "$TRUFFLEHOG_FILTER"
+    filter_changed "$_th_tmp" >>"$TA"
+  else
+    emit_findings "$_th_report" "$TA" --arg tier TIER_A --arg tool trufflehog "$TRUFFLEHOG_FILTER"
+  fi
   _th_after="$(wc -l <"$TA" 2>/dev/null || echo 0)"
-  # Graceful network degrade (Risk #3): 0 verified findings + a network error in
-  # the tool's stderr => "ran, 0 findings" + a note. Never errors the batch.
+  # Graceful network degrade (Risk #3): 0 verified findings ADDED TO $TA (i.e.
+  # after the changed-file filter above) + a network error in the tool's stderr
+  # => "ran, 0 findings" + a note. Never errors the batch.
   if [ "$_th_before" -eq "$_th_after" ] && network_failed; then
     add_skip trufflehog "network-unreachable"
   fi
@@ -469,6 +593,10 @@ run_osv() {
   fi
   if hit_timeout; then
     add_skip osv-scanner "timeout"
+    return
+  fi
+  if exec_failed "0 1"; then
+    add_skip osv-scanner "execution failed (exit ${LAST_RC:-0})"
     return
   fi
   emit_findings "$_osv_report" "$TA" --arg tier TIER_A --arg tool osv-scanner "$OSV_FILTER"
@@ -501,12 +629,18 @@ run_semgrep() {
     add_skip semgrep "timeout"
     return
   fi
+  if exec_failed "0 1"; then
+    add_skip semgrep "execution failed (exit ${LAST_RC:-0})"
+    return
+  fi
   _sg_tmp="$WORKDIR/semgrep_lines"
   : >"$_sg_tmp"
   emit_findings "$_sg_report" "$_sg_tmp" --arg tier TIER_B --arg tool semgrep "$SEMGREP_FILTER"
   if [ "$_sg_fallback" -eq 1 ]; then
-    # Full-scan fallback: keep only findings that land in a changed file.
-    filter_changed "$_sg_tmp" >>"$TB"
+    # Full-scan fallback: keep only findings that land in (or within HUNK_CTX of)
+    # a changed hunk — not merely a changed file (drops legacy hits on untouched
+    # lines inside a changed file). Degrades to FILE-level when git can't scope.
+    filter_changed_hunks "$_sg_tmp" >>"$TB"
   else
     while IFS= read -r _sg_l || [ -n "$_sg_l" ]; do
       printf '%s\n' "$_sg_l"
@@ -530,6 +664,10 @@ run_ruff() {
     add_skip ruff "timeout"
     return
   fi
+  if exec_failed "0 1"; then
+    add_skip ruff "execution failed (exit ${LAST_RC:-0})"
+    return
+  fi
   emit_findings "$_rf_report" "$TB" --arg tier TIER_B --arg tool ruff "$RUFF_FILTER"
 }
 
@@ -547,6 +685,10 @@ run_shellcheck() {
   run_stdout "$_sc_report" shellcheck --format json1 "$@"
   if hit_timeout; then
     add_skip shellcheck "timeout"
+    return
+  fi
+  if exec_failed "0 1"; then
+    add_skip shellcheck "execution failed (exit ${LAST_RC:-0})"
     return
   fi
   emit_findings "$_sc_report" "$TB" --arg tier TIER_B --arg tool shellcheck "$SHELLCHECK_FILTER"
@@ -568,6 +710,10 @@ run_actionlint() {
     add_skip actionlint "timeout"
     return
   fi
+  if exec_failed "0 1"; then
+    add_skip actionlint "execution failed (exit ${LAST_RC:-0})"
+    return
+  fi
   emit_findings "$_al_report" "$TB" --arg tier TIER_B --arg tool actionlint "$ACTIONLINT_FILTER"
 }
 
@@ -585,6 +731,10 @@ run_hadolint() {
   run_stdout "$_hd_report" hadolint --format json "$@"
   if hit_timeout; then
     add_skip hadolint "timeout"
+    return
+  fi
+  if exec_failed "0 1"; then
+    add_skip hadolint "execution failed (exit ${LAST_RC:-0})"
     return
   fi
   emit_findings "$_hd_report" "$TB" --arg tier TIER_B --arg tool hadolint "$HADOLINT_FILTER"

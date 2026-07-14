@@ -25,7 +25,7 @@ setup() {
   # fakes) need into $SYSBIN, resolved from the ORIGINAL PATH. The script then
   # runs under PATH=$FAKEDIR:$SYSBIN — no host PATH — so "absent" is real.
   for _c in sh env jq git grep mktemp rm wc head cat sleep timeout gtimeout \
-    sort tr sed dirname basename kill uname date; do
+    sort tr sed awk dirname basename kill uname date; do
     _p="$(command -v "$_c" 2>/dev/null || true)"
     if [ -n "$_p" ]; then ln -sf "$_p" "$SYSBIN/$_c"; fi
   done
@@ -77,6 +77,7 @@ case "\${SEMGREP_MODE:-findings}" in
   empty) printf '%s' '{"results":[]}' >"\$_out" ;;
   findings) printf '%s' '{"results":[{"check_id":"rules.demo","path":"a.py","start":{"line":3},"extra":{"message":"demo finding","severity":"WARNING"}}]}' >"\$_out" ;;
   mixed) printf '%s' '{"results":[{"check_id":"r.a","path":"a.py","start":{"line":3},"extra":{"message":"in changed file","severity":"ERROR"}},{"check_id":"r.b","path":"b.py","start":{"line":9},"extra":{"message":"in UNCHANGED file","severity":"ERROR"}}]}' >"\$_out" ;;
+  samefile) printf '%s' '{"results":[{"check_id":"r.in","path":"a.py","start":{"line":3},"extra":{"message":"on a changed line","severity":"ERROR"}},{"check_id":"r.out","path":"a.py","start":{"line":40},"extra":{"message":"far outside any hunk","severity":"ERROR"}}]}' >"\$_out" ;;
 esac
 exit "\${SEMGREP_EXIT:-1}"
 EOF
@@ -332,7 +333,10 @@ called() { grep -qx "$1" "$CALLS"; }
 
 @test "worktree-head mode (local staged/unstaged): gitleaks -> dir scan, trufflehog -> filesystem, no empty git range" {
   setup_fakes
-  printf '%s\n' "a.py" "secret.txt" >"$CHANGED"
+  # env.sh is where the fake trufflehog reports; secret.txt is gitleaks' file.
+  # Both must be in the changed list so the working-tree scan's diff-scope
+  # filter (a whole-tree scan keeps only changed files) keeps them.
+  printf '%s\n' "a.py" "secret.txt" "env.sh" >"$CHANGED"
   # base=HEAD, head="." (the worktree) is exactly what the orchestrator passes for
   # a local staged/unstaged review — the git-range forms would scan 0 commits and
   # silently report nothing. The Tier-A scanners must switch to a working-tree scan.
@@ -430,4 +434,112 @@ called() { grep -qx "$1" "$CALLS"; }
   # both block headers still present (stable contract)
   echo "$output" | grep -qx 'TIER_A'
   echo "$output" | grep -qx 'TIER_B'
+}
+
+@test "execution failure (Fix 1): unexpected non-zero exit -> SKIPPED execution failed + no Tier finding; exit-1-with-findings still emits" {
+  setup_fakes
+  # FAIL: gitleaks crashes with an unexpected code (2) yet still left a report —
+  # a partial/garbage report must NOT leak into Tier A.
+  RC_STATIC_TOOLS="gitleaks" GITLEAKS_MODE=findings GITLEAKS_EXIT=2 PATH="$SANDBOX" \
+    run --separate-stderr "$SCRIPT" "$BASE" "$HEAD" "$CHANGED"
+  echo "fail-status=$status"
+  echo "fail-output=<<$output>>"
+  [ "$status" -eq 0 ]
+  echo "$output" | grep -qF 'SKIPPED: gitleaks — execution failed (exit 2)'
+  ! echo "$output" | grep -q 'TIER_A|gitleaks|'
+
+  # OK: exit 1 is a tool's normal "found something" code — must emit, NOT skip.
+  RC_STATIC_TOOLS="gitleaks" GITLEAKS_MODE=findings GITLEAKS_EXIT=1 PATH="$SANDBOX" \
+    run --separate-stderr "$SCRIPT" "$BASE" "$HEAD" "$CHANGED"
+  echo "ok-output=<<$output>>"
+  [ "$status" -eq 0 ]
+  echo "$output" | grep -qF 'TIER_A|gitleaks|critical|secret.txt'
+  ! echo "$output" | grep -qF 'SKIPPED: gitleaks — execution failed'
+}
+
+@test "worktree-head diff-scope (Fix 2): Tier-A secret in an UNCHANGED file is dropped, changed file kept" {
+  setup_fakes
+  # Whole-working-tree scan (worktree_head) surfaces secrets in files this change
+  # never touched: gitleaks reports secret.txt, trufflehog reports env.sh.
+  # DROP case — neither is in the changed list, so both must be filtered out.
+  printf '%s\n' "a.py" >"$CHANGED"
+  RC_STATIC_TOOLS="gitleaks,trufflehog" GITLEAKS_MODE=findings TRUFFLEHOG_MODE=findings \
+    PATH="$SANDBOX" run --separate-stderr "$SCRIPT" "HEAD" "." "$CHANGED"
+  echo "drop-status=$status"
+  echo "drop-output=<<$output>>"
+  [ "$status" -eq 0 ]
+  ! echo "$output" | grep -q 'TIER_A|gitleaks|'
+  ! echo "$output" | grep -q 'TIER_A|trufflehog|'
+  # a dropped-to-zero trufflehog run with no network error is NOT a false degrade
+  ! echo "$output" | grep -q 'network-unreachable'
+
+  # KEEP case — both files are now in the changed list, so both findings stay.
+  printf '%s\n' "a.py" "secret.txt" "env.sh" >"$CHANGED"
+  RC_STATIC_TOOLS="gitleaks,trufflehog" GITLEAKS_MODE=findings TRUFFLEHOG_MODE=findings \
+    PATH="$SANDBOX" run --separate-stderr "$SCRIPT" "HEAD" "." "$CHANGED"
+  echo "keep-output=<<$output>>"
+  [ "$status" -eq 0 ]
+  echo "$output" | grep -qF 'TIER_A|gitleaks|critical|secret.txt'
+  echo "$output" | grep -qF 'TIER_A|trufflehog|critical|env.sh'
+}
+
+@test "semgrep changed-hunk filter (Fix 3): finding on a changed line kept, finding far outside dropped" {
+  setup_fakes
+  REPO="$BATS_TEST_TMPDIR/repo3"
+  mkdir -p "$REPO"
+  (
+    cd "$REPO"
+    PATH="$SANDBOX" git init -q
+    PATH="$SANDBOX" git config user.email t@e.x
+    PATH="$SANDBOX" git config user.name t
+    _i=1
+    : >a.py
+    while [ "$_i" -le 45 ]; do printf 'line%02d\n' "$_i" >>a.py; _i=$(( _i + 1 )); done
+    PATH="$SANDBOX" git add a.py
+    PATH="$SANDBOX" git commit -qm init
+  )
+  _base="$(cd "$REPO" && PATH="$SANDBOX" git rev-parse HEAD)"
+  # Unstaged edit of line 3 ONLY -> a changed hunk at new-side line 3, and (being
+  # unstaged) it forces semgrep's full-scan fallback (baseline-commit aborts).
+  (
+    cd "$REPO"
+    _i=1
+    : >a.py
+    while [ "$_i" -le 45 ]; do
+      if [ "$_i" -eq 3 ]; then printf 'CHANGED_LINE_3\n' >>a.py
+      else printf 'line%02d\n' "$_i" >>a.py; fi
+      _i=$(( _i + 1 ))
+    done
+  )
+  printf '%s\n' "a.py" >"$CHANGED"
+  cd "$REPO"
+  RC_STATIC_TOOLS="semgrep" SEMGREP_MODE=samefile PATH="$SANDBOX" \
+    run --separate-stderr "$SCRIPT" "$_base" "." "$CHANGED"
+  echo "status=$status"
+  echo "output=<<$output>>"
+  echo "args=<<$(cat "$ARGS")>>"
+  [ "$status" -eq 0 ]
+  # fallback path (unstaged changes) -> NO --baseline-commit
+  ! grep -qF -- '--baseline-commit' "$ARGS"
+  # line 3 is inside the changed hunk (±3) -> kept
+  echo "$output" | grep -qF 'TIER_B|semgrep|ERROR|a.py|3|semgrep:r.in|on a changed line'
+  # line 40 is far outside any changed hunk -> dropped
+  ! echo "$output" | grep -qF 'r.out'
+  ! echo "$output" | grep -qF 'far outside'
+}
+
+@test "semgrep changed-hunk filter (Fix 3): non-git dir gracefully falls back to FILE-level (both same-file findings kept)" {
+  setup_fakes
+  # $WORK (cwd) is NOT a git repo -> changed_ranges can't derive line ranges, so
+  # filter_changed_hunks degrades to a FILE-level keep rather than erroring: BOTH
+  # a.py findings survive (contrast the git case above, which drops line 40).
+  printf '%s\n' "a.py" >"$CHANGED"
+  RC_STATIC_TOOLS="semgrep" SEMGREP_MODE=samefile PATH="$SANDBOX" \
+    run --separate-stderr "$SCRIPT" "$BASE" "$HEAD" "$CHANGED"
+  echo "status=$status"
+  echo "output=<<$output>>"
+  [ "$status" -eq 0 ]
+  ! grep -qF -- '--baseline-commit' "$ARGS"
+  echo "$output" | grep -qF 'TIER_B|semgrep|ERROR|a.py|3|semgrep:r.in|on a changed line'
+  echo "$output" | grep -qF 'TIER_B|semgrep|ERROR|a.py|40|semgrep:r.out|far outside any hunk'
 }

@@ -124,7 +124,7 @@ For each tool **found** → "available (\<version\>)". For each tool **missing**
 | `trufflehog` | A | `brew install trufflehog` (or the official install script — see the trufflehog GitHub repo's install instructions) |
 | `osv-scanner` | A | `brew install osv-scanner` |
 | `semgrep` | B | `brew install semgrep` (or `pipx install semgrep`) |
-| `ruff` | B | `brew install ruff` (or `pipx install ruff` / `uvx ruff`) |
+| `ruff` | B | `brew install ruff` (or `pipx install ruff`) |
 | `shellcheck` | B | `brew install shellcheck` |
 | `actionlint` | B | `brew install actionlint` |
 | `hadolint` | B | `brew install hadolint` |
