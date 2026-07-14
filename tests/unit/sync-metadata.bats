@@ -68,3 +68,49 @@ setup() {
   ACTUAL_DESC="$(jq -r '.description' "$SCRATCH/.claude-plugin/marketplace.json")"
   [ "$ACTUAL_DESC" = "stale description for test" ]
 }
+
+@test "sync-metadata.sh --check fails (exit 1) when jq is unavailable" {
+  # A drift check that cannot read the canonical description must NOT report
+  # success. Simulate jq-absence with a PATH that has the usual tools but no jq.
+  NOJQ="$BATS_TEST_TMPDIR/nojq"
+  mkdir -p "$NOJQ"
+  for t in sh env dirname basename cat sed awk grep mv cp; do
+    src="$(command -v "$t" 2>/dev/null)" && [ -n "$src" ] && ln -sf "$src" "$NOJQ/$t"
+  done
+  run --separate-stderr env PATH="$NOJQ" "$SCRIPT" --check
+  echo "status=$status"
+  echo "stderr=<<$stderr>>"
+  [ "$status" -eq 1 ]
+  case "$stderr" in
+    *jq*) ;;
+    *) echo "expected a jq-not-found message on stderr"; return 1 ;;
+  esac
+}
+
+@test "sync-metadata.sh validates description only inside the frontmatter fence" {
+  SCRATCH="$BATS_TEST_TMPDIR/repo2"
+  mkdir -p "$SCRATCH"
+  cp -R "$ROOT/.claude-plugin" "$ROOT/README.md" "$ROOT/CLAUDE.md" "$ROOT/skills" "$ROOT/scripts" "$SCRATCH/"
+
+  # Frontmatter has NO description:; a description: appears only in the body.
+  # The old validation (unbounded awk) accepted this; the fix must reject it.
+  cat >"$SCRATCH/skills/run/SKILL.md" <<'EOF'
+---
+argument-hint: "x"
+allowed-tools: Read
+---
+
+# Title
+
+description: this is a body line, not a frontmatter field
+EOF
+
+  run --separate-stderr "$SCRATCH/scripts/sync-metadata.sh" --check
+  echo "status=$status"
+  echo "stderr=<<$stderr>>"
+  [ "$status" -eq 1 ]
+  case "$stderr" in
+    *"missing a frontmatter description"*) ;;
+    *) echo "expected run/SKILL.md flagged as missing a frontmatter description"; return 1 ;;
+  esac
+}

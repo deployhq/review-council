@@ -17,9 +17,10 @@
 #                                        non-zero and lists any file out of sync
 #
 # Requires jq to read plugin.json's `.description` and to rewrite
-# marketplace.json. jq is preinstalled on GitHub Actions runners; if it's
-# missing locally this script prints a notice and exits 0 (a no-op) rather
-# than failing a workflow that doesn't otherwise need it.
+# marketplace.json. jq is preinstalled on GitHub Actions runners. In plain
+# (stamp) mode a missing jq prints a notice and exits 0 (a no-op). In --check
+# mode a missing jq exits 1: a drift check that cannot read the canonical
+# description must never report success.
 
 set -eu
 
@@ -43,6 +44,10 @@ case "${1:-}" in
 esac
 
 if ! command -v jq >/dev/null 2>&1; then
+  if [ "$check_mode" -eq 1 ]; then
+    echo "sync-metadata --check: jq not found; cannot validate metadata" >&2
+    exit 1
+  fi
   echo "sync-metadata: jq not found; skipping (nothing to sync without it)" >&2
   exit 0
 fi
@@ -135,7 +140,12 @@ sync_frontmatter() {
     return
   fi
 
-  if ! awk 'NR == 1 && $0 == "---" { f = 1 } f && /^description:/ { found = 1 } END { exit !found }' "$_sf_file"; then
+  if ! awk '
+    NR == 1 && $0 == "---" { infm = 1; next }
+    infm && /^---$/ { exit !found }
+    infm && /^description:/ { found = 1 }
+    END { exit !found }
+  ' "$_sf_file"; then
     echo "sync-metadata: $_sf_file missing a frontmatter description: line" >&2
     note_diff "$_sf_file"
     return
