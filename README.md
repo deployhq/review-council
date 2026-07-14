@@ -51,7 +51,8 @@ flowchart TD
     D --> G
     E --> G
 
-    G --> H["Step 3: Round 1 — Lens-Differentiated Review"]
+    G --> S25["Step 2.5: Deterministic static scan<br/>gitleaks · trufflehog · osv-scanner · semgrep · ruff · shellcheck · actionlint · hadolint<br/>Tier A → judge · Tier B → Round 1 context<br/>(if static_analysis.enabled)"]
+    S25 --> H["Step 3: Round 1 — Lens-Differentiated Review"]
 
     H --> I["Claude<br/>Correctness + overlay"]
     H --> SEC["Security (dedicated)<br/>always on"]
@@ -86,6 +87,7 @@ flowchart TD
 
     style A fill:#7c3aed,color:#fff
     style Z0 fill:#7c3aed,color:#fff
+    style S25 fill:#0891b2,color:#fff
     style H fill:#2563eb,color:#fff
     style I fill:#6366f1,color:#fff
     style SEC fill:#dc2626,color:#fff
@@ -210,11 +212,49 @@ The judge (Step 5) turns those verdicts into the badges shown in the final repor
 
 | Badge | Meaning |
 |---|---|
+| `[verified]` | A Tier A static-analysis finding (pre-verified secret/CVE), or a Tier B finding an LLM reviewer corroborated on the same (judge-computed) fingerprint — see [Static Analysis](#static-analysis-phase-2-step-25) |
 | `[cross-reviewed]` | Raised by ≥2 reviewer families, or UPHELD by a different-family verifier |
 | `[1 reviewer · unverified]` | A single reviewer raised it and it wasn't (yet) cross-verified — critical findings are **never** demoted out of Critical for this |
 | `[unverified]` | Not verified this run — over the `verify_max_findings` cap, or the run budget was spent before verification (solo-Claude findings get `[1 reviewer · unverified]` instead) |
 
-`[verified]` (a deterministic tool and an LLM agreeing on the same fingerprint) is reserved for a future, tool-grounded phase and does not appear yet.
+Badge precedence when more than one could apply: `[verified]` > `[cross-reviewed]` > `[1 reviewer · unverified]` > `[unverified]` — the strongest badge is shown; others are noted in prose where relevant.
+
+### Static Analysis (Phase 2, Step 2.5)
+
+Between gathering context (Step 2) and Round 1, Review Council can run a deterministic static-analysis layer — grounded evidence for the council, not a second vote. Gated on `static_analysis.enabled` (default on); when it runs, one subagent probes up to eight external tools and diff-scopes each one that's present and applicable:
+
+| Tool | Tier | Catches | Install |
+|---|---|---|---|
+| [`gitleaks`](https://github.com/gitleaks/gitleaks) | A — secrets | Hardcoded secrets (regex/entropy rules) | `brew install gitleaks` |
+| [`trufflehog`](https://github.com/trufflesecurity/trufflehog) | A — secrets, live-verified | Secrets, confirmed live against the provider | `brew install trufflehog` (or the official install script) |
+| [`osv-scanner`](https://github.com/google/osv-scanner) | A — known CVEs | Known-vulnerable dependencies in lockfiles | `brew install osv-scanner` |
+| [`semgrep`](https://semgrep.dev/) | B — SAST | Broad static-analysis rule coverage | `brew install semgrep` (or `pipx install semgrep`) |
+| [`ruff`](https://github.com/astral-sh/ruff) | B — Python lint | Python lint/style issues | `brew install ruff` (or `pipx install ruff` / `uvx ruff`) |
+| [`shellcheck`](https://www.shellcheck.net/) | B — shell lint | Shell-script bugs and pitfalls | `brew install shellcheck` |
+| [`actionlint`](https://github.com/rhysd/actionlint) | B — CI lint | GitHub Actions workflow errors | `brew install actionlint` |
+| [`hadolint`](https://github.com/hadolint/hadolint) | B — Dockerfile lint | Dockerfile best-practice violations | `brew install hadolint` |
+
+**The two-tier model:**
+
+- **Tier A — verified / high-precision.** Secrets and known-CVE hits go straight into the report, pre-verified, badged `[verified]`, exempt from the suggestion cap, and never downgraded by the judge — severity is *inherited* from the tool, not judge-assigned. (`gitleaks` is precision-by-rule — regex/entropy — not live-verified the way `trufflehog` is; still high-precision, just a different guarantee.)
+- **Tier B — SAST/lint, context not a verdict.** Findings are folded into Round 1's shared context under "PRE-EXISTING STATIC-ANALYSIS SIGNALS — corroborate or dismiss." Every reviewer sees them; a reviewer match on the same (judge-computed) fingerprint promotes the finding to `[verified]`, while a tool-only hit survives only as a capped `suggestion` badged `[tool-only:<rule>]` — never Critical/Important on tool say-so alone.
+
+Static analysis is never a voting reviewer: no lens, doesn't count toward `min_reviewers`, never routed through the refutation pass. Only repo-owned tool configuration is ever used (`.gitleaks.toml`, `.semgrep.yml`, etc., already committed to the target repo) — a PR-supplied tool config or ruleset is never fetched or executed, the direct lesson from the CodeRabbit-config-RCE precedent this project deliberately avoids repeating.
+
+**Config keys** (`.review-council/config.yml`, precedence `env > config.local.yml > config.yml > default` — full schema in [`rules/config.md`](rules/config.md)):
+
+| Key | Default | Env override | Purpose |
+|---|---|---|---|
+| `static_analysis.enabled` | `true` | `RC_STATIC_ANALYSIS` | Turn the whole Step 2.5 scan on/off |
+| `static_analysis.tools` | all 8 (`gitleaks, trufflehog, osv-scanner, semgrep, ruff, shellcheck, actionlint, hadolint`) | `RC_STATIC_TOOLS` | Which tools to run (comma-separated); unknown names are dropped with a note |
+| `static_analysis.timeout_seconds` | `60` | `RC_STATIC_TIMEOUT` | Per-tool hard timeout (same watchdog machinery as the reviewer timeout) |
+| `static_analysis.semgrep_config` | `auto` | `RC_SEMGREP_CONFIG` | `auto`, `off`, or a repo-owned ruleset path |
+
+**Setup.** `/review-council:setup` probes all eight tools (grouped Tier A / Tier B) and, for anything missing, prints its install command — **print-only**: unlike the `yq` flow, `setup` never installs a static-analysis tool itself, even with consent. Install whichever you want; Review Council picks them up automatically on the next run (`command -v` probe, no restart needed).
+
+**`trufflehog` outbound-network caveat.** `trufflehog`'s `--results=verified` mode makes **live outbound network calls**, authenticating with each found credential against its actual provider (e.g. confirming an AWS key is real by calling AWS with it). That's what makes its hits verified/high-precision, but it means a "local, report-only" tool reaches out to third-party services, and the verification call itself could trip the *credential owner's* own anomaly detection. `trufflehog` is **default-on**; the one-line opt-out is dropping it from `static_analysis.tools` (or `RC_STATIC_TOOLS`). If the network is unreachable, the scan degrades gracefully (treated as "ran, 0 findings") rather than erroring the run.
+
+**Missing a configured tool.** A tool absent from your machine but present in `static_analysis.tools` isn't silently skipped — the review pauses and asks: it tells you which tool(s) are missing and how to install each, then asks whether to install now and re-run the scan, or proceed without them for this run. Proceeding is always an option; nothing blocks the run outright. Tools that aren't relevant to the diff (e.g. `ruff` when no `*.py` changed) are skipped quietly — there's nothing to install for those.
 
 ### Uninstall
 
@@ -293,10 +333,13 @@ review-council/
 │   ├── orchestration.md     # Round 1, well-formed check, budget, severity/recalibration rules
 │   ├── delegation-format.md # External model prompt format + refutation template
 │   ├── providers.md         # Provider registry
-│   └── config.md            # Config schema (reviewers, lenses, settings)
+│   ├── config.md            # Config schema (reviewers, lenses, settings, static_analysis)
+│   └── static-analysis.md   # Static-analysis tool registry, tiers, noise-control (Phase 2)
 ├── scripts/
 │   ├── rc-invoke-provider.sh # Google-slot invocation state machine
-│   └── rc-config.sh          # Config reader (files + env + defaults)
+│   ├── rc-config.sh          # Config reader (files + env + defaults)
+│   ├── rc-static-scan.sh      # Static-analysis runner (Phase 2)
+│   └── rc-lib-timeout.sh      # Shared timeout/watchdog helper
 ├── tests/
 │   ├── unit/                # bats unit tests for the scripts
 │   └── fixtures/            # Tier-2 artifact-shape fixtures (local/on-demand, never CI)
@@ -315,6 +358,10 @@ sequenceDiagram
     participant X as Codex Reviewer
     participant G as Google Reviewer
     participant P as Perplexity Reviewer
+
+    Note over O: Step 2.5 — Deterministic static scan (if static_analysis.enabled)
+    O->>O: Run gitleaks / trufflehog / osv-scanner / semgrep / … once, diff-scoped
+    O->>O: Tier A → judge (pre-verified) · Tier B → Round 1 context
 
     Note over O: Round 1 — Independent, lens-differentiated
     O->>+C: Context package + lens (Correctness + overlay)

@@ -34,6 +34,12 @@
 
 set -eu
 
+# The hard-timeout watchdog (run_capped + KILL_GRACE) lives in a shared,
+# sourceable library so scripts/rc-static-scan.sh can reuse the identical
+# TERM-then-KILL escalation without forking it. Sourced (not exec'd); defines
+# only KILL_GRACE + run_capped, executes nothing on load.
+. "$(dirname "$0")/rc-lib-timeout.sh"
+
 # ---------------------------------------------------------------------------
 # Usage / argument handling
 # ---------------------------------------------------------------------------
@@ -73,10 +79,8 @@ esac
   exit 2
 }
 
-# Grace period between SIGTERM and the SIGKILL escalation that makes the cap
-# HARD: a provider that traps/ignores TERM (or is wedged) must still be stopped
-# so `wait` can't block forever. Plain constant — deliberately not an env knob.
-KILL_GRACE=3
+# KILL_GRACE (the SIGTERM->SIGKILL escalation grace) now lives in
+# rc-lib-timeout.sh alongside run_capped, sourced above.
 
 # `spent` accumulates measured whole seconds across every invocation (primary,
 # retry, fallback). It is the honest total reported as ELAPSED — on a
@@ -133,44 +137,9 @@ label_for() {
 }
 
 # ---------------------------------------------------------------------------
-# The timeout wrapper (ported verbatim from rules/orchestration.md
-# "Reviewer Timeouts & Fast-Fail" step 1) — hard per-invocation cap, with a
-# pure-shell watchdog fallback when neither timeout nor gtimeout exists.
+# The timeout wrapper (run_capped) + its KILL_GRACE constant are sourced from
+# scripts/rc-lib-timeout.sh at the top of this file. run_capped sets LAST_RC.
 # ---------------------------------------------------------------------------
-
-# run_capped <cap-seconds> <out-file> <cmd...>
-# Runs <cmd...> with combined stdout+stderr captured to <out-file>, capped at
-# <cap-seconds>. The cap is HARD: TERM at the cap, then KILL after KILL_GRACE,
-# so a TERM-ignoring/wedged child can't outlive the budget. Sets global LAST_RC
-# to the command's exit status (124/143/137 on a timeout kill). Never itself
-# fails, so it's safe to call under `set -e`. Kills the child pid only — no
-# process-group/setsid escalation (out of scope for leaf CLIs like agy/gemini).
-run_capped() {
-  _rc_cap="$1"
-  _rc_out="$2"
-  shift 2
-  LAST_RC=0
-  TO="$(command -v timeout 2>/dev/null || command -v gtimeout 2>/dev/null || true)"
-  if [ -n "$TO" ]; then
-    # -k escalates to SIGKILL if the process is still alive KILL_GRACE seconds
-    # after the initial SIGTERM at the cap.
-    "$TO" -k "$KILL_GRACE" "$_rc_cap" "$@" >"$_rc_out" 2>&1 || LAST_RC=$?
-  else
-    # no timeout binary — background + watchdog so the call is never unbounded.
-    # Watchdog: TERM at the cap, wait the grace, then KILL — matching -k above.
-    "$@" >"$_rc_out" 2>&1 &
-    pid=$!
-    (
-      sleep "$_rc_cap"
-      kill -TERM "$pid" 2>/dev/null
-      sleep "$KILL_GRACE"
-      kill -KILL "$pid" 2>/dev/null
-    ) >/dev/null 2>&1 &
-    wd=$!
-    wait "$pid" 2>/dev/null || LAST_RC=$?
-    kill "$wd" 2>/dev/null || true
-  fi
-}
 
 # ---------------------------------------------------------------------------
 # Per-tool command construction (frozen, tested profiles — see brief

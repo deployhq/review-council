@@ -18,7 +18,9 @@ The council runs a **single** independent review round, then a judge-driven synt
 - **Important**: Quality, performance, or maintainability concern. Should fix.
 - **Suggestion**: Minor improvement. Nice to have.
 
-**Severity is decoupled from agreement.** Agreement across reviewers is surfaced as a per-finding **badge** (`[cross-reviewed]` / `[1 reviewer · unverified]` / `[unverified]`) — never as the sort key, and never as a reason to lower severity. A `critical` flagged by a **single** reviewer stays **Critical** (tagged `[1 reviewer · unverified]`); the judge never demotes it for lack of a second voice. Cross-family corroboration (**≥2 different families**, or an **UPHELD** from a different family in Step 4) can *raise* a finding one tier; **same-family-only** agreement raises nothing.
+**Severity is decoupled from agreement.** Agreement across reviewers is surfaced as a per-finding **badge** (`[verified]` / `[cross-reviewed]` / `[1 reviewer · unverified]` / `[unverified]`) — never as the sort key, and never as a reason to lower severity. A `critical` flagged by a **single** reviewer stays **Critical** (tagged `[1 reviewer · unverified]`); the judge never demotes it for lack of a second voice. Cross-family corroboration (**≥2 different families**, or an **UPHELD** from a different family in Step 4) can *raise* a finding one tier; **same-family-only** agreement raises nothing.
+
+**Tier A severity is judge-*inherited*, not judge-*assigned*.** Every other severity call is the judge's own recalibration, but a Tier A deterministic finding (secrets → Critical; osv-scanner → its CVSS→severity map) enters the report at the tool's severity and the judge does **not** downgrade it — it is pre-verified evidence, badged `[verified]`, with ledger verdict `TOOL-VERIFIED` (it never went through Step-4 refutation). A Tier B tool signal, by contrast, carries no severity of its own: tool-only stays a Suggestion (badge `[tool-only:<rule>]`, ledger verdict `TOOL-ONLY` — the Tier-B counterpart to `TOOL-VERIFIED`, defined with the ledger in `skills/run/SKILL.md` §5.5); an LLM match on the same fingerprint promotes it to `[verified]` at the judge's assigned severity.
 
 ## Deduplication
 
@@ -29,6 +31,8 @@ Two findings are duplicates if they:
 Keep the more specific/actionable version.
 
 **The judge computes the canonical fingerprint** — `<relpath>::<normalized-symbol-or-hunk>::<normalized-concern>` — in Step 5; reviewers never author it (their `concern` slug is only a hint). Semantic cross-model dedup is keyed on that fingerprint: two findings with the same fingerprint collapse to one, keeping the most specific/actionable text and **unioning** their origin-families. (Step 4 uses a lighter provisional `(location, concern)` clustering only to detect ≥2-family corroboration before the judge finalizes the fingerprint.)
+
+**Tool-origin findings fingerprint the same way.** A deterministic static-analysis hit (Step 2.5) is fingerprinted by the **same semantic reduction**, not by string-matching its rule id against an LLM's `concern` slug (a `semgrep:<rule>` id and a Codex free-text concern are never string-identical). So a tool finding and an LLM finding on the same underlying issue collapse via the existing dedup path — the merged finding records the contributing tool name(s) for the ledger's `tool?` column.
 
 ## Graceful Degradation
 
