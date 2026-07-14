@@ -122,6 +122,7 @@ case "\${OSV_MODE:-findings}" in
   clean) printf '%s' '{"results":[]}' ;;
   findings) printf '%s' '{"results":[{"source":{"path":"go.mod"},"packages":[{"package":{"name":"foo"},"vulnerabilities":[{"id":"GHSA-xxxx","summary":"RCE in foo","database_specific":{"severity":"HIGH"}}]}]}]}' ;;
   groupsev) printf '%s' '{"results":[{"source":{"path":"go.sum"},"packages":[{"package":{"name":"bar"},"vulnerabilities":[{"id":"CVE-2024-1","summary":"vuln","severity":[{"type":"CVSS_V3","score":"CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:H"}]}],"groups":[{"ids":["CVE-2024-1"],"max_severity":"9.8"}]}]}]}' ;;
+  multigroup) printf '%s' '{"results":[{"source":{"path":"go.sum"},"packages":[{"package":{"name":"baz"},"vulnerabilities":[{"id":"CVE-AAA","summary":"critical vuln"},{"id":"CVE-BBB","summary":"low vuln"}],"groups":[{"ids":["CVE-AAA"],"max_severity":"CRITICAL"},{"ids":["CVE-BBB"],"max_severity":"LOW"}]}]}]}' ;;
 esac
 exit "\${OSV_EXIT:-1}"
 EOF
@@ -398,6 +399,23 @@ called() { grep -qx "$1" "$CALLS"; }
   # severity_raw = 9.8 (from groups[].max_severity), not the CVSS:3.1/... vector
   echo "$output" | grep -qxF 'TIER_A|osv-scanner|9.8|go.sum||osv-scanner:cve-2024-1|CVE-2024-1 vuln'
   ! echo "$output" | grep -qF 'CVSS:3.1'
+}
+
+@test "osv-scanner multi-group: each vuln gets ITS group's max_severity, not the first" {
+  setup_fakes
+  printf '%s\n' "go.sum" >"$CHANGED"
+  # One package, two vulns in two groups of differing severity. The old
+  # first($p.groups[]?.max_severity) would stamp BOTH with the first group's
+  # value; the id-matched select must give each vuln its own group's severity.
+  RC_STATIC_TOOLS="osv-scanner" OSV_VERSION=2.1.0 OSV_MODE=multigroup PATH="$SANDBOX" \
+    run --separate-stderr "$SCRIPT" "$BASE" "$HEAD" "$CHANGED"
+  echo "status=$status"
+  echo "output=<<$output>>"
+  [ "$status" -eq 0 ]
+  echo "$output" | grep -qxF 'TIER_A|osv-scanner|CRITICAL|go.sum||osv-scanner:cve-aaa|CVE-AAA critical vuln'
+  echo "$output" | grep -qxF 'TIER_A|osv-scanner|LOW|go.sum||osv-scanner:cve-bbb|CVE-BBB low vuln'
+  # regression guard: CVE-BBB must NOT inherit the first group's CRITICAL
+  ! echo "$output" | grep -qxF 'TIER_A|osv-scanner|CRITICAL|go.sum||osv-scanner:cve-bbb|CVE-BBB low vuln'
 }
 
 @test "osv-scanner: no lockfile in diff -> not triggered, never invoked" {

@@ -143,16 +143,20 @@ TRUFFLEHOG_FILTER="$SAN"'
 
 # osv-scanner emits a single JSON object; the filter walks results/packages/vulns.
 # osv severity: prefer the advisory's level word (.database_specific.severity,
-# e.g. CRITICAL/HIGH/MEDIUM), then the package group's max_severity (a real CVSS
-# level/score). Never .severity[].score — that is a CVSS *vector* string
-# (CVSS:3.1/AV:N/...), not a level. rule id is tool-prefixed (`osv-scanner:<id>`).
+# e.g. CRITICAL/HIGH/MEDIUM), then the max_severity of the package group that
+# actually contains THIS vuln's id — a package can hold several groups with
+# different severities, so grabbing the first group would mis-assign. Never
+# .severity[].score — that is a CVSS *vector* string (CVSS:3.1/AV:N/...), not a
+# level. rule id is tool-prefixed (`osv-scanner:<id>`).
 OSV_FILTER="$SAN"'
-  .results[]? as $r | ($r.packages[]?) as $p | ($p.vulnerabilities[]?)
+  .results[]? as $r | ($r.packages[]?) as $p | ($p.vulnerabilities[]?) as $v
   | [$tier,$tool,
-     ((.database_specific.severity // first($p.groups[]?.max_severity) // "UNKNOWN")|san),
+     (($v.database_specific.severity
+       // first($p.groups[]? | select((.ids // []) | index($v.id)) | .max_severity)
+       // "UNKNOWN")|san),
      (($r.source.path // "")|san),"",
-     ("osv-scanner:"+((.id//"vuln")|ascii_downcase|san)),
-     (((.id//"CVE")+" "+(.summary // .details // "known vulnerability"))|san)]
+     ("osv-scanner:"+(($v.id//"vuln")|ascii_downcase|san)),
+     ((($v.id//"CVE")+" "+($v.summary // $v.details // "known vulnerability"))|san)]
   | join("|")'
 
 SEMGREP_FILTER="$SAN"'
