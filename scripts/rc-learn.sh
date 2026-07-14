@@ -115,7 +115,13 @@ append_bullet() {
   _ab_tmp="$LEARNINGS_FILE.rc-learn.$$"
   # shellcheck disable=SC2064  # expand $_ab_tmp now, into the trap.
   trap "rm -f \"$_ab_tmp\"" EXIT INT TERM
-  awk -v want="$_ab_prefix" -v bullet="$_ab_bullet" -v hdr="$_ab_hdr" '
+  # Pass the user-derived bullet via the ENVIRONMENT, not -v: awk does C-style
+  # escape processing on -v assignments, so a literal "\n"/"\t" in the reason or
+  # fingerprint would become a real newline/tab AFTER has_ctrl cleared the raw arg
+  # — corrupting the file and defeating the guard. ENVIRON is NOT escape-processed.
+  # want/hdr are canonical constants, so they stay on -v.
+  _ab_bullet="$_ab_bullet" awk -v want="$_ab_prefix" -v hdr="$_ab_hdr" '
+    BEGIN { bullet = ENVIRON["_ab_bullet"] }
     # A section header line: close out the previous section (inserting the bullet
     # if that was the target and we have not yet), flush any buffered trailing
     # blank lines, then decide whether THIS header is the target.
@@ -158,7 +164,8 @@ append_bullet() {
 # suppression_exists <fingerprint>: 0 if a Suppressions bullet already carries the
 # same fingerprint (exact match after trim), else 1.
 suppression_exists() {
-  awk -v fp="$1" '
+  _se_fp="$1" awk '
+    BEGIN { fp = ENVIRON["_se_fp"] }  # via env, not -v (no C-escape processing)
     /^## / { insec = (index($0, "## Suppressions") == 1) ? 1 : 0; next }
     insec && /^- fingerprint:/ {
       line = $0
@@ -176,13 +183,13 @@ suppression_exists() {
 # whitespace + lowercase) to the same text, else 1. Both sides normalized in awk
 # so the comparison is symmetric.
 convention_exists() {
-  awk -v target="$1" '
+  _ce_target="$1" awk '
     function norm(s) {
       gsub(/[ \t]+/, " ", s)
       gsub(/^[ \t]+|[ \t]+$/, "", s)
       return tolower(s)
     }
-    BEGIN { t = norm(target) }
+    BEGIN { t = norm(ENVIRON["_ce_target"]) }  # via env, not -v (no C-escape processing)
     /^## / { insec = (index($0, "## Conventions") == 1) ? 1 : 0; next }
     insec && /^- / {
       line = $0

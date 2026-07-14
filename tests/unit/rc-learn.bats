@@ -256,3 +256,28 @@ count_suppressions() {
   [[ "$stderr" == *"invalid date"* ]]
   [ ! -e "$RC_LEARNINGS_FILE" ]
 }
+
+@test "regression: literal backslash escapes stored verbatim (no awk -v C-escape)" {
+  # A two-char literal '\n'/'\t' must NOT become a real newline/tab: awk -v does
+  # C-escape processing, so the writer/exists-checks pass user data via ENVIRON.
+  # (No real control chars here, so has_ctrl accepts the input.)
+  run --separate-stderr "$SCRIPT" add-suppression 'src/x.rb::foo::c' 'use \n and \t; C:\path'
+  [ "$status" -eq 0 ]
+  # ONE physical suppression line, backslashes intact — not split across lines.
+  file_has '- fingerprint: src/x.rb::foo::c | reason: use \n and \t; C:\path | added: 2026-07-14'
+  [ "$(count_suppressions)" -eq 1 ]
+
+  run --separate-stderr "$SCRIPT" add-convention 'never flag \n or \t in fixtures'
+  [ "$status" -eq 0 ]
+  file_has '- never flag \n or \t in fixtures'
+  [ "$(count_conventions)" -eq 1 ]
+
+  # Idempotency detection must also survive backslashes (exists-checks use ENVIRON):
+  # re-adding the same entries is a no-op, not a duplicate.
+  run --separate-stderr "$SCRIPT" add-suppression 'src/x.rb::foo::c' 'use \n and \t; C:\path'
+  [ "$status" -eq 0 ]
+  run --separate-stderr "$SCRIPT" add-convention 'never flag \n or \t in fixtures'
+  [ "$status" -eq 0 ]
+  [ "$(count_suppressions)" -eq 1 ]
+  [ "$(count_conventions)" -eq 1 ]
+}
