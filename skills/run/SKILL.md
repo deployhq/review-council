@@ -177,8 +177,11 @@ Write the changed-file list (one repo-relative path per line) to a temp file **w
 > RC_STATIC_TOOLS=<effective static_analysis.tools, comma-joined> \
 > RC_STATIC_TIMEOUT=<effective static_analysis.timeout_seconds> \
 > RC_SEMGREP_CONFIG=<effective static_analysis.semgrep_config> \
+> RC_STATIC_DOCKER_TOOLS=<empty on the first pass; a comma-joined tool list ONLY on a Docker re-dispatch — see 2.5.2> \
 > "${CLAUDE_PLUGIN_ROOT}/scripts/rc-static-scan.sh" "<base-ref>" "<head-ref-or-worktree>" "<changed-files-list-file>"
 > ```
+> On the **first** dispatch, leave `RC_STATIC_DOCKER_TOOLS` **empty** — that is today's behavior exactly (the Docker daemon is never even probed by the script). It is set to a comma-joined tool list **only** when the user opts a missing scanner into Docker at the 2.5.2 gate, which re-dispatches this same subagent with those tools added.
+>
 > The script probes each configured tool (`command -v`), checks its domain trigger against the changed files, runs the present + triggered ones under a per-tool timeout, and prints a `TIER_A` block, a `TIER_B` block, and one `SKIPPED: <tool> — <reason>` line per skipped tool. It **always** exits cleanly — a tool's own non-zero "found something" exit is a normal outcome, not a script failure.
 >
 > **If the script is missing, non-executable, or errors out before producing its blocks**, do NOT abort — return exactly `STATIC-SCAN-UNAVAILABLE: <one-line reason>` and nothing else. The orchestrator treats that as "all tools skipped."
@@ -190,12 +193,13 @@ Write the changed-file list (one repo-relative path per line) to a temp file **w
 Before consuming the results, scan the `SKIPPED:` lines for any tool skipped with reason **`not installed`** that is in the configured `static_analysis.tools` list. The user *expects* these tools, so they must **never** be silently dropped.
 
 - **Domain-not-triggered skips stay quiet** (`SKIPPED: <tool> — not triggered (no matching files)`): nothing to install, so just fold them into the status line. Same for `disabled`, `semgrep off`, and `network-unreachable` (trufflehog's live-verification egress absent → treated as "ran, 0 findings"; not a missing tool).
-- **For each tool skipped as `not installed`:** TELL the user which configured tools are missing and **how to install each** — look up the per-tool install command in `rules/static-analysis.md` (the tool registry; e.g. `brew install gitleaks`). Then **ASK**, conversationally:
-  > *"These configured static-analysis tools aren't installed: [tool → install cmd, one per line]. Install them first (I'll pause and re-run the scan once you've installed them), or proceed without them for this run?"*
+- **For each tool skipped as `not installed`:** TELL the user which configured tools are missing and **how to install each** — look up the per-tool install command in `rules/static-analysis.md` (the tool registry; e.g. `brew install gitleaks`). **Also probe Docker once** (`docker info >/dev/null 2>&1`); if it succeeds, note which of the *missing* tools can run via their official image with **no local install** — only the four core scanners **gitleaks, trufflehog, semgrep, osv-scanner** have images (the lint tools do not). Then **ASK**, conversationally, offering the options that apply:
+  > *"These configured static-analysis tools aren't installed: [tool → install cmd, one per line]. [If Docker is up and any are Docker-supported:] I can run [those] via their official Docker image for this run instead — no local install. Options: (a) install natively and I'll re-run, (b) run the Docker-supported ones via Docker now, or (c) proceed without them?"*
   - **Proceed** → continue with the tools that did run; note the missing ones in the status line (`skipped: not installed — proceeding`).
   - **Install / wait** → pause. After the user confirms they're installed, **re-dispatch the same subagent** (2.5.1) — the newly-present tools are picked up automatically by the script's `command -v` probe, no restart needed. Re-check the `SKIPPED:` lines and repeat the ASK if anything is still missing.
+  - **Run via Docker** → **re-dispatch the same subagent** (2.5.1) with `RC_STATIC_DOCKER_TOOLS=<comma-joined list of the Docker-supported missing tools>` added on the invocation. The script runs each such tool from its pinned image (repo mounted read-only at `/src`, filesystem-mode scan) and a Docker finding is **indistinguishable downstream** from a native one. **Native install always wins** — a tool present on `PATH` ignores its Docker entry, so this only affects the still-missing scanners; a tool with no image (any lint tool, or an unsupported name) simply stays `not installed`. **Caveats:** first use pulls the image (a few hundred MB, one-time); `trufflehog`'s verified-mode outbound egress is unchanged; images are `:latest` (convenience over digest-pinning). Re-check the `SKIPPED:` lines after the re-run.
 
-This is still non-blocking — the user can always choose *proceed* — it just never *silently* drops an expected tool. (`setup` is print-only; this interactive proceed/pause ASK lives here, at review-run time, where a real run is about to skip a tool the user configured.)
+This is still non-blocking — the user can always choose *proceed* — it just never *silently* drops an expected tool. (`setup` is print-only; this interactive proceed/pause/Docker ASK lives here, at review-run time, where a real run is about to skip a tool the user configured.)
 
 ### 2.5.3 Route the results
 
@@ -209,7 +213,7 @@ Print a compact status line (same observable-artifact spirit as the Phase-1 lens
 ```
 Static analysis: gitleaks (ok, 0), osv-scanner (ok, 2 CVEs), semgrep (ok, 5 signals), ruff (skipped: no *.py in diff), shellcheck (skipped: not installed — proceeding), actionlint (skipped: no workflow changes), hadolint (skipped: no Dockerfile changes)
 ```
-Carry this line into the Step-6 report header. If Step 2.5 was skipped (disabled, or a plan/document review), the header notes `static analysis: off`.
+Carry this line into the Step-6 report header. If Step 2.5 was skipped (disabled, or a plan/document review), the header notes `static analysis: off`. For any tool the user opted into Docker (2.5.2), annotate its entry `ok, <count> (via docker)` — the tool ran, just from its image rather than a local install.
 
 ## Step 3: Round 1 — Independent Review (Parallel)
 
