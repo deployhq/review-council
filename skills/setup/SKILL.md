@@ -131,6 +131,8 @@ For each tool **found** → "available (\<version\>)". For each tool **missing**
 
 State this plainly to the user: "Install any of these you want — Review Council picks them up automatically on the next run (`command -v` probe, no restart needed). `setup` only ever detects and prints; it never installs a static-analysis tool for you, even with consent."
 
+**No-install Docker option.** If Docker is running, a *missing* core scanner (`gitleaks`, `trufflehog`, `semgrep`, `osv-scanner` — the four with official images) can be run **from its image** at review time with no local install: the Step-2.5 gate offers "run via Docker" when the tool is missing and the daemon is up. It's opt-in per-run, a natively-installed tool always takes precedence, and the finding is indistinguishable from a native one. The lint tools (`ruff`/`shellcheck`/`actionlint`/`hadolint`) have no Docker path — install them natively.
+
 **trufflehog outbound-network caveat.** `trufflehog`'s `--results=verified` mode makes **live outbound network calls**, authenticating with each discovered credential against its actual provider (e.g. confirming an AWS key is real by calling AWS with it) — that live check is what makes its hits verified/high-precision. Implications worth surfacing: it requires network egress from the machine running the review, and the verification call itself could trip the *credential owner's* own anomaly detection, even though the intent is benign. `trufflehog` is **default-on** (included in the default `static_analysis.tools` list) — the one-line opt-out is dropping `trufflehog` from `static_analysis.tools` in `.review-council/config.yml` (or via `RC_STATIC_TOOLS`). If the network is unreachable, the scan degrades gracefully (treated as "ran, 0 findings") — it never errors the run.
 
 ## Step 2: Summary
@@ -250,7 +252,7 @@ If the user accepts, write **`.review-council/config.yml`** with the **full-refe
 #   enabled: true                    # RC_STATIC_ANALYSIS
 #   tools: [gitleaks, trufflehog, osv-scanner, semgrep, ruff, shellcheck, actionlint, hadolint]   # RC_STATIC_TOOLS (comma-separated)
 #   timeout_seconds: 60              # RC_STATIC_TIMEOUT
-#   semgrep_config: auto             # RC_SEMGREP_CONFIG — auto | off | a repo-owned ruleset path
+#   semgrep_config: p/default        # RC_SEMGREP_CONFIG — a registry pack (p/…) | off | a repo-owned ruleset path (auto is skipped: needs metrics)
 ```
 
 And write **`.review-council/config.local.yml`** (per-machine overrides — identical schema, wins over `config.yml`):
