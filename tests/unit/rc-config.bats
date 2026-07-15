@@ -51,7 +51,7 @@ has_line() {
   has_line "static_analysis.enabled=true"
   has_line "static_analysis.tools=gitleaks,trufflehog,osv-scanner,semgrep,ruff,shellcheck,actionlint,hadolint"
   has_line "static_analysis.timeout_seconds=60"
-  has_line "static_analysis.semgrep_config=auto"
+  has_line "static_analysis.semgrep_config=p/default"
 }
 
 @test "provider enable/disable from config.yml" {
@@ -322,7 +322,7 @@ EOF
   has_line "static_analysis.enabled=true"
   has_line "static_analysis.tools=gitleaks,trufflehog,osv-scanner,semgrep,ruff,shellcheck,actionlint,hadolint"
   has_line "static_analysis.timeout_seconds=60"
-  has_line "static_analysis.semgrep_config=auto"
+  has_line "static_analysis.semgrep_config=p/default"
 }
 
 @test "static_analysis.enabled: config.yml sets false, then RC_STATIC_ANALYSIS env overrides back to true" {
@@ -402,10 +402,10 @@ EOF
   has_line "static_analysis.timeout_seconds=45"
 }
 
-@test "static_analysis.semgrep_config: default auto, off, custom path, env override" {
+@test "static_analysis.semgrep_config: default p/default, off, custom path, env override" {
   run --separate-stderr "$SCRIPT" "$CFG"
   [ "$status" -eq 0 ]
-  has_line "static_analysis.semgrep_config=auto"
+  has_line "static_analysis.semgrep_config=p/default"
 
   printf 'static_analysis:\n  semgrep_config: "off"\n' >"$CFG/config.yml"
   run --separate-stderr "$SCRIPT" "$CFG"
@@ -447,7 +447,7 @@ EOF
   echo "stderr=<<$stderr>>"
   [ "$status" -eq 0 ]
   # crafted value rejected -> falls back to the default ("auto")
-  has_line "static_analysis.semgrep_config=auto"
+  has_line "static_analysis.semgrep_config=p/default"
   printf '%s\n' "$stderr" | grep -q 'static_analysis.semgrep_config'
   ! printf '%s\n' "$output" | grep -q 'injected.line'
   ! printf '%s\n' "$output" | grep -vE '^#|='

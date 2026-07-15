@@ -396,6 +396,6 @@ emit_setting static_analysis.enabled ".static_analysis.enabled" "true" bool RC_S
 resolve_static_tools "gitleaks,trufflehog,osv-scanner,semgrep,ruff,shellcheck,actionlint,hadolint"
 printf 'static_analysis.tools=%s\n' "$STATIC_TOOLS_VALUE"
 emit_setting static_analysis.timeout_seconds ".static_analysis.timeout_seconds" "60" posint RC_STATIC_TIMEOUT
-emit_setting static_analysis.semgrep_config ".static_analysis.semgrep_config" "auto" str RC_SEMGREP_CONFIG
+emit_setting static_analysis.semgrep_config ".static_analysis.semgrep_config" "p/default" str RC_SEMGREP_CONFIG
 
 exit 0
