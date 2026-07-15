@@ -130,6 +130,30 @@ REVIEW_EOF
     echo "Authentication failed: not authenticated. I could not generate the Findings section or the Overall Assessment for this review." >&2
     exit 1
     ;;
+  verdicts)
+    # Step-4 REFUTATION output: pipe-delimited verdict lines, NO review headings.
+    # Must classify OK (the Phase-4 collapse routes refutation through this same
+    # script; verdict output carries none of the review headings the OK-guard
+    # keyed on).
+    cat <<'VERDICT_EOF'
+F1 | REFUTED — @user is loaded only from current_account.users, so it is scoped.
+F2 | UPHELD — token login emits the event on the GET with no interstitial.
+F3 | INCONCLUSIVE — cannot execute the spreadsheet scenario here.
+VERDICT_EOF
+    exit 0
+    ;;
+  verdicts-authish)
+    # Verdict output whose MERGED stream (run_capped 2>&1) also carries a repo
+    # phrase the model echoed while exploring — here a Rails flash "Please log in
+    # to continue." that matches AUTH_PATTERN. Must STILL classify OK: the verdict
+    # shape wins before the hard-fail patterns (the exact live smoke-test bug).
+    cat <<'VERDICT_EOF'
+F1 | UPHELD — token login emits auth.session_started directly on GET /login?token=...
+F2 | REFUTED — @user is already account-scoped at this call site.
+VERDICT_EOF
+    echo "    96    notice: 'Your e-mail address has been verified. Please log in to continue.'" >&2
+    exit 0
+    ;;
   hang)
     sleep "${AGY_SLEEP:-999}"
     exit 0
@@ -341,6 +365,38 @@ call_count() {
   esac
   [ "$(call_count "$AGY_CALLS")" -eq 1 ]
   [ "$(call_count "$GEM_CALLS")" -eq 1 ]
+}
+
+@test "refutation-verdicts: UPHELD/REFUTED/INCONCLUSIVE output (no review headings) classifies OK, returned as TOOL" {
+  # The Phase-4 collapse routes Step-4 refutation through this script; a verdict
+  # set has none of the review headings, so it must be recognized on its own
+  # shape or it falls through to the hard-fail patterns.
+  AGY_MODE=verdicts run --separate-stderr "$SCRIPT" "$AGY" "$GEMINI" "$PROMPT_FILE"
+  echo "status=$status"
+  echo "output=<<$output>>"
+  [ "$status" -eq 0 ]
+  case "$output" in
+  "TOOL: Antigravity"*) : ;;
+  *) echo "expected TOOL: Antigravity (verdict output must classify OK, not a hard fail)" && return 1 ;;
+  esac
+  echo "$output" | grep -qi 'REFUTED'
+  [ "$(call_count "$GEM_CALLS")" -eq 0 ]
+}
+
+@test "refutation-verdicts-authish: verdict output whose merged stream echoes repo source ('please log in') still classifies OK, not AUTH" {
+  # The live smoke-test bug: a successful refutation of an auth PR was dropped as
+  # 'auth failure' because the model's reasoning (merged via 2>&1) echoed a
+  # 'Please log in' flash from the code, and the verdict format wasn't recognized.
+  AGY_MODE=verdicts-authish GEM_MODE=ok run --separate-stderr "$SCRIPT" "$AGY" "$GEMINI" "$PROMPT_FILE"
+  echo "status=$status"
+  echo "output=<<$output>>"
+  [ "$status" -eq 0 ]
+  case "$output" in
+  "TOOL: Antigravity"*) : ;;
+  *) echo "expected TOOL: Antigravity (verdicts must not fall through to AUTH on echoed source)" && return 1 ;;
+  esac
+  # agy succeeded on its own shape → gemini fallback must NOT be consulted
+  [ "$(call_count "$GEM_CALLS")" -eq 0 ]
 }
 
 @test "fast-empty-then-retry-success: primary empty fast, retry succeeds, gemini never called" {

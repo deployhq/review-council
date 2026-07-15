@@ -272,6 +272,14 @@ AUTH_PATTERN='no longer supported|not authenticated|please migrate to the antigr
 QUOTA_PATTERN='429|exhausted your daily quota|terminalquotaerror|rate limit'
 OVERLOAD_PATTERN='503|high demand'
 
+# A Step-4 REFUTATION verdict line: "<id> | UPHELD|REFUTED|INCONCLUSIVE — …".
+# Recognized as a valid RESULT alongside the review format (see classify) so a
+# verdict set is never dropped through the hard-fail patterns — anchored to the
+# pipe/line-start shape so prose (or echoed source) mentioning the words doesn't
+# count. The Phase-4 collapse routes refutation through this script too, and a
+# verdict output carries none of the review headings the OK-guard keyed on.
+VERDICT_PATTERN='(^|\|)[[:space:]]*(upheld|refuted|inconclusive)([[:space:]]|$|\|)'
+
 # classify <rc> <out-file>: sets global CLASS to one of
 # TIMEOUT / AUTH / QUOTA / OVERLOAD / EMPTY / OK.
 classify() {
@@ -283,13 +291,19 @@ classify() {
     return 0
   fi
 
-  # A valid review wins before any hard-pattern check — see block comment.
-  # Anchor to heading-shaped lines (optionally `#`-prefixed markdown headings,
-  # ending in `:` or end-of-line) so inline prose mentioning the words doesn't
-  # count as a section.
+  # A valid RESULT wins before any hard-pattern check — see block comment. Two
+  # shapes count: (1) a Round-1 REVIEW (Findings + Overall Assessment heading-
+  # shaped lines); (2) a Step-4 REFUTATION verdict set (VERDICT_PATTERN lines).
+  # Anchor to line shape (headings / pipe-delimited verdicts), not bare
+  # substrings, so inline prose — or repo source the model echoes in its
+  # reasoning, merged here via run_capped's 2>&1 (e.g. a "please log in" flash) —
+  # doesn't count. Without shape (2), verdict output has no review headings,
+  # falls through to the hard-fail patterns, and false-matches on that echoed
+  # source: the exact refutation-classification bug this guards against.
   if [ -s "$_cl_out" ] &&
-    grep -qiE '^[[:space:]]*(#+[[:space:]]*)?findings([[:space:]]*:|[[:space:]]*$)' "$_cl_out" 2>/dev/null &&
-    grep -qiE '^[[:space:]]*(#+[[:space:]]*)?overall assessment([[:space:]]*:|[[:space:]]*$)' "$_cl_out" 2>/dev/null; then
+    { { grep -qiE '^[[:space:]]*(#+[[:space:]]*)?findings([[:space:]]*:|[[:space:]]*$)' "$_cl_out" 2>/dev/null &&
+        grep -qiE '^[[:space:]]*(#+[[:space:]]*)?overall assessment([[:space:]]*:|[[:space:]]*$)' "$_cl_out" 2>/dev/null; } ||
+      grep -qiE "$VERDICT_PATTERN" "$_cl_out" 2>/dev/null; }; then
     CLASS=OK
     return 0
   fi
