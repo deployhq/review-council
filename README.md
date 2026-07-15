@@ -261,7 +261,7 @@ Static analysis is never a voting reviewer: no lens, doesn't count toward `min_r
 | `static_analysis.enabled` | `true` | `RC_STATIC_ANALYSIS` | Turn the whole Step 2.5 scan on/off |
 | `static_analysis.tools` | all 8 (`gitleaks, trufflehog, osv-scanner, semgrep, ruff, shellcheck, actionlint, hadolint`) | `RC_STATIC_TOOLS` | Which tools to run (comma-separated); unknown names are dropped with a note |
 | `static_analysis.timeout_seconds` | `60` | `RC_STATIC_TIMEOUT` | Per-tool hard timeout (same watchdog machinery as the reviewer timeout) |
-| `static_analysis.semgrep_config` | `auto` | `RC_SEMGREP_CONFIG` | `auto`, `off`, or a repo-owned ruleset path |
+| `static_analysis.semgrep_config` | `p/default` | `RC_SEMGREP_CONFIG` | A registry pack (`p/default`, `p/ruby`, …), `off`, or a repo-owned ruleset path (`auto` is skipped — it needs metrics we disable) |
 
 **Setup.** `/review-council:setup` probes all eight tools (grouped Tier A / Tier B) and, for anything missing, prints its install command — **print-only**: unlike the `yq` flow, `setup` never installs a static-analysis tool itself, even with consent. Install whichever you want; Review Council picks them up automatically on the next run (`command -v` probe, no restart needed).
 

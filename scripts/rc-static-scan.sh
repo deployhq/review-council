@@ -19,9 +19,13 @@
 #   RC_STATIC_TOOLS     comma list, default all 8. Tools not listed are skipped
 #                       (SKIPPED: <tool> — disabled).
 #   RC_STATIC_TIMEOUT   posint seconds, default 60. Per-tool hard cap.
-#   RC_SEMGREP_CONFIG   str, default auto. "off" => semgrep skipped; "auto" =>
-#                       --config auto; any other value => a repo-owned ruleset
-#                       path passed as --config <path>.
+#   RC_SEMGREP_CONFIG   str, default p/default. "off" => semgrep skipped;
+#                       "p/…"/"r/…"/http(s):// => a registry ruleset ref passed
+#                       through as --config <ref>; "auto" => skipped (it uploads
+#                       project metadata and REQUIRES metrics, incompatible with
+#                       our --metrics=off); any other value => a repo-owned
+#                       ruleset FILE path passed as --config <path> (falls back
+#                       to p/default if unreadable).
 #
 # stdout (the output contract):
 #   TIER_A
@@ -99,7 +103,7 @@ if [ "$STATIC_TIMEOUT" -le 0 ]; then
   STATIC_TIMEOUT=60
 fi
 
-SEMGREP_CONFIG="${RC_SEMGREP_CONFIG:-auto}"
+SEMGREP_CONFIG="${RC_SEMGREP_CONFIG:-p/default}"
 
 # ---------------------------------------------------------------------------
 # Scratch buffers (TIER_A / TIER_B / SKIPPED accumulate as tools run, so the
@@ -612,14 +616,28 @@ run_semgrep() {
     return
   fi
   _sg_cfg="$SEMGREP_CONFIG"
-  # A non-auto value is a repo-owned ruleset path; if it isn't a readable file,
-  # fall back to auto with a note (never fetch/execute an untrusted path).
-  if [ "$_sg_cfg" != "auto" ]; then
-    if [ ! -f "$_sg_cfg" ]; then
-      echo "rc-static-scan: semgrep_config '$_sg_cfg' not a readable file; using auto" >&2
-      _sg_cfg="auto"
-    fi
-  fi
+  # Resolve the config ref. `auto` uploads project metadata to tailor rules and
+  # REQUIRES semgrep metrics on — incompatible with our hardcoded --metrics=off
+  # (and with the least-egress posture), so it is not runnable here: skip with
+  # guidance. Registry refs (p/…, r/…, http(s)://) pass through as --config (rule
+  # *fetch* is data, allowed — same basis as auto's fetch). Anything else is a
+  # repo-owned ruleset FILE path; if unreadable, fall back to the p/default pack
+  # with a note (never fetch/execute an untrusted/typo'd path).
+  case "$_sg_cfg" in
+    auto)
+      add_skip semgrep "config 'auto' needs metrics/telemetry (incompatible with --metrics=off) — set semgrep_config to a pack like p/default or a repo-owned ruleset path"
+      return
+      ;;
+    p/* | r/* | http://* | https://*)
+      : # registry/remote ref — use as-is
+      ;;
+    *)
+      if [ ! -f "$_sg_cfg" ]; then
+        echo "rc-static-scan: semgrep_config '$_sg_cfg' not a readable file; using p/default" >&2
+        _sg_cfg="p/default"
+      fi
+      ;;
+  esac
   _sg_report="$WORKDIR/semgrep.json"
   _sg_fallback=1
   set -- semgrep scan --config "$_sg_cfg" --json --output "$_sg_report" --metrics=off

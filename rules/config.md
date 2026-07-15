@@ -142,7 +142,7 @@ static_analysis:
 | `static_analysis.enabled` | `true` | `RC_STATIC_ANALYSIS` | Turn the whole static-analysis layer on/off. |
 | `static_analysis.tools` | `gitleaks,trufflehog,osv-scanner,semgrep,ruff,shellcheck,actionlint,hadolint` | `RC_STATIC_TOOLS` | Which tools run (comma-separated when set via env). |
 | `static_analysis.timeout_seconds` | `60` | `RC_STATIC_TIMEOUT` | Per-tool wall-clock cap (seconds). |
-| `static_analysis.semgrep_config` | `auto` | `RC_SEMGREP_CONFIG` | `auto` (registry rules), `off` (skip semgrep), or a repo-owned ruleset path. |
+| `static_analysis.semgrep_config` | `p/default` | `RC_SEMGREP_CONFIG` | A registry pack ref (`p/default`, `p/ruby`, …), `off` (skip semgrep), or a repo-owned ruleset path. `auto` is unsupported (it uploads project metadata and requires metrics, which we disable) and is skipped with guidance. |
 
 - **`tools` is a list**, like `lenses.<lens>.providers` — but unlike lenses, it **does**
   have an env override: `RC_STATIC_TOOLS` (comma-separated) fully replaces the
@@ -155,6 +155,10 @@ static_analysis:
   `trufflehog` from `tools` to opt out if that outbound call is undesirable in your
   environment (see `rules/static-analysis.md`).
 - `semgrep_config: off` skips semgrep unconditionally, regardless of `tools`.
+- `semgrep_config` defaults to the **`p/default`** registry pack. `auto` is **not** usable
+  here — it uploads project metadata and requires semgrep metrics, which Review Council
+  disables (`--metrics=off`); setting it to `auto` skips semgrep with a note pointing at
+  `p/default`. Use a `p/…`/`r/…` registry ref or a committed, repo-owned ruleset path.
 
 ## Learnings
 
@@ -353,7 +357,7 @@ uncomment only what you want to change.
 #   enabled: true                    # RC_STATIC_ANALYSIS
 #   tools: [gitleaks, trufflehog, osv-scanner, semgrep, ruff, shellcheck, actionlint, hadolint]   # RC_STATIC_TOOLS (comma-separated)
 #   timeout_seconds: 60              # RC_STATIC_TIMEOUT
-#   semgrep_config: auto             # RC_SEMGREP_CONFIG — auto | off | a repo-owned ruleset path
+#   semgrep_config: p/default        # RC_SEMGREP_CONFIG — a registry pack (p/…) | off | a repo-owned ruleset path (auto is skipped: needs metrics)
 ```
 
 See `skills/run/SKILL.md` Step 0 for how the orchestrator reads and applies this, and

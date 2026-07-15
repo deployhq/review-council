@@ -71,10 +71,13 @@ to Codex/Google in `rules/providers.md`).
 has unstaged changes or isn't a git dir — which collides with Review Council's own
 "review my unstaged working changes" mode. When `--baseline-commit` can't be used, drop it,
 run a **full scan**, and apply the **changed-hunk post-filter** instead (Noise Control, lever
-3, below). `<config>` comes from `static_analysis.semgrep_config`: `auto` (default) uses
-semgrep's own registry auto-config; `off` skips semgrep unconditionally regardless of the
-domain trigger; any other value is a **repo-owned local ruleset path**, passed verbatim as
-`--config <path>` — never a PR-supplied path (see Security, below).
+3, below). `<config>` comes from `static_analysis.semgrep_config` (default **`p/default`**): a
+registry pack ref (`p/…`, `r/…`, or an `http(s)://` URL) is passed through as `--config <ref>`;
+`off` skips semgrep unconditionally regardless of the domain trigger; any other value is a
+**repo-owned local ruleset path**, passed verbatim as `--config <path>` — never a PR-supplied
+path (see Security, below). **`auto` is not usable here:** it uploads project metadata and
+requires semgrep metrics, which we run with `--metrics=off`, so `auto` is skipped with a note
+pointing at `p/default`.
 
 **(e) actionlint has no turnkey SARIF output** — only a hand-written Go-template mapping,
 which its own maintainers call nontrivial. Its JSON template output (`-format '{{json .}}'`)
@@ -217,9 +220,9 @@ Every tool invocation may use **only** a config file already committed to the ta
 precedent this whole evolution explicitly refuses to repeat — CodeRabbit's "run whatever
 config the PR author supplies" design is exactly the failure mode this rule prevents.
 
-- **Allowed:** a committed, repo-owned config/ruleset file. `semgrep --config auto`'s network
-  fetch of *rules* from semgrep's registry is fine — rules are data, not arbitrary executable
-  code.
+- **Allowed:** a committed, repo-owned config/ruleset file. semgrep's network fetch of *rules*
+  from its registry (e.g. `--config p/default`) is fine — rules are data, not arbitrary
+  executable code.
 - **Forbidden, full stop:** fetching or executing a PR-supplied tool config, ruleset, or
   plugin — a `.semgrep.yml`/`.gitleaks.toml`/ruleset/ast-grep-style scriptable rule pack
   sourced from the diff itself. Never resolve a tool config path from anything the diff under

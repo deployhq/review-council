@@ -250,6 +250,53 @@ called() { grep -qx "$1" "$CALLS"; }
   ! called semgrep
 }
 
+@test "semgrep config default -> uses --config p/default (auto+metrics-off breakage fixed)" {
+  setup_fakes
+  RC_STATIC_TOOLS="semgrep" PATH="$SANDBOX" \
+    run --separate-stderr "$SCRIPT" "$BASE" "$HEAD" "$CHANGED"
+  echo "status=$status"
+  echo "args=<<$(cat "$ARGS")>>"
+  [ "$status" -eq 0 ]
+  called semgrep
+  grep -qF -- '--config p/default' "$ARGS"
+  ! grep -qF -- '--config auto' "$ARGS"
+}
+
+@test "semgrep config=auto -> SKIPPED (needs metrics, incompatible with --metrics=off), never invoked" {
+  setup_fakes
+  RC_STATIC_TOOLS="semgrep" RC_SEMGREP_CONFIG=auto PATH="$SANDBOX" \
+    run --separate-stderr "$SCRIPT" "$BASE" "$HEAD" "$CHANGED"
+  echo "status=$status"
+  echo "output=<<$output>>"
+  [ "$status" -eq 0 ]
+  echo "$output" | grep -qF "SKIPPED: semgrep — config 'auto' needs metrics/telemetry"
+  ! called semgrep
+}
+
+@test "semgrep config=p/ruby -> registry ref passed through as --config p/ruby" {
+  setup_fakes
+  RC_STATIC_TOOLS="semgrep" RC_SEMGREP_CONFIG=p/ruby PATH="$SANDBOX" \
+    run --separate-stderr "$SCRIPT" "$BASE" "$HEAD" "$CHANGED"
+  echo "status=$status"
+  echo "args=<<$(cat "$ARGS")>>"
+  [ "$status" -eq 0 ]
+  called semgrep
+  grep -qF -- '--config p/ruby' "$ARGS"
+}
+
+@test "semgrep config=<unreadable path> -> falls back to p/default with a note" {
+  setup_fakes
+  RC_STATIC_TOOLS="semgrep" RC_SEMGREP_CONFIG="/no/such/ruleset.yml" PATH="$SANDBOX" \
+    run --separate-stderr "$SCRIPT" "$BASE" "$HEAD" "$CHANGED"
+  echo "status=$status"
+  echo "args=<<$(cat "$ARGS")>>"
+  echo "stderr=<<$stderr>>"
+  [ "$status" -eq 0 ]
+  called semgrep
+  grep -qF -- '--config p/default' "$ARGS"
+  echo "$stderr" | grep -qF "not a readable file; using p/default"
+}
+
 @test "network-unreachable: trufflehog runs, 0 verified + net error -> graceful SKIPPED, never errors" {
   setup_fakes
   RC_STATIC_TOOLS="trufflehog" TRUFFLEHOG_MODE=netfail PATH="$SANDBOX" \
