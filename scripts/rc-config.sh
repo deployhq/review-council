@@ -291,11 +291,9 @@ emit_setting settings.min_reviewers ".settings.min_reviewers" "2" posint RC_MIN_
 emit_setting settings.reviewer_timeout_seconds ".settings.reviewer_timeout_seconds" "600" posint RC_REVIEWER_TIMEOUT
 emit_setting settings.run_budget_seconds ".settings.run_budget_seconds" "600" posint RC_RUN_BUDGET
 emit_setting settings.auto_retry ".settings.auto_retry" "false" bool RC_AUTO_RETRY
-emit_setting settings.health_probe ".settings.health_probe" "true" bool RC_HEALTH_PROBE
+emit_setting settings.health_probe ".settings.health_probe" "false" bool RC_HEALTH_PROBE
 emit_setting settings.health_probe_timeout_seconds ".settings.health_probe_timeout_seconds" "20" posint RC_HEALTH_PROBE_TIMEOUT
-emit_setting settings.max_context_bytes ".settings.max_context_bytes" "400000" posint RC_MAX_CONTEXT_BYTES
-emit_setting settings.max_run_tokens ".settings.max_run_tokens" "0" posint RC_MAX_RUN_TOKENS
-emit_setting settings.claude_max_turns ".settings.claude_max_turns" "30" posint RC_CLAUDE_MAX_TURNS
+emit_setting settings.claude_max_turns ".settings.claude_max_turns" "100" posint RC_CLAUDE_MAX_TURNS
 
 # ---------------------------------------------------------------------------
 # Static analysis — files AND env (env wins), its own top-level section

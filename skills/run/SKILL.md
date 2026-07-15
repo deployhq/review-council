@@ -31,7 +31,7 @@ rm -f "$RC_NOTES"
 
 - `reviewer.<p>.enabled` / `reviewer.<p>.model` for `p` in `claude`, `codex`, `google`, `perplexity`.
 - `lens.<l>.enabled` / `lens.<l>.providers` for `l` in `security`, `correctness`, `cross_file`, `performance`, `design`, `dependency` — plus `lens.security.replaces_dedicated`.
-- `settings.<k>` for `personas`, `verify`, `verify_max_findings`, `learn`, `min_reviewers`, `reviewer_timeout_seconds`, `run_budget_seconds`, `auto_retry`.
+- `settings.<k>` for `personas`, `verify`, `verify_max_findings`, `learn`, `min_reviewers`, `reviewer_timeout_seconds`, `run_budget_seconds`, `auto_retry`, `health_probe`, `health_probe_timeout_seconds`, `claude_max_turns`.
 - `static_analysis.<k>` for `enabled`, `tools`, `timeout_seconds`, `semgrep_config` — the deterministic static-scan layer consumed in **Step 2.5**. (An older reader that does not emit a `# static_analysis` section → fall back to the defaults: `enabled=true`, `tools=gitleaks,trufflehog,osv-scanner,semgrep,ruff,shellcheck,actionlint,hadolint`, `timeout_seconds=60`, `semgrep_config=p/default`.)
 
 If `yq` is missing, the reader prints a `yq not found` note and falls back to defaults + env; the run proceeds normally (config files are simply ignored). `rules/config.md` documents the one-time `brew install yq` (mikefarah v4) needed to *use* config files.
@@ -78,13 +78,34 @@ Interpret the output (each value is on its own line — read the whole line as t
    Never count this as two reviewers. Pass the resolved primary tool **and its path**, plus the fallback tool **and its path**, to the Google reviewer subagent.
 4. **Perplexity**: `perplexity=set` → available; `unset` → unavailable.
 
+### 0.2.1 Optional health probe (gated on `settings.health_probe`)
+
+**Default off.** If `settings.health_probe` is **false** (the default, resolved in 0.1), **skip this step entirely** — the roster is exactly what detection found, byte-identical to today's behavior. Set it `true` only when you want `available`/`min_reviewers` to reflect *usable* rather than merely *installed* providers, accepting that each probe costs up to `settings.health_probe_timeout_seconds` (default 20s) of wall-clock plus a real (trivial) provider call.
+
+When `settings.health_probe` is **true**, probe the two CLI slots that route through the provider script — **Codex and Google only** (the native Claude/Security reviewers are always-available and never probed; Perplexity is a curl API with no probe binary). For each such slot that detection found available **as a CLI** (an MCP-only Codex has no binary to probe — skip it), run the script's `--probe` mode with the same resolved paths you'd pass in Round 1, on the invocation:
+
+```bash
+# Codex slot (CLI only): fallback positional is empty
+RC_HEALTH_PROBE_TIMEOUT=<effective settings.health_probe_timeout_seconds> \
+  "${CLAUDE_PLUGIN_ROOT}/scripts/rc-invoke-provider.sh" --probe "<codex-path>" ""
+# Google slot: agy primary, gemini fallback (or gemini primary + "" when agy is absent)
+RC_HEALTH_PROBE_TIMEOUT=<effective settings.health_probe_timeout_seconds> \
+  "${CLAUDE_PLUGIN_ROOT}/scripts/rc-invoke-provider.sh" --probe "<agy-path>" "<gemini-path-or-empty>"
+```
+
+The probe prints exactly one verdict line — `HEALTHY`, `UNHEALTHY: <reason>`, or `INCONCLUSIVE`. Act on it **fail-open**:
+- **`UNHEALTHY: <reason>`** — positive hard-fail evidence (auth/quota/overload on every probed tool in the slot). **Drop the slot from the roster** for this run, exactly as if detection had found it unavailable; carry the `<reason>` into the Step-0 announcement (e.g. "Skipped: Codex (health probe — quota exhausted)").
+- **`HEALTHY`** or **`INCONCLUSIVE`** — **keep the slot.** INCONCLUSIVE means cold/slow/empty/network-blip, never a health failure on its own — a cold-but-usable provider (agy cold start) must never be dropped.
+
+A slot dropped here then flows through the `settings.min_reviewers` reconciliation in 0.3 identically to an undetected provider.
+
 ### 0.3 Apply the configuration to the roster
 
 Reconcile the config (0.1) with detection (0.2):
 
 - **Roster (reviewers).** Drop any provider whose `reviewer.<p>.enabled=false` — it does not participate even if installed. Of the reviewers that remain enabled, those that detection found available make up the participating roster. Config gates the roster; detection gates availability — **both** must pass. **The Google slot counts as ONE reviewer** toward `settings.min_reviewers` no matter how many Google CLIs are installed: it is a single dispatch unit (one `rc-invoke-provider.sh` call → one result), and `agy`↔`gemini` is an internal fallback, **never two reviewers** (see Step 3 → Reviewer: Google).
 - **Models.** Where `reviewer.<p>.model` is non-empty, pass that model to that reviewer's invocation (e.g. the Google slot's model, or the Perplexity model — default `sonar`). An empty model means "use the tool's own default" — pass nothing.
-- **Lens bindings (record for Round 1).** Record each `lens.<l>.enabled` and `lens.<l>.providers` (`auto`, or a comma-joined provider list). The actual lens dispatch lands in **PR 1b** — here you only **read and record** the bindings. Note `lens.security.replaces_dedicated`: when `true`, the pinned `security.providers` *replace* the dedicated security reviewer (do not run both); when `false`, security stays on its default/`auto` path.
+- **Lens bindings (record for Round 1).** Record each `lens.<l>.enabled` and `lens.<l>.providers` (`auto`, or a comma-joined provider list). **Step 3 (Lens Assignment)** consumes these to pin lenses to providers — here in Step 0 you only **read and record** the bindings. Note `lens.security.replaces_dedicated`: when `true`, the pinned `security.providers` *replace* the dedicated security reviewer (do not run both); when `false`, security stays on its default/`auto` path.
 - **Settings.** Load the `settings.*` values for this run and use them wherever the orchestration rules reference a run knob (`min_reviewers`, `reviewer_timeout_seconds`, `run_budget_seconds`, `auto_retry`, etc.). The reader already folded any `RC_*` env override into each value at the correct precedence, so treat each resolved `settings.*` as the **effective** value of its `RC_*` knob. When a later step *consumes* an `RC_*` env var (e.g. the reviewer timeout wrapper), pass that effective value on the invocation — e.g. `RC_REVIEWER_TIMEOUT=<effective settings.reviewer_timeout_seconds> <cli> …` — rather than relying on the ambient environment carrying across separate tool calls. See `rules/orchestration.md` → "Run Settings".
 - **Absent config / absent `yq` → today's defaults**, byte-identical to pre-config behavior. Disabling reviewers still honors `settings.min_reviewers`: if too few remain to reach it, the existing min-reviewers handling applies (single-reviewer mode or the usual prompt).
 
@@ -167,7 +188,7 @@ Reuse the BASE ref and changed-file list **already computed in Step 1/2** — do
 - **Unstaged working changes** → base = `HEAD`, head = the working tree; changed files = `git diff --name-only`.
 - **Plan/document review** → there is no code diff; **skip Step 2.5 entirely** (nothing for the scanners to scope to) and note `static analysis: off (no code diff)`.
 
-Write the changed-file list (one repo-relative path per line) to a temp file **with `Bash`** (e.g. `printf '%s\n' path/a path/b … > "$CF"`), then dispatch **one** `general-purpose` Agent with the prompt below. Pass the effective `static_analysis.*` values resolved in Step 0 as env vars **on the invocation** (the script reads them via env, matching `rc-config.sh`'s output; do not rely on ambient env carrying across separate tool calls):
+Write the changed-file list (one repo-relative path per line) to a temp file **with `Bash`** (`CF="$(mktemp "${TMPDIR:-/tmp}/rc-cf.XXXXXX")"; printf '%s\n' path/a path/b … > "$CF"` — `mktemp` so the path honors macOS's `$TMPDIR` and the Step-8 cleanup glob can reclaim it), then dispatch **one** `general-purpose` Agent with the prompt below. Pass the effective `static_analysis.*` values resolved in Step 0 as env vars **on the invocation** (the script reads them via env, matching `rc-config.sh`'s output; do not rely on ambient env carrying across separate tool calls):
 
 > You are running the Review Council deterministic static scan. Run the bundled scanner script **once** and return its output verbatim. Do NOT interpret, summarize, re-run individual tools, or add commentary.
 >
@@ -192,7 +213,8 @@ Write the changed-file list (one repo-relative path per line) to a temp file **w
 
 Before consuming the results, scan the `SKIPPED:` lines for any tool skipped with reason **`not installed`** that is in the configured `static_analysis.tools` list. The user *expects* these tools, so they must **never** be silently dropped.
 
-- **Domain-not-triggered skips stay quiet** (`SKIPPED: <tool> — not triggered (no matching files)`): nothing to install, so just fold them into the status line. Same for `disabled`, `semgrep off`, and `network-unreachable` (trufflehog's live-verification egress absent → treated as "ran, 0 findings"; not a missing tool).
+- **Domain-not-triggered skips stay quiet** (`SKIPPED: <tool> — not triggered (no matching files)`): nothing to install, so just fold them into the status line. Same for `disabled`, `semgrep off`, `semgrep config 'auto' …` (the `auto`-needs-metrics skip), and `network-unreachable` (trufflehog's live-verification egress absent → treated as "ran, 0 findings"; not a missing tool).
+- **Ran-but-failed skips are surfaced, not install-prompted** (`SKIPPED: <tool> — timed out`, or `SKIPPED: <tool> — execution failed (exit N)`): the tool **is** installed and was attempted but produced no usable result this run. Note it **visibly** in the status line (e.g. `semgrep (skipped: timed out)` / `gitleaks (skipped: execution failed)`) so the gap is not silent, but do **not** ASK to install it (it's present) and do **not** treat it as a quiet expected skip — it's a transient/tool failure, not a missing tool.
 - **For each tool skipped as `not installed`:** TELL the user which configured tools are missing and **how to install each** — look up the per-tool install command in `rules/static-analysis.md` (the tool registry; e.g. `brew install gitleaks`). **Also probe Docker once** (`docker info >/dev/null 2>&1`); if it succeeds, note which of the *missing* tools can run via their official image with **no local install** — only the four core scanners **gitleaks, trufflehog, semgrep, osv-scanner** have images (the lint tools do not). Then **ASK**, conversationally, offering the options that apply:
   > *"These configured static-analysis tools aren't installed: [tool → install cmd, one per line]. [If Docker is up and any are Docker-supported:] I can run [those] via their official Docker image for this run instead — no local install. Options: (a) install natively and I'll re-run, (b) run the Docker-supported ones via Docker now, or (c) proceed without them?"*
   - **Proceed** → continue with the tools that did run; note the missing ones in the status line (`skipped: not installed — proceeding`).
@@ -268,7 +290,7 @@ Before launching the reviewers, assign each one a **lens** — an emphasis that 
 
 Use the `Agent` tool with `subagent_type: "reviewer-claude"`.
 
-If the `RC_CLAUDE_MAX_TURNS` environment variable is set, override the default maxTurns by passing it to the Agent tool.
+Pass the resolved `settings.claude_max_turns` (from Step 0; default 100, deliberately lenient) to the Agent tool as `maxTurns`. The reader already folded any `RC_CLAUDE_MAX_TURNS` override into that effective value at the correct precedence — use the effective `settings.claude_max_turns`, not the ambient env var.
 
 **IMPORTANT:** Embed the full baseline context package and delegation prompt directly in the Agent tool's `prompt` parameter. Use this exact template — fill in the bracketed sections with the actual content:
 
@@ -343,7 +365,7 @@ Use the `Agent` tool with `subagent_type: "reviewer-security"`. This dedicated s
 
 Use the **same inline template as the Claude reviewer above** (TASK / LENS / REVIEW PROCESS / CONTEXT / CONSTRAINTS / MUST DO / WHAT NOT TO FLAG / FINDINGS CAP / OUTPUT FORMAT) — including the §3.1 finding schema, the what-not-to-flag + cap policy, and the test-adequacy line — with the **Security** lens block prepended in the `## LENS` section. Embed the full baseline context package the same way.
 
-If `RC_CLAUDE_MAX_TURNS` is set, pass it to the Agent tool as maxTurns, same as the Claude reviewer.
+Pass the resolved `settings.claude_max_turns` (default 100) to the Agent tool as `maxTurns`, same as the Claude reviewer.
 
 **Exception — a security pin replaces the dedicated reviewer.** If Step 0 resolved `lens.security.replaces_dedicated=true` **and** `lens.security.providers` names one or more providers, do **NOT** dispatch `reviewer-security`. Instead assign the Security lens to those pinned provider(s) and dispatch them with it (see Lens Assignment, step 4). Otherwise the dedicated `reviewer-security` always runs.
 
@@ -363,14 +385,14 @@ Dispatch a `general-purpose` Agent with this prompt. Pass the resolved Codex CLI
 > # …write the delegation prompt into "$PF"…
 > ```
 >
-> **Step 2: Invoke via the script (CLI path), exactly once** — Codex has no fallback, so the second positional is empty. `tee` stdout to the `<result-file>` the orchestrator gave you (for recovery, below):
+> **Step 2: Invoke via the script (CLI path), exactly once** — Codex has no fallback, so the second positional is empty. `tee` stdout to the `<result-file>` the orchestrator gave you (for recovery, below). Cap the FOREGROUND attempt's reviewer budget at `FG_CAP = min(<effective settings.reviewer_timeout_seconds>, 570)` seconds (the 570s clamp keeps the Bash-tool wait's 30s cushion under the harness's 600000 ms ceiling — see the foreground note):
 > ```bash
-> RC_REVIEWER_TIMEOUT=<effective settings.reviewer_timeout_seconds> \
+> RC_REVIEWER_TIMEOUT=<FG_CAP = min(effective settings.reviewer_timeout_seconds, 570)> \
 >   "${CLAUDE_PLUGIN_ROOT}/scripts/rc-invoke-provider.sh" "<codex-path>" "" "$PF" 2>"$ERR" | tee "<result-file>"
 > ```
 > The script prints `TOOL: Codex` then the review to **stdout** (on success), or a single attributed `SKIPPED: Codex unavailable — codex: <note>` line (on failure); and exactly one `ELAPSED: <n>` line (plus free-form notes) to **stderr** (`$ERR`). Do **NOT** re-resolve the binary, add a shell `timeout`/`gtimeout` around it, validate the output, retry it, or re-attribute — the script already did all of it. Do not retry the script (its retry is internal and terminal for the slot).
 >
-> **Run it in the FOREGROUND; escalate only on a ceiling hit.** Make this a foreground Bash-tool call — set the Bash *tool's* `timeout` parameter to `min((RC_REVIEWER_TIMEOUT × 1000) + 30000, 600000)` ms and do **not** proactively background it. (That is the Bash *tool's* wait, which is distinct from the shell `timeout` you must not add — the script owns its own internal cap.) Codex is single-attempt and self-bounds within `RC_REVIEWER_TIMEOUT`, so a synchronous call returns promptly and avoids the background-completion lag that can leave even a fast (<1 min) call looking stuck. **Escalate only if the Bash call is killed by that `timeout`:** re-run the *exact same command* **once** with `run_in_background: true`, and return the result when the completion notification fires (the harness notification is reliable; a fresh run repeats the slot cleanly). **Recovery:** because `tee` copied stdout to `<result-file>`, the result survives on disk — if this subagent wedges, the orchestrator reads it at the Step-3.5 join barrier.
+> **Run it in the FOREGROUND; escalate only on a ceiling hit.** Make this a foreground Bash-tool call — set the Bash *tool's* `timeout` parameter to `(FG_CAP × 1000) + 30000` ms (with `FG_CAP = min(RC_REVIEWER_TIMEOUT, 570)`) and do **not** proactively background it. Clamping `FG_CAP` to **570s** guarantees this wait is **≤ 600000 ms** — the harness's hard Bash-tool ceiling — so the script's own internal cap (`FG_CAP` seconds) always fires *first*, and the 30s cushion survives (without the clamp, the default `RC_REVIEWER_TIMEOUT=600` would make `600×1000+30000` collapse onto the 600000 ceiling and cut Codex off exactly as it finishes). That is the Bash *tool's* wait, distinct from the shell `timeout` you must not add — the script owns its own internal cap. Codex is single-attempt and self-bounds within its cap, so a synchronous call returns promptly and avoids the background-completion lag that can leave even a fast (<1 min) call looking stuck. **Escalate if the Bash call is killed by that `timeout`, OR if the configured `settings.reviewer_timeout_seconds` exceeds 570** (Codex wanted more budget than the clamped foreground gave it): re-run the *exact same command* **once** with `run_in_background: true` **and the FULL `RC_REVIEWER_TIMEOUT=<effective settings.reviewer_timeout_seconds>`**, returning the result when the completion notification fires (the harness notification is reliable; a fresh run repeats the slot cleanly). **Recovery:** because `tee` copied stdout to `<result-file>`, the result survives on disk — if this subagent wedges, the orchestrator reads it at the Step-3.5 join barrier.
 >
 > **Step 3: Branch on the result:**
 > - Prints **`TOOL: Codex`** → return the script's stdout **verbatim**.
@@ -399,13 +421,13 @@ Dispatch a `general-purpose` Agent with this prompt. Pass the **resolved paths**
 > # …write the delegation prompt into "$PF"…
 > ```
 >
-> Then run the script **exactly once** (`tee` stdout to the `<result-file>` the orchestrator gave you, for recovery):
+> Then run the script **exactly once** (`tee` stdout to the `<result-file>` the orchestrator gave you, for recovery). Cap the FOREGROUND attempt at `FG_CAP = min(<effective settings.reviewer_timeout_seconds>, 570)` seconds (the 570s clamp keeps the Bash-tool wait's 30s cushion under the 600000 ms ceiling — see the foreground note):
 > ```bash
-> RC_REVIEWER_TIMEOUT=<effective settings.reviewer_timeout_seconds> \
+> RC_REVIEWER_TIMEOUT=<FG_CAP = min(effective settings.reviewer_timeout_seconds, 570)> \
 > [RC_GOOGLE_MODEL=<model>] [RC_GOOGLE_ADD_DIR=<repo>] \
 >   "${CLAUDE_PLUGIN_ROOT}/scripts/rc-invoke-provider.sh" "<agy-path>" "<gemini-path-or-empty>" "$PF" 2>"$ERR" | tee "<result-file>"
 > ```
-> **Run it in the FOREGROUND; escalate only on a ceiling hit.** Make this a foreground Bash-tool call — set the Bash *tool's* `timeout` parameter to `min((RC_REVIEWER_TIMEOUT × 1000) + 30000, 600000)` ms and do **not** proactively background it (the tool's wait, not a shell `timeout` you add). Note the Google slot can run `agy` **and** the `gemini` fallback (up to ~2× `RC_REVIEWER_TIMEOUT`), so with a large reviewer timeout the single foreground call may hit the 600000 ms Bash ceiling before the script finishes its fallback. **Only if the Bash call is killed by that `timeout`,** re-run the *exact same command* **once** with `run_in_background: true` and return the result when the completion notification fires (the fresh run repeats the slot — still one `TOOL:`/`SKIPPED:` result, so the double-vote invariant holds). **Recovery:** `tee` left the result in `<result-file>`, recoverable at the Step-3.5 join barrier if this subagent wedges.
+> **Run it in the FOREGROUND; escalate only on a ceiling hit.** Make this a foreground Bash-tool call — set the Bash *tool's* `timeout` parameter to `(FG_CAP × 1000) + 30000` ms (with `FG_CAP = min(RC_REVIEWER_TIMEOUT, 570)`) and do **not** proactively background it (the tool's wait, not a shell `timeout` you add). Clamping `FG_CAP` to **570s** keeps that wait **≤ 600000 ms** — the harness's hard Bash ceiling — so the script's internal cap fires first and the 30s cushion survives (unclamped, the default `RC_REVIEWER_TIMEOUT=600` collapses onto the ceiling and loses it). Note the Google slot can run `agy` **and** the `gemini` fallback (up to ~2× the reviewer cap), so even at the clamp the single foreground call may hit the ceiling before the script finishes its fallback. **Escalate if the Bash call is killed by that `timeout`, OR if the configured `settings.reviewer_timeout_seconds` exceeds 570:** re-run the *exact same command* **once** with `run_in_background: true` **and the FULL `RC_REVIEWER_TIMEOUT=<effective settings.reviewer_timeout_seconds>`**, returning the result when the completion notification fires (the fresh run repeats the slot — still one `TOOL:`/`SKIPPED:` result, so the double-vote invariant holds). **Recovery:** `tee` left the result in `<result-file>`, recoverable at the Step-3.5 join barrier if this subagent wedges.
 >
 > Return its **stdout verbatim** — it is already `TOOL: Antigravity` (for `agy`) / `TOOL: Gemini` (for `gemini`) followed by the review, or a correctly-attributed single `SKIPPED:` line (e.g. `SKIPPED: Google (Antigravity) unavailable — agy: empty output after retry; gemini fallback: ineligible (auth/DASHER)`). Do **NOT** reword it, re-attribute it, validate it, or retry it — the script's retry/fallback is internal and **terminal for the slot** (do not let Step 3.5 re-run it). Then append, as the **last line**, the `ELAPSED:` line captured from `$ERR` (`grep '^ELAPSED:' "$ERR"`), so the orchestrator can meter the run budget (Step 3.5 / Step 4.0).
 >
@@ -419,12 +441,14 @@ Dispatch a `general-purpose` Agent with this prompt:
 
 > You are invoking the Perplexity reviewer for a Review Council review. Your job is to call the Sonar API, collect its response, and return the structured findings.
 >
-> **Step 1: Build the JSON payload** using `jq` to avoid manual escaping:
+> **Step 1: Build the JSON payload** using `jq` to avoid manual escaping. Use `mktemp` for the payload/response files so the paths honor macOS's `$TMPDIR` and concurrent runs never clobber each other:
 > ```bash
+> PAYLOAD="$(mktemp "${TMPDIR:-/tmp}/rc-perplexity-payload.XXXXXX")"
+> RESP="$(mktemp "${TMPDIR:-/tmp}/rc-perplexity-response.XXXXXX")"
 > PROMPT="[the full delegation prompt text]"
 > jq -n --arg model "sonar" --arg prompt "$PROMPT" \
 >   '{model: $model, messages: [{role: "user", content: $prompt}]}' \
->   > /tmp/rc-perplexity-payload.json
+>   > "$PAYLOAD"
 > ```
 >
 > **Step 2: Call the API (measure elapsed around the curl for the run budget).** Perplexity stays an inline `curl` path — it is **not** routed through `rc-invoke-provider.sh` (the script is CLI-only: a binary to resolve + exit/stderr classification, whereas Perplexity is an HTTP API with an HTTP-status failure taxonomy). To still feed the Step-4.0 budget long pole, measure its wall-clock with `date` around the curl:
@@ -433,15 +457,15 @@ Dispatch a `general-purpose` Agent with this prompt:
 > curl -fsS --max-time "${RC_REVIEWER_TIMEOUT:-600}" https://api.perplexity.ai/v1/chat/completions \
 >   -H "Authorization: Bearer $PERPLEXITY_API_KEY" \
 >   -H "Content-Type: application/json" \
->   -d @/tmp/rc-perplexity-payload.json \
->   -o /tmp/rc-perplexity-response.json
+>   -d @"$PAYLOAD" \
+>   -o "$RESP"
 > RC_ELAPSED=$(( $(date +%s) - RC_START ))
 > ```
 > Note: `-f` makes `curl` exit non-zero (22) on any HTTP 4xx/5xx without exposing the status code. Treat any such failure as terminal — fast-fail (return SKIPPED, no retry), do not loop. Perplexity has no fallback tool, so there's nothing to gain from distinguishing 401/403/429 from other errors. (If you ever need the exact status, capture it with `-w '%{http_code}'` and drop `-f`.)
 >
 > **Step 3: Parse the response:**
 > ```bash
-> jq -er '.choices[0].message.content' /tmp/rc-perplexity-response.json
+> jq -er '.choices[0].message.content' "$RESP"
 > ```
 >
 > **If curl or jq fails**: Return "SKIPPED: Perplexity unavailable — [error details]"
@@ -520,7 +544,7 @@ If `settings.verify` is true, apply these gates and rules **in order**.
 ### 4.0 Skip gates (check first, before any routing)
 
 1. **Solo-Claude mode** — if only Claude-family reviewers (Claude + the dedicated Security reviewer) are available — i.e. no different-family reviewer to cross-verify against — **skip refutation entirely**. Tag every finding `[1 reviewer · unverified]` and go to Step 5. Do NOT self-verify with another Claude spawn — one model refuting itself is correlated-error theatre, not cross-family evidence.
-2. **Budget check FIRST (see `rules/orchestration.md` → Budget).** Because Round-1 reviewers run **concurrently**, the elapsed cost so far is the **long pole** — the **maximum** measured elapsed any single Round-1 CLI/API invocation reported (e.g. `agy`'s cold start), parsed from the trailing `ELAPSED:` lines at the Step-3.5 join barrier — **not** the arithmetic sum of all of them (they overlapped in wall-clock), and not a stopwatch you watch. *(Each CLI/API reviewer returns its measured `ELAPSED`; the long pole is the max of those. Native Claude/Security subagents still don't emit a CLI-measured number — they are bounded by `maxTurns` (`settings.claude_max_turns`, Task 4.6) and, being local, are rarely the long pole, so the budget keys on the measured CLI/API max per §3.8.)* If that long-pole elapsed has already reached `settings.run_budget_seconds`, **skip refutation**: tag all findings `[unverified]`, print `stopped at budget: <n>s`, and go straight to Step 5. Never hard-abort — degrade.
+2. **Budget check FIRST (see `rules/orchestration.md` → Budget).** Because Round-1 reviewers run **concurrently**, the elapsed cost so far is the **long pole** — the **maximum** measured elapsed any single Round-1 CLI/API invocation reported (e.g. `agy`'s cold start), parsed from the trailing `ELAPSED:` lines at the Step-3.5 join barrier — **not** the arithmetic sum of all of them (they overlapped in wall-clock), and not a stopwatch you watch. *(Each CLI/API reviewer returns its measured `ELAPSED`; the long pole is the max of those. Native Claude/Security subagents still don't emit a CLI-measured number — they are bounded by `maxTurns` (`settings.claude_max_turns`) and, being local, are rarely the long pole, so the budget keys on the measured CLI/API max.)* If that long-pole elapsed has already reached `settings.run_budget_seconds`, **skip refutation**: tag all findings `[unverified]`, print `stopped at budget: <n>s`, and go straight to Step 5. Never hard-abort — degrade.
 
 If neither gate fires, run the pass.
 
@@ -707,10 +731,12 @@ Print a one-line summary of **what actually wrote** (e.g. `Captured: 1 suppressi
 Remove any temporary files created during the review:
 
 ```bash
-rm -f /tmp/rc-*-prompt.* /tmp/rc-perplexity-payload.json /tmp/rc-perplexity-response.json
+TMP="${TMPDIR:-/tmp}"
+rm -f "$TMP"/rc-*-prompt.* "$TMP"/rc-*-err.* "$TMP"/rc-*.result \
+      "$TMP"/rc-perplexity-* "$TMP"/rc-cf.*
 ```
 
-Note: Subagents handle their own temp files, so this is a belt-and-suspenders cleanup for anything that leaked.
+Note: use `"${TMPDIR:-/tmp}"`, not a hardcoded `/tmp` — on macOS `mktemp` puts these files under `$TMPDIR` (`/var/folders/…`), so a `/tmp`-only glob reclaims nothing. The globs cover every temp the run's subagents create: reviewer prompt files (`rc-*-prompt.*`), stderr captures (`rc-*-err.*`), the `tee`'d result files (`rc-*.result`), Perplexity's payload/response (`rc-perplexity-*`), and the changed-file list (`rc-cf.*`). Subagents handle their own temp files, so this is a belt-and-suspenders sweep for anything that leaked (e.g. from a wedged subagent).
 
 ## Orchestration Rules
 

@@ -136,7 +136,9 @@ exit "\${RUFF_EXIT:-0}"
 EOF
 
   # --- fake docker (Phase 4 docker run-time gate) -------------------------
-  # `docker info` => daemon up (unless DOCKER_INFO_EXIT flips it). For
+  # `docker info` => daemon up (unless DOCKER_INFO_EXIT flips it, or
+  # DOCKER_INFO_MODE=hang sleeps DOCKER_INFO_SLEEP seconds to exercise the
+  # run_capped probe watchdog — CR-2). For
   # `docker run … --entrypoint <tool> …` it records argv (via _record), detects
   # the tool from --entrypoint (any leading path stripped, so /osv-scanner works),
   # then emits the SAME canned JSON its native fake emits — to STDOUT for the
@@ -146,7 +148,10 @@ EOF
 #!/usr/bin/env sh
 $_record
 case "\${1:-}" in
-  info) exit "\${DOCKER_INFO_EXIT:-0}" ;;
+  info)
+    if [ "\${DOCKER_INFO_MODE:-ok}" = hang ]; then sleep "\${DOCKER_INFO_SLEEP:-30}"; fi
+    exit "\${DOCKER_INFO_EXIT:-0}"
+    ;;
   version) exit 0 ;;
 esac
 # docker run …: pull the --entrypoint value and (gitleaks) the -r report path.
@@ -344,7 +349,7 @@ called() { grep -qx "$1" "$CALLS"; }
   grep -qF -- '--config p/ruby' "$ARGS"
 }
 
-@test "semgrep config=<unreadable path> -> falls back to p/default with a note" {
+@test "semgrep config=<missing path> -> falls back to p/default with a note" {
   setup_fakes
   RC_STATIC_TOOLS="semgrep" RC_SEMGREP_CONFIG="/no/such/ruleset.yml" PATH="$SANDBOX" \
     run --separate-stderr "$SCRIPT" "$BASE" "$HEAD" "$CHANGED"
@@ -352,6 +357,29 @@ called() { grep -qx "$1" "$CALLS"; }
   echo "args=<<$(cat "$ARGS")>>"
   echo "stderr=<<$stderr>>"
   [ "$status" -eq 0 ]
+  called semgrep
+  grep -qF -- '--config p/default' "$ARGS"
+  echo "$stderr" | grep -qF "not a readable file; using p/default"
+}
+
+@test "semgrep config=<existing but unreadable file> (CR-3) -> falls back to p/default, not a hard error" {
+  setup_fakes
+  # root (and some sandboxed/CI users) ignore permission bits, so chmod 000
+  # would not actually make the file unreadable — the point of this test.
+  if [ "$(id -u)" -eq 0 ]; then
+    skip "running as root: chmod 000 does not make a file unreadable"
+  fi
+  _cfg="$BATS_TEST_TMPDIR/unreadable.yml"
+  printf 'rules: []\n' >"$_cfg"
+  chmod 000 "$_cfg"
+  RC_STATIC_TOOLS="semgrep" RC_SEMGREP_CONFIG="$_cfg" PATH="$SANDBOX" \
+    run --separate-stderr "$SCRIPT" "$BASE" "$HEAD" "$CHANGED"
+  echo "status=$status"
+  echo "args=<<$(cat "$ARGS")>>"
+  echo "stderr=<<$stderr>>"
+  [ "$status" -eq 0 ]
+  # a plain -f check would have passed this unreadable-but-existing file
+  # through as-is, handing semgrep a config it can't open; -r must catch it.
   called semgrep
   grep -qF -- '--config p/default' "$ARGS"
   echo "$stderr" | grep -qF "not a readable file; using p/default"
@@ -741,6 +769,28 @@ called() { grep -qx "$1" "$CALLS"; }
   [ "$status" -eq 0 ]
   echo "$output" | grep -qF 'SKIPPED: gitleaks — not installed'
   # daemon probe failed -> no docker run of gitleaks, no Tier A line
+  ! docker_run_for gitleaks
+  ! echo "$output" | grep -qF 'TIER_A|gitleaks|'
+}
+
+@test "docker gate (CR-2): docker info hangs -> probe is capped by run_capped, DOCKER_AVAILABLE=no, scan continues" {
+  setup_fakes
+  rm -f "$FAKEDIR/gitleaks"
+  printf '%s\n' "a.py" "secret.txt" >"$CHANGED"
+  _t0=$(date +%s)
+  RC_STATIC_TOOLS="gitleaks" RC_STATIC_DOCKER_TOOLS="gitleaks" \
+    DOCKER_INFO_MODE=hang DOCKER_INFO_SLEEP=30 PATH="$SANDBOX" \
+    run --separate-stderr "$SCRIPT" "$BASE" "$HEAD" "$CHANGED"
+  _el=$(( $(date +%s) - _t0 ))
+  echo "status=$status wall=${_el}s"
+  echo "output=<<$output>>"
+  [ "$status" -eq 0 ]
+  # the probe was killed at its own short cap, not left to the full 30s hang
+  # (DOCKER_PROBE_TIMEOUT=10 + KILL_GRACE=3; generous <25s proves it fired)
+  [ "$_el" -lt 25 ]
+  # a wedged daemon degrades to "unavailable", same terminal state as a real
+  # failure -> the not-installed skip path, batch continues undisturbed
+  echo "$output" | grep -qF 'SKIPPED: gitleaks — not installed'
   ! docker_run_for gitleaks
   ! echo "$output" | grep -qF 'TIER_A|gitleaks|'
 }

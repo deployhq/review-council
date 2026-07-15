@@ -83,8 +83,8 @@ Lenses: `security`, `correctness`, `cross_file`, `performance`, `design`, `depen
 - **`providers` is ALWAYS a YAML list** (e.g. `[google]` or `[google, claude]`). It is printed
   comma-joined (`lens.security.providers=google,claude`).
 - **Omitting `providers` = `auto`** (except `dependency`, which defaults to `perplexity`) —
-  the orchestrator picks providers diff-aware (which providers actually run this lens is
-  chosen in a later PR; today the binding is recorded).
+  the orchestrator picks providers diff-aware in Step 3 (Lens Assignment); an explicit
+  `providers` list pins the lens to exactly those providers instead.
 - **Pinning `security.providers` REPLACES the dedicated security subagent.** When you set
   `lenses.security.providers` to an explicit list, that list *becomes* the security review —
   it does **not** add a second security pass on top of the dedicated one. The reader signals
@@ -113,15 +113,11 @@ settings:
 | `settings.reviewer_timeout_seconds` | `600` | `RC_REVIEWER_TIMEOUT` | Per-invocation wall-clock cap (seconds) for CLI/API reviewers. |
 | `settings.run_budget_seconds` | `600` | `RC_RUN_BUDGET` | Total wall-clock budget (seconds) for the whole run. |
 | `settings.auto_retry` | `false` | `RC_AUTO_RETRY` | Retry failed reviewers without prompting (CI-friendly). |
-| `settings.health_probe` | `true` | `RC_HEALTH_PROBE` | Run a Step-0 health probe per provider so `available`/`min_reviewers` reflect *usable*, not merely installed. |
+| `settings.health_probe` | `false` | `RC_HEALTH_PROBE` | Opt-in Step-0 health probe (Codex + Google slots) so `available`/`min_reviewers` reflect *usable*, not merely installed. Default off; a provider is dropped only on positive hard-fail evidence (auth/quota/overload), fail-open otherwise. |
 | `settings.health_probe_timeout_seconds` | `20` | `RC_HEALTH_PROBE_TIMEOUT` | Short wall-clock cap (seconds) for each health probe. |
-| `settings.max_context_bytes` | `400000` | `RC_MAX_CONTEXT_BYTES` | Context-size cap (bytes, ~100k tokens) on the shared Step-2 baseline package; triggers the reduction ladder above it. |
-| `settings.max_run_tokens` | `0` | `RC_MAX_RUN_TOKENS` | Soft per-run token estimate ceiling; `0` disables the check (opt-in). |
-| `settings.claude_max_turns` | `30` | `RC_CLAUDE_MAX_TURNS` | Turn budget for the native Claude/Security reviewer subagents (today's shipped default; tighten via config to cap local cost). |
+| `settings.claude_max_turns` | `100` | `RC_CLAUDE_MAX_TURNS` | Turn budget (`maxTurns`) for the native Claude and Security reviewer subagents. Default 100 (lenient); lower it to cap local review cost. |
 
-Booleans must be `true`/`false`; the numeric knobs must be positive integers (`settings.max_run_tokens`'s
-`0` default means "disabled" but is a hardcoded default, not a settable override — like the other
-`posint` knobs, an explicit override value must be a positive integer).
+Booleans must be `true`/`false`; numeric knobs must be positive integers.
 
 ## `static_analysis:` block
 
@@ -347,11 +343,9 @@ uncomment only what you want to change.
 #   reviewer_timeout_seconds:     600      # RC_REVIEWER_TIMEOUT
 #   run_budget_seconds:           600      # RC_RUN_BUDGET
 #   auto_retry:                   false    # RC_AUTO_RETRY
-#   health_probe:                 true     # RC_HEALTH_PROBE
+#   health_probe:                 false    # RC_HEALTH_PROBE
 #   health_probe_timeout_seconds: 20       # RC_HEALTH_PROBE_TIMEOUT
-#   max_context_bytes:            400000   # RC_MAX_CONTEXT_BYTES
-#   max_run_tokens:               0        # RC_MAX_RUN_TOKENS (0 = disabled)
-#   claude_max_turns:             30       # RC_CLAUDE_MAX_TURNS
+#   claude_max_turns:             100      # RC_CLAUDE_MAX_TURNS
 
 # static_analysis:               # deterministic tool layer (each also settable via its RC_* env var, which wins)
 #   enabled: true                    # RC_STATIC_ANALYSIS

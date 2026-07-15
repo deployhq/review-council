@@ -31,6 +31,10 @@ setup() {
   #   overload    -> 503 / high demand error, exit 1
   #   authish-prose -> inline (non-heading) Findings/Overall Assessment + auth
   #                    error; must classify AUTH, not OK
+  #   rubric-echo-auth -> echoes the refutation prompt's rubric enumeration
+  #                    ("Allowed: UPHELD | REFUTED | INCONCLUSIVE") + a real
+  #                    auth-error phrase, no actual <id> | VERDICT line; must
+  #                    classify AUTH, not OK (CR-1 regression)
   #   hang        -> sleep $AGY_SLEEP (default 999s) to force a wrapper kill
   #   hang-notrap -> trap '' TERM then sleep; only SIGKILL can stop it
   # Bookkeeping (set only if the env var is exported by the test):
@@ -128,6 +132,16 @@ REVIEW_EOF
     # heading-shaped lines), alongside an auth error. Must classify AUTH (and
     # fall back), NOT be mistaken for a valid review (regression guard for Fix D).
     echo "Authentication failed: not authenticated. I could not generate the Findings section or the Overall Assessment for this review." >&2
+    exit 1
+    ;;
+  rubric-echo-auth)
+    # CR-1 regression: the merged stream echoes the refutation prompt's rubric
+    # enumeration verbatim ("Allowed: UPHELD | REFUTED | INCONCLUSIVE") plus a
+    # genuine auth-error phrase, but contains NO actual "<id> | VERDICT — ..."
+    # line. The old loose VERDICT_PATTERN matched the bare "| REFUTED" / "|
+    # INCONCLUSIVE" substrings in the rubric line and misclassified this as
+    # OK, hiding the real auth failure. Must classify AUTH.
+    echo "Error: not logged in. Allowed: UPHELD | REFUTED | INCONCLUSIVE" >&2
     exit 1
     ;;
   verdicts)
@@ -403,6 +417,24 @@ call_count() {
   esac
   # agy succeeded on its own shape → gemini fallback must NOT be consulted
   [ "$(call_count "$GEM_CALLS")" -eq 0 ]
+}
+
+@test "rubric-echo-not-verdict: rubric enumeration ('Allowed: UPHELD | REFUTED | INCONCLUSIVE') + auth phrase classifies AUTH, not OK (CR-1 regression)" {
+  # CodeRabbit CR-1: the old loose VERDICT_PATTERN matched a bare verdict word
+  # adjacent to ANY pipe on a line, so the refutation prompt's own rubric
+  # enumeration -- echoed back verbatim by a model quoting its instructions --
+  # false-positived the OK-guard and hid a genuine auth failure reported on
+  # the same merged-stream line. No fallback bin, so a correct classification
+  # exits 1 with a SKIPPED "... auth failure" line; the old bug exited 0 as OK.
+  AGY_MODE=rubric-echo-auth run --separate-stderr "$SCRIPT" "$AGY" "" "$PROMPT_FILE"
+  echo "status=$status"
+  echo "output=<<$output>>"
+  [ "$status" -eq 1 ]
+  case "$output" in
+  SKIPPED:*) : ;;
+  *) echo "expected SKIPPED (AUTH), not OK/TOOL" && return 1 ;;
+  esac
+  echo "$output" | grep -qi 'auth failure'
 }
 
 @test "fast-empty-then-retry-success: primary empty fast, retry succeeds, gemini never called" {

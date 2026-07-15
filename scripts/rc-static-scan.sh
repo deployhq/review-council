@@ -115,6 +115,12 @@ STATIC_DOCKER_TOOLS="${RC_STATIC_DOCKER_TOOLS:-}"
 REPO_ROOT="$(pwd -P)"
 DOCKER_AVAILABLE=""
 
+# Short wall-clock cap (seconds) for the `docker info` daemon probe — a
+# stalled/booting daemon must not be able to hang the whole static scan
+# before any per-tool timeout ever applies. Deliberately much shorter than
+# STATIC_TIMEOUT: this is a liveness probe, not a scan.
+DOCKER_PROBE_TIMEOUT=10
+
 # ---------------------------------------------------------------------------
 # Scratch buffers (TIER_A / TIER_B / SKIPPED accumulate as tools run, so the
 # final output is grouped regardless of the order tools finish in).
@@ -243,13 +249,24 @@ docker_image_for() {
   esac
 }
 
-# docker_available: true iff the docker CLI is on PATH AND its daemon answers.
-# Probed at most once (cached in DOCKER_AVAILABLE) so N docker tools don't each
-# pay the daemon round-trip.
+# docker_available: true iff the docker CLI is on PATH AND its daemon answers
+# within DOCKER_PROBE_TIMEOUT. The daemon probe runs through the SAME
+# run_capped watchdog every tool invocation uses — a stalled/booting daemon
+# hangs `docker info` indefinitely otherwise, which would block the whole
+# static scan before any per-tool timeout ever applies. Probed at most once
+# (cached in DOCKER_AVAILABLE) so N docker tools don't each pay the daemon
+# round-trip. CLI presence is checked FIRST so the daemon is never probed
+# when docker isn't even installed.
 docker_available() {
   if [ -z "$DOCKER_AVAILABLE" ]; then
-    if command -v docker >/dev/null 2>&1 && docker info >/dev/null 2>&1; then
-      DOCKER_AVAILABLE=yes
+    if command -v docker >/dev/null 2>&1; then
+      _da_out="$WORKDIR/docker_info_probe"
+      run_capped "$DOCKER_PROBE_TIMEOUT" "$_da_out" docker info
+      if [ "${LAST_RC:-0}" -eq 0 ]; then
+        DOCKER_AVAILABLE=yes
+      else
+        DOCKER_AVAILABLE=no
+      fi
     else
       DOCKER_AVAILABLE=no
     fi
@@ -713,7 +730,7 @@ run_semgrep() {
       : # registry/remote ref — use as-is
       ;;
     *)
-      if [ ! -f "$_sg_cfg" ]; then
+      if [ ! -f "$_sg_cfg" ] || [ ! -r "$_sg_cfg" ]; then
         echo "rc-static-scan: semgrep_config '$_sg_cfg' not a readable file; using p/default" >&2
         _sg_cfg="p/default"
       fi

@@ -276,13 +276,26 @@ AUTH_PATTERN='no longer supported|not authenticated|please migrate to the antigr
 QUOTA_PATTERN='429|exhausted your daily quota|terminalquotaerror|rate limit|individual quota reached|upgrade your subscription'
 OVERLOAD_PATTERN='503|high demand'
 
-# A Step-4 REFUTATION verdict line: "<id> | UPHELD|REFUTED|INCONCLUSIVE — …".
-# Recognized as a valid RESULT alongside the review format (see classify) so a
-# verdict set is never dropped through the hard-fail patterns — anchored to the
-# pipe/line-start shape so prose (or echoed source) mentioning the words doesn't
-# count. The Phase-4 collapse routes refutation through this script too, and a
-# verdict output carries none of the review headings the OK-guard keyed on.
-VERDICT_PATTERN='(^|\|)[[:space:]]*(upheld|refuted|inconclusive)([[:space:]]|$|\|)'
+# A Step-4 REFUTATION verdict line has the shape (rules/delegation-format.md's
+# Refutation Template, "Return one line per finding"):
+#   <finding-id> | UPHELD — <one-sentence evidence, with the cited location>
+# i.e. the line STARTS with an ID-shaped token (alnum plus "._-:", no internal
+# spaces), then optional space, a literal "|", optional space, and EXACTLY ONE
+# verdict word. Recognized as a valid RESULT alongside the review format (see
+# classify) so a verdict set is never dropped through the hard-fail patterns —
+# a verdict output carries none of the review headings the OK-guard keyed on.
+#
+# CR-1 fix: anchored to that id|verdict shape at line start, NOT to a bare
+# "|<verdict-word>" substring anywhere on the line. The old loose pattern also
+# matched the refutation prompt's own rubric enumeration when a model echoed
+# it back verbatim (merged into the out-file via run_capped's 2>&1), e.g.
+# "Allowed: UPHELD | REFUTED | INCONCLUSIVE" — there the word "UPHELD" (not an
+# id-token-then-pipe) precedes the FIRST "|", so the id-shaped-token character
+# class (no spaces allowed) can never reach that pipe, and the anchored match
+# fails. That loose match could hide a genuine auth/quota/overload failure
+# reported on the same merged-stream line — the exact CR-1 misclassification
+# bug this anchor guards against.
+VERDICT_PATTERN='^[[:space:]]*[[:alnum:]._:-]+[[:space:]]*\|[[:space:]]*(upheld|refuted|inconclusive)([[:space:]]|$|\|)'
 
 # classify <rc> <out-file>: sets global CLASS to one of
 # TIMEOUT / AUTH / QUOTA / OVERLOAD / EMPTY / OK.

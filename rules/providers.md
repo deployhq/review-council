@@ -8,7 +8,6 @@ Reference for the orchestrator. At runtime, probe each provider in order. Availa
 
 - **Detection**: Always available
 - **Invocation**: `Agent` tool with `subagent_type: "reviewer-claude"`
-- **Round 2**: New `Agent` spawn with Round 1 synthesis included
 - **Env requirements**: None
 
 ### Codex (OpenAI)
@@ -17,10 +16,20 @@ Reference for the orchestrator. At runtime, probe each provider in order. Availa
   1. CLI: `which codex 2>/dev/null` — if found, use CLI
   2. MCP fallback: `mcp__codex__codex` tool — if available, use MCP
   3. Neither — skip, note in report
-- **CLI invocation**: The subagent runs `codex --help` and `codex exec --help` to discover current syntax, then invokes Codex in non-interactive/full-auto mode. Do not hardcode flags — CLI syntax changes between versions.
-- **MCP fallback**: `mcp__codex__codex` tool with delegation prompt as message
-- **Round 2 (CLI)**: Fresh CLI call with full context + synthesis (no thread state)
-- **Round 2 (MCP)**: `mcp__codex__codex-reply` with `threadId` from Round 1
+- **CLI invocation**: dispatch goes through the tested state machine `scripts/rc-invoke-provider.sh` — the script, not the calling subagent, owns dispatch:
+  ```bash
+  RC_REVIEWER_TIMEOUT=<effective settings.reviewer_timeout_seconds> \
+    scripts/rc-invoke-provider.sh "<codex-path>" "" "<prompt-file>"
+  ```
+  One call = one result. Codex has no CLI fallback, so the fallback positional is always `""`. The script owns:
+  - **Binary resolution** — `resolve_bin()` re-validates the path Step 0.2 detected: a PATH-findable name via `command -v`, or (when detection resolved an off-`PATH` absolute path) a direct executable check — so it works whether `codex` sits on `PATH` or not.
+  - **The frozen argv**: `codex exec --sandbox read-only --skip-git-repo-check <prompt>`. `exec` is the non-interactive subcommand (plain `codex` would hang forever with no TTY, and `exec` has no approval prompt to bypass); the prompt is a **positional** argument, not `-p` (which means `--profile` for `codex exec`, unlike agy/gemini); `--sandbox read-only` is least-privilege (the model's shell commands can read the repo but cannot write or reach the network — sufficient for a reviewer, and deliberately not `--dangerously-bypass-approvals-and-sandbox`); `--skip-git-repo-check` lets the run proceed outside a git repo.
+  - **The hard timeout cap** — `RC_REVIEWER_TIMEOUT` (default 600s), enforced by a TERM-then-KILL escalation (`run_capped` / `KILL_GRACE`, shared via `scripts/rc-lib-timeout.sh`).
+  - **Fast-fail classification** — auth/quota/overload patterns are checked, but only *after* confirming the output isn't a valid result: a heading-anchored `Findings` + `Overall Assessment` review, or (for Step-4 refutation calls) a `<finding-id> | UPHELD/REFUTED/INCONCLUSIVE` verdict line. That ordering means a genuine review that happens to discuss "login" or "429" is never misclassified as a failure.
+  - **No retry** — the one fast-empty retry is `agy`-only (see the Google-family reviewer rule below); a Codex attempt that comes back absent/timed-out/empty/auth/quota/overload is terminal for the slot, reported as a single `SKIPPED: Codex unavailable — codex: <reason>` line.
+  The **one** thing the script can't do is call an MCP tool — that fallback stays in the orchestrator's subagent: on a **soft** `SKIPPED` reason (`timed out` or `empty output`), try `mcp__codex__codex` once; on a **hard** reason (`auth failure`, `quota exhausted`, `overloaded`), skip MCP too — retrying a dead auth/quota/overload won't help.
+- **MCP fallback**: `mcp__codex__codex` tool with delegation prompt as message — used directly, without the script, when Codex is MCP-only (`codex=none` at detection but the tool is available), or as the one soft-skip retry described above.
+- **Probe mode**: `scripts/rc-invoke-provider.sh --probe "<codex-path>" ""` — opt-in Step-0 health check (`settings.health_probe`, default off), a trivial 1-token prompt under a short cap (`RC_HEALTH_PROBE_TIMEOUT`, default 20s), verdict `HEALTHY` / `UNHEALTHY: <reason>` / `INCONCLUSIVE`. Fail-open: only positive auth/quota/overload evidence drops the slot; a timeout or empty response never does.
 - **Env requirements**: OpenAI API key (configured via `codex login`)
 
 ### Antigravity (Google) — preferred Google-family reviewer
@@ -36,10 +45,14 @@ Google's successor to the Gemini CLI (binary `agy`). See the **Google-family rev
     done
   fi
   ```
-  **`agy` must be probed explicitly and preferred — never default the Google slot to `gemini` without checking `agy` first.** Invoke by the resolved full path (`$AGY`) so a `PATH` gap doesn't make a present `agy` look absent. (No MCP transport exists for Antigravity.)
-- **CLI invocation**: The subagent runs `agy --help` to discover current syntax, then invokes Antigravity in non-interactive mode with text output. Do not hardcode flags — CLI syntax changes between versions. Hint verified against agy 1.0.16–1.1.0: `agy -p "<prompt>"` (`-p`/`--print` = run a single prompt non-interactively and print the response). Optional: `--add-dir <repo>` to include the repo in the workspace, `--model <name>` to select a model, `--dangerously-skip-permissions` to avoid blocking on an approval it can't receive in a non-TTY.
-- **Cold start**: `agy`'s **first** `-p` call in a session is slow (model load, auth handshake, update check) — it can take **several minutes**, versus ~10s once warm; occasionally it exits 0 with no stdout. Give it real headroom, or a cold start looks like a failure: the invocation is capped **twice** and both caps must cover the budget — the outer wrapper (`${RC_REVIEWER_TIMEOUT:-600}`, 10m default) **and** agy's own `--print-timeout`, which defaults to just **5m**. You MUST pass `--print-timeout` sized to the budget — but its value is a **Go duration string and requires a unit suffix**: a bare integer is rejected (`agy --print-timeout 600` exits 2 with `missing unit in duration "600"`). Since `RC_REVIEWER_TIMEOUT` is in **seconds**, append `s`: `--print-timeout "${RC_REVIEWER_TIMEOUT:-600}s"` (or a literal like `10m`). Set it equal to — or a touch below — the outer wrapper so agy trips on its own first and prints an attributable timeout message instead of being SIGTERM-ed. Without it agy self-limits at 5m and cuts off a slow cold start first. Treat multi-minute first-call latency as normal, not a hang. The empty-output quirk is handled by the retry-then-fallback policy below.
-- **Round 2**: Fresh CLI call with full context + synthesis
+  **`agy` must be probed explicitly and preferred — never default the Google slot to `gemini` without checking `agy` first.** Pass the resolved full path (`$AGY`) to `scripts/rc-invoke-provider.sh` so a `PATH` gap doesn't make a present `agy` look absent — the script's `resolve_bin()` accepts either a `PATH`-findable name or an off-`PATH` executable path. (No MCP transport exists for Antigravity.)
+- **CLI invocation**: dispatch goes through `scripts/rc-invoke-provider.sh "<agy-path>" "<gemini-path-or-empty>" "<prompt-file>"` — one call, one result; the script owns the full retry/fallback state machine (see **Google-family reviewer** below). The frozen argv is:
+  ```
+  agy -p "<prompt>" --print-timeout "<cap>s" --dangerously-skip-permissions [--add-dir <RC_GOOGLE_ADD_DIR>] [--model <RC_GOOGLE_MODEL>]
+  ```
+  `--dangerously-skip-permissions` is **unconditional** — always appended, not optional — because a non-interactive run has no TTY to answer an approval prompt it can't receive. `--print-timeout` is sized to that invocation's own cap (the primary's full `RC_REVIEWER_TIMEOUT`, or the retry's time-boxed remaining budget) and **must** carry its unit suffix: agy's flag takes a Go duration string, and a bare integer (`--print-timeout 600`) is rejected with `missing unit in duration "600"` — the script always appends `s` (`"${cap}s"`). `--add-dir` / `--model` are appended only when `RC_GOOGLE_ADD_DIR` / `RC_GOOGLE_MODEL` are set. Success is validated the same way as Codex above (heading-anchored `Findings`/`Overall Assessment`, or a refutation verdict line) before any auth/quota/overload pattern is checked.
+- **Cold start**: `agy`'s **first** `-p` call in a session is slow (model load, auth handshake, update check) — it can take **several minutes** versus ~10s once warm, and it occasionally exits 0 with no stdout. This is now handled automatically by the script's fast-empty retry (see **Google-family reviewer** below) rather than being something the calling subagent has to reason about — treat multi-minute first-call latency as normal, not a hang.
+- **Probe mode**: `scripts/rc-invoke-provider.sh --probe "<agy-path>" "<gemini-path-or-empty>"` — opt-in Step-0 health check (`settings.health_probe`, default off), reusing the same frozen argv and hard-fail patterns under a short cap (`RC_HEALTH_PROBE_TIMEOUT`, default 20s); a probe treats any clean, non-empty exit-0 response as alive (it doesn't require review-shaped headings, since the probe prompt is a trivial "ping"). Slot verdict is `HEALTHY` iff either `agy` or `gemini` probes healthy; `UNHEALTHY: <reason>` only if **both** give positive hard-fail evidence; otherwise `INCONCLUSIVE` (fail-open — a cold/slow provider is never dropped).
 - **Env requirements**: Authenticated `agy` session — Google account sign-in (Google One AI plans) or enterprise Gemini Enterprise Agent Platform (a Google Cloud project). Install: `curl -fsSL https://antigravity.google/cli/install.sh | bash`. Config lives under `~/.gemini/antigravity-cli/`.
 
 ### Gemini (Google) — fallback
@@ -47,14 +60,13 @@ Google's successor to the Gemini CLI (binary `agy`). See the **Google-family rev
 Backward-compatible Google reviewer. Note: Gemini CLI's consumer "Sign in with Google" (Gemini Code Assist for individuals, and AI Pro/Ultra) was sunset **2026-06-18** — those sessions now fail with *"no longer supported for Gemini Code Assist for individuals… migrate to the Antigravity suite."* Gemini CLI still works when authenticated via a `GEMINI_API_KEY`, Vertex AI, or an enterprise Gemini Code Assist license. **Prefer Antigravity (`agy`) when both are installed.**
 
 - **Detection**: `which gemini 2>/dev/null` — if found, use CLI. (No usable Gemini text-gen MCP exists; the Google-family fallback is `agy → gemini` at the CLI level, not MCP.)
-- **CLI invocation**: The subagent runs `gemini --help` to discover current syntax, then invokes Gemini in non-interactive mode with text output. Do not hardcode flags — CLI syntax changes between versions. For headless/non-TTY runs, Gemini may refuse an untrusted workspace — pass `--skip-trust` or set `GEMINI_CLI_TRUST_WORKSPACE=true`.
-- **Round 2**: Fresh CLI call with full context + synthesis
+- **CLI invocation**: never dispatched directly — it is always the **fallback positional** to `scripts/rc-invoke-provider.sh` (or, on a `gemini`-only slot, the **primary** positional with `""` as the fallback). The frozen argv is `gemini -p "<prompt>" --skip-trust` (`--skip-trust` avoids Gemini refusing an untrusted workspace on a headless/non-TTY run). As a fallback it gets a **fresh, full `RC_REVIEWER_TIMEOUT` budget** — never the `agy` retry's time-boxed remainder — and is **never retried itself**.
 - **Env requirements**: `GEMINI_API_KEY` (or Vertex AI / enterprise Code Assist credentials). Consumer OAuth via `gemini login` is no longer served.
 
 ### Perplexity (Sonar API)
 
 - **Detection**: `PERPLEXITY_API_KEY` env var is set and non-empty
-- **CLI invocation**: `curl` POST to Sonar API:
+- **CLI invocation**: `curl` POST to Sonar API — **not** routed through `scripts/rc-invoke-provider.sh` (that script is CLI-only: a binary to resolve plus an exit-code/stderr failure taxonomy; Perplexity is an HTTP API with an HTTP-status failure taxonomy, so it keeps its own inline `curl` path):
   ```bash
   curl -s https://api.perplexity.ai/v1/chat/completions \
     -H "Authorization: Bearer $PERPLEXITY_API_KEY" \
@@ -66,16 +78,16 @@ Backward-compatible Google reviewer. Note: Gemini CLI's consumer "Sign in with G
   ```
   Parse the response: `.choices[0].message.content`
 - **MCP fallback**: None
-- **Round 2**: Fresh curl call with full context + synthesis
 - **Env requirements**: `PERPLEXITY_API_KEY` env var
 
 ## Runtime Rules
 
-1. Probe all providers at review start
+1. Detection runs for every provider at review start (installed vs. not — see each provider's Detection above). A separate, **opt-in** Step-0 health probe (`settings.health_probe`, default off) further live-checks the Codex and Google slots via `scripts/rc-invoke-provider.sh --probe` before roster assembly — see each provider's Probe mode above. Claude and the dedicated Security reviewer are native-always and never probed; Perplexity has no probe binary (it's a curl-only API).
 2. Minimum 2 available for council mode; 1 = single-reviewer mode
 3. Report header shows availability: `Reviewers: Claude, Codex, Google (Antigravity) (3 participating — Perplexity: PERPLEXITY_API_KEY not set)`
-4. Transport fallback: CLI first, then MCP, then skip
-5. Never block a review because a provider is unavailable
+4. **Dispatch transport**: Codex and the Google slot dispatch through `scripts/rc-invoke-provider.sh` (one call = one result) for both the Round-1 review and Step-4 refutation verdicts. Perplexity (curl-only Sonar API) and the native Claude/Security subagents do **not** go through the script.
+5. Transport fallback (Codex only): CLI first, then MCP, then skip
+6. Never block a review because a provider is unavailable
 
 ### Google-family reviewer (Antigravity + Gemini)
 
@@ -85,16 +97,16 @@ Backward-compatible Google reviewer. Note: Gemini CLI's consumer "Sign in with G
 - Only `gemini` installed → use `gemini`; announce as **Google (Gemini)**.
 - Neither → the Google slot is unavailable; note it in the report.
 
-**Invocation policy when `agy` is primary** (the order matters — a transient `agy` blip must not be masked by a `gemini` that cannot succeed):
+The retry/fallback state machine itself lives in `scripts/rc-invoke-provider.sh` (one call, one result — see the Antigravity section above for its argv). The policy it enforces, in order (the order matters — a transient `agy` blip must not be masked by a `gemini` that cannot succeed):
 
-1. Run `agy`. If it returns a valid non-empty review, use it. Done.
-2. If `agy` returns **empty or malformed output** — the known `agy -p` quirk of exiting **0 with no stdout** in a non-TTY, usually a cold-start artifact — **retry `agy` once, but only if that empty result came back *quickly*** (rule of thumb: under ~⅓ of the budget). Time-box the retry to the **remaining** budget, not a fresh `RC_REVIEWER_TIMEOUT`, so first-try + retry can never exceed one budget. The warm retry almost always returns a valid review. Do not go to `gemini` yet.
-3. Fall back to `gemini` only when `agy` cannot be salvaged: `agy` is **absent**, **hard-fails** (auth/quota — retrying won't help), **times out**, its empty result arrived **near the cap** (a slow-but-completed empty call — treat it like a timeout; do not retry, or you nearly double the wall-clock), or its **step-2 retry also returns empty/malformed**. The slot's outcome is then terminal for the round (not eligible for external reviewer-level retry).
+1. **Run `agy`** with a fresh, full `RC_REVIEWER_TIMEOUT` budget. If it returns a valid non-empty review, that's the result. Done.
+2. **If `agy` returns empty or malformed output *quickly*** (elapsed under ⅓ of the budget — the known cold-start quirk of exiting 0 with no stdout), **retry `agy` once**, time-boxed to the **remaining** budget (`budget - spent`), never a fresh `RC_REVIEWER_TIMEOUT` — so first-try + retry can never exceed one budget. The warm retry almost always returns a valid review. Do not fall to `gemini` yet.
+3. **Fall back to `gemini`** — with its own **fresh, full** budget (not the remainder) and **no retry of its own** — when `agy` cannot be salvaged: it's **absent**, **hard-fails** (auth/quota/overload — retrying won't help), **times out**, its empty result arrived **near the cap** (a slow-but-completed empty call is treated like a timeout, not retried), or its step-2 retry **also** comes back empty/malformed. Whatever `gemini` returns (or fails to) is then **terminal for the slot** — not eligible for the Step 3.5 reviewer-level retry.
 
-**`gemini` is a dead fallback for Workspace/Dasher accounts.** `gemini -p` fast-fails almost instantly with `IneligibleTierError` (`reasonCode: DASHER_USER`, "not eligible for Gemini Code Assist for individuals") for any Google **Workspace**-domain account, and for any account without a `GEMINI_API_KEY` / Vertex / enterprise Code Assist license. For those users the fallback **cannot** succeed — that is expected, not a misconfiguration. When it fails this way, report the slot honestly attributed to its **primary** tool — e.g. *"Google (Antigravity) — agy returned empty output after retry; Gemini fallback ineligible (Workspace/Dasher account). Slot skipped."* — **never** as a bare "Gemini auth failure," which hides that `agy` was the real reviewer and misleads a user whose `agy` works fine interactively.
+**`gemini` is a dead fallback for Workspace/Dasher accounts.** `gemini -p` fast-fails almost instantly with `IneligibleTierError` (`reasonCode: DASHER_USER`, "not eligible for Gemini Code Assist for individuals") for any Google **Workspace**-domain account, and for any account without a `GEMINI_API_KEY` / Vertex / enterprise Code Assist license. For those users the fallback **cannot** succeed — that is expected, not a misconfiguration. When it fails this way, the script's `SKIPPED` line stays honestly attributed to the **primary** tool — e.g. *"SKIPPED: Google (Antigravity) unavailable — agy: empty output after retry; gemini fallback: ineligible (auth/DASHER)"* — **never** a bare "Gemini auth failure," which would hide that `agy` was the real reviewer and mislead a user whose `agy` works fine interactively.
 
-Label a successful result by the tool that produced it — **Antigravity** or **Gemini**.
+Label a successful result by the tool that produced it — **Antigravity** or **Gemini** (the script's `TOOL: <label>` line, keyed off the resolved binary's basename).
 
 ## Adding a New Provider
 
-Add a new section above with: Detection, CLI invocation, MCP fallback, Round 2 handling, Env requirements. Then update `skills/run/SKILL.md` to include it in the parallel dispatch.
+Add a new section above with: Detection, Invocation (note whether it dispatches through `scripts/rc-invoke-provider.sh` — only providers shaped as "one primary CLI binary, classifiable by exit code + stderr text, plus an optional one-fallback binary" qualify; an HTTP API like Perplexity keeps its own inline transport), MCP fallback (if any), Env requirements. Then update `skills/run/SKILL.md` to include it in the parallel dispatch.

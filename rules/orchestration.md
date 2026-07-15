@@ -67,7 +67,7 @@ This is a **structural** check (fields present **and, where the schema constrain
 - **how_to_verify** — a concrete, human-runnable check (command/input/trace) + expected observation
 - **source** — reviewer id
 
-A finding that is **missing any required field** — or that carries an **out-of-enum `severity`/`confidence`** (e.g. `severity: typo`, `confidence: certain`) or a `location` that isn't a resolvable `path:line`/section reference — marks the entire reviewer output as FAILED. Invalid values are rejected, not just absent ones. (A fixture asserting that malformed values produce FAILED is added with the Phase-1 fixture harness in PR 1c.)
+A finding that is **missing any required field** — or that carries an **out-of-enum `severity`/`confidence`** (e.g. `severity: typo`, `confidence: certain`) or a `location` that isn't a resolvable `path:line`/section reference — marks the entire reviewer output as FAILED. Invalid values are rejected, not just absent ones.
 
 ### Outcomes
 
@@ -89,7 +89,7 @@ After Round 1 validation, the orchestrator reports results and determines next a
 ### Retry Rules
 
 - **One retry attempt max** per reviewer per round. If a reviewer fails twice, mark it as unavailable and move on.
-- **The Google slot is exempt when it already exhausted its internal retry/fallback.** A `SKIPPED` whose reason is `agy` empty-after-retry, `agy` timeout, or `gemini` ineligibility (`DASHER_USER`) is **terminal** — do not re-run it here (it already spent its one allowed retry internally, and re-running only re-hits a dead `gemini` or another cold-start). Applies even under `RC_AUTO_RETRY=true`.
+- **The Codex and Google slots are exempt when they've already exhausted their internal retry/fallback** (both route through `scripts/rc-invoke-provider.sh` — Phase 4 generalized it to Codex too). A `SKIPPED` returned by that script is **terminal** — do not re-run it here: for the Google slot, `agy` empty-after-retry, `agy` timeout, or `gemini` ineligibility (`DASHER_USER`) already spent the slot's one allowed retry internally (re-running only re-hits a dead `gemini` or another cold-start); the Codex slot has no fallback tool, so any `SKIPPED` it returns is likewise final. Applies even under `RC_AUTO_RETRY=true`.
 - **Retried results merge into the Round 1 pool** before synthesis begins. All validated results (first-pass and retried) are treated identically.
 - **RC_AUTO_RETRY=true** skips the user prompt and retries failed reviewers automatically. Intended for CI/automated pipelines.
 
@@ -106,21 +106,25 @@ Two caps bound a run, with **distinct roles** — do not conflate them:
 
 CLI and API reviewers must fail fast. A single overloaded or quota-capped provider must never stall the council — a dead provider should return `SKIPPED` in minutes, not tens of minutes. This section governs the **HARD per-invocation cap** from Budget above. Every CLI/API reviewer subagent (Codex, the Google slot's `agy`/`gemini`, Perplexity) follows these rules:
 
-1. **Hard per-invocation timeout — never run a CLI unbounded.** Cap every CLI call. Prefer a tool-native cap when one exists (`curl --max-time`, agy's `--print-timeout`); otherwise wrap with `timeout`/`gtimeout`; and if **neither binary is present** (e.g. a stock macOS with no coreutils), use a pure-shell watchdog so the call still can't hang forever. Resolve the binary first and use an explicit `if`/`else` (portable across bash, sh, and zsh — do **not** use `${TO:+$TO 600}`, which word-splits in bash but stays one word in zsh):
+1. **Hard per-invocation timeout — never run a CLI unbounded.** Cap every CLI call, and make the cap **HARD**: SIGTERM at the cap, then — if the process is still alive after a `KILL_GRACE` (3s) — escalate to SIGKILL, so a CLI that traps/ignores TERM (or is simply wedged) still can't outlive the budget. Prefer a tool-native cap when one exists (`curl --max-time`, agy's `--print-timeout`); otherwise wrap with `timeout -k`/`gtimeout -k`; and if **neither binary is present** (e.g. a stock macOS with no coreutils), use a pure-shell watchdog that escalates the same way. Resolve the binary first and use an explicit `if`/`else` (portable across bash, sh, and zsh — do **not** use `${TO:+$TO 600}`, which word-splits in bash but stays one word in zsh). This is exactly what `run_capped` in `scripts/rc-lib-timeout.sh` implements — the shared library `scripts/rc-invoke-provider.sh` (Codex, the Google slot) and `scripts/rc-static-scan.sh` both call:
    ```bash
    cap="${RC_REVIEWER_TIMEOUT:-600}"
+   KILL_GRACE=3
    TO="$(command -v timeout || command -v gtimeout || true)"
    if [ -n "$TO" ]; then
-     "$TO" "$cap" <cli> … > out.txt 2>&1; rc=$?
+     # -k escalates to SIGKILL if the process is still alive KILL_GRACE seconds
+     # after the initial SIGTERM at the cap.
+     "$TO" -k "$KILL_GRACE" "$cap" <cli> … > out.txt 2>&1; rc=$?
    else
-     # no timeout binary — background + watchdog so the call is never unbounded
+     # no timeout binary — background + watchdog so the call is never unbounded.
+     # TERM at the cap, wait the grace, then KILL — matching -k above.
      <cli> … > out.txt 2>&1 & pid=$!
-     ( sleep "$cap"; kill -TERM "$pid" 2>/dev/null ) >/dev/null 2>&1 & wd=$!
+     ( sleep "$cap"; kill -TERM "$pid" 2>/dev/null; sleep "$KILL_GRACE"; kill -KILL "$pid" 2>/dev/null ) >/dev/null 2>&1 & wd=$!
      wait "$pid"; rc=$?; kill "$wd" 2>/dev/null
    fi
-   # rc != 0 (124 timeout / 143 SIGTERM / provider error) = failure for this invocation
+   # rc != 0 (124 timeout / 143 SIGTERM / 137 SIGKILL / provider error) = failure for this invocation
    ```
-   For `curl`, its built-in `--max-time ${RC_REVIEWER_TIMEOUT:-600}` already caps it (no external binary needed). If a CLI has its own internal wait (e.g. agy's `--print-timeout`, default 5m), raise it to match the budget or it will cut off before the wrapper — agy's flag takes a **unit-suffixed duration** (`"${RC_REVIEWER_TIMEOUT:-600}s"` or `10m`; a bare integer like `600` is rejected with `missing unit in duration`). The watchdog guarantees a cap even with no `timeout`/`gtimeout`; do **not** fall back to a bare, uncapped invocation — that reopens the exact hang this section prevents.
+   For `curl`, its built-in `--max-time ${RC_REVIEWER_TIMEOUT:-600}` already caps it (no external binary needed). If a CLI has its own internal wait (e.g. agy's `--print-timeout`, default 5m), raise it to match the budget or it will cut off before the wrapper — agy's flag takes a **unit-suffixed duration** (`"${RC_REVIEWER_TIMEOUT:-600}s"` or `10m`; a bare integer like `600` is rejected with `missing unit in duration`). The watchdog guarantees a HARD cap even with no `timeout`/`gtimeout`; do **not** fall back to a bare, uncapped invocation — that reopens the exact hang this section prevents.
 2. **No compounding retries.** At most **one** retry per tool, and only for a single clearly-transient blip (e.g. one network hiccup). Never chase a provider's own model auto-fallback across many backoff attempts — that is what turned one dead provider into an ~84-minute hang.
 3. **Fast-fail the current *tool* immediately (no retry)** when the output or error indicates a non-transient condition. Fast-fail is **tool-level, not slot-level**: if the reviewer has a documented fallback tool (the Google slot's `agy`→`gemini`), move to it next; return the reviewer-level `SKIPPED` sentinel only when **no fallback tool remains**. Non-transient conditions:
    - **Auth failure** — e.g. `no longer supported`, `not authenticated`, `please migrate to the Antigravity`, `secret keyring is locked`, `IneligibleTierError` / `DASHER_USER` / `not eligible for Gemini Code Assist` (Workspace/Dasher account — `gemini` only), login/OAuth errors.
@@ -138,7 +142,7 @@ env (RC_*)  >  .review-council/config.local.yml  >  .review-council/config.yml  
 
 Step 0 (of `skills/run/SKILL.md`) resolves the effective `settings.*` via `rc-config.sh`, which already folds any `RC_*` environment override into each value at the correct precedence. **Throughout this document, every `RC_*` name denotes that knob's *effective* value** (its resolved `settings.*` result) — not a fresh read of the ambient environment. With no config files (or no `yq` installed), the effective values are the defaults + any `RC_*` overrides — byte-identical to prior behavior. Full schema: `rules/config.md`.
 
-When the orchestrator runs a step that **consumes** an `RC_*` env var — the timeout wrapper below, or `scripts/rc-invoke-provider.sh` in a later PR — it **supplies the effective value on that invocation**, e.g. `RC_REVIEWER_TIMEOUT=<effective settings.reviewer_timeout_seconds> <cli> …`. Do **not** rely on a shell `export` to carry a value across steps: the orchestrator is an LLM driving separate tool calls and subagents, so it carries the effective values resolved in Step 0 and passes them explicitly per-invocation.
+When the orchestrator runs a step that **consumes** an `RC_*` env var — the timeout wrapper below, or `scripts/rc-invoke-provider.sh` — it **supplies the effective value on that invocation**, e.g. `RC_REVIEWER_TIMEOUT=<effective settings.reviewer_timeout_seconds> <cli> …`. Do **not** rely on a shell `export` to carry a value across steps: the orchestrator is an LLM driving separate tool calls and subagents, so it carries the effective values resolved in Step 0 and passes them explicitly per-invocation.
 
 | Setting (`settings.*`) | Default | Env override | Purpose |
 |---|---|---|---|
@@ -150,11 +154,8 @@ When the orchestrator runs a step that **consumes** an `RC_*` env var — the ti
 | `reviewer_timeout_seconds` | `600` | `RC_REVIEWER_TIMEOUT` | Per-invocation wall-clock cap (**seconds**) for CLI/API reviewers. |
 | `run_budget_seconds` | `600` | `RC_RUN_BUDGET` | Total wall-clock budget (**seconds**) for the whole run. |
 | `auto_retry` | `false` | `RC_AUTO_RETRY` | Retry failed reviewers without asking (CI-friendly). |
+| `health_probe` | `false` | `RC_HEALTH_PROBE` | Opt-in Step-0 health probe (Codex + Google slots) so `available`/`min_reviewers` reflect *usable*, not merely installed. Default off; a provider is dropped only on positive hard-fail evidence (auth/quota/overload), fail-open otherwise. |
+| `health_probe_timeout_seconds` | `20` | `RC_HEALTH_PROBE_TIMEOUT` | Short wall-clock cap (seconds) for each health probe. |
+| `claude_max_turns` | `100` | `RC_CLAUDE_MAX_TURNS` | Turn budget (`maxTurns`) for the native Claude and Security reviewer subagents. Default 100 (lenient); lower it to cap local review cost. |
 
 **`reviewer_timeout_seconds` / `RC_REVIEWER_TIMEOUT`** is sized to cover `agy`'s multi-minute cold start; `agy`'s own `--print-timeout` must be raised to match, as a **unit-suffixed** duration — `"${RC_REVIEWER_TIMEOUT}s"` or `10m`, never a bare `600` (see the timeout wrapper above). Raise for very large diffs or slow networks.
-
-One additional env var is **not** part of the config schema (it has no `settings.*` key and is read directly):
-
-| Variable | Default | Purpose |
-|---|---|---|
-| `RC_CLAUDE_MAX_TURNS` | `30` | Max turns for the Claude reviewer subagent. |

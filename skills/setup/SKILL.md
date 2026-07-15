@@ -16,7 +16,7 @@ Always available. Skip detection.
 
 ### Codex
 ```bash
-which codex 2>/dev/null && codex --version
+command -v codex 2>/dev/null && codex --version
 ```
 - If found: "Codex (CLI) ........... available"
 - If not found, check if `mcp__codex__codex` tool is available: "Codex (MCP) ........... available"
@@ -53,7 +53,7 @@ test -n "$PERPLEXITY_API_KEY" && echo "set" || echo "not set"
 
 ### GitHub CLI (for PR reviews)
 ```bash
-which gh 2>/dev/null && gh auth status 2>&1 | head -3
+command -v gh 2>/dev/null && gh auth status 2>&1 | head -3
 ```
 - If authenticated: "GitHub CLI ............ authenticated"
 - If not: "GitHub CLI ............. not found or not authenticated (PR reviews disabled)"
@@ -239,14 +239,17 @@ If the user accepts, write **`.review-council/config.yml`** with the **full-refe
 #     # providers: [perplexity]         # default when omitted -> [perplexity]
 
 # settings:                      # run knobs (each also settable via its RC_* env var, which wins)
-#   personas:                 true     # RC_PERSONAS
-#   verify:                   true     # RC_VERIFY
-#   verify_max_findings:      12       # RC_VERIFY_CAP
-#   learn:                    true     # RC_LEARN
-#   min_reviewers:            2        # RC_MIN_REVIEWERS
-#   reviewer_timeout_seconds: 600      # RC_REVIEWER_TIMEOUT
-#   run_budget_seconds:       600      # RC_RUN_BUDGET
-#   auto_retry:               false    # RC_AUTO_RETRY
+#   personas:                     true     # RC_PERSONAS
+#   verify:                       true     # RC_VERIFY
+#   verify_max_findings:          12       # RC_VERIFY_CAP
+#   learn:                        true     # RC_LEARN
+#   min_reviewers:                2        # RC_MIN_REVIEWERS
+#   reviewer_timeout_seconds:     600      # RC_REVIEWER_TIMEOUT
+#   run_budget_seconds:           600      # RC_RUN_BUDGET
+#   auto_retry:                   false    # RC_AUTO_RETRY
+#   health_probe:                 false    # RC_HEALTH_PROBE
+#   health_probe_timeout_seconds: 20       # RC_HEALTH_PROBE_TIMEOUT
+#   claude_max_turns:             100      # RC_CLAUDE_MAX_TURNS
 
 # static_analysis:               # deterministic tool layer (each also settable via its RC_* env var, which wins)
 #   enabled: true                    # RC_STATIC_ANALYSIS

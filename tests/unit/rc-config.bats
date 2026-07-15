@@ -39,13 +39,12 @@ has_line() {
   has_line "settings.run_budget_seconds=600"
   has_line "settings.min_reviewers=2"
   has_line "settings.auto_retry=false"
-  # Phase-4 knobs (Task 4.0) -> defaults chosen so absent config = today's
-  # behavior (probe on/fail-open, generous context cap, token ceiling off).
-  has_line "settings.health_probe=true"
+  # Phase-4 knobs -> defaults chosen so absent config = today's behavior
+  # (probe off/opt-in; claude_max_turns lenient at 100 so wiring the knob
+  # never clamps reviewers shorter than they run today).
+  has_line "settings.health_probe=false"
   has_line "settings.health_probe_timeout_seconds=20"
-  has_line "settings.max_context_bytes=400000"
-  has_line "settings.max_run_tokens=0"
-  has_line "settings.claude_max_turns=30"
+  has_line "settings.claude_max_turns=100"
   # static_analysis.* is now emitted (previously: no `static_analysis:` block ->
   # the whole thing was ignored, no lines at all). Absent block -> defaults.
   has_line "static_analysis.enabled=true"
@@ -102,10 +101,10 @@ EOF
   has_line "settings.min_reviewers=3"
 }
 
-@test "settings.health_probe: default true, config.yml/config.local.yml precedence, env override" {
+@test "settings.health_probe: default false, config.yml/config.local.yml precedence, env override" {
   run --separate-stderr "$SCRIPT" "$CFG"
   [ "$status" -eq 0 ]
-  has_line "settings.health_probe=true"
+  has_line "settings.health_probe=false"
 
   printf 'settings:\n  health_probe: false\n' >"$CFG/config.yml"
   run --separate-stderr "$SCRIPT" "$CFG"
@@ -142,50 +141,10 @@ EOF
   has_line "settings.health_probe_timeout_seconds=5"
 }
 
-@test "settings.max_context_bytes: default 400000, config.yml/config.local.yml precedence, env override" {
+@test "settings.claude_max_turns: default 100, config.yml/config.local.yml precedence, env override" {
   run --separate-stderr "$SCRIPT" "$CFG"
   [ "$status" -eq 0 ]
-  has_line "settings.max_context_bytes=400000"
-
-  printf 'settings:\n  max_context_bytes: 200000\n' >"$CFG/config.yml"
-  run --separate-stderr "$SCRIPT" "$CFG"
-  [ "$status" -eq 0 ]
-  has_line "settings.max_context_bytes=200000"
-
-  printf 'settings:\n  max_context_bytes: 300000\n' >"$CFG/config.local.yml"
-  run --separate-stderr "$SCRIPT" "$CFG"
-  [ "$status" -eq 0 ]
-  has_line "settings.max_context_bytes=300000"
-
-  RC_MAX_CONTEXT_BYTES=100000 run --separate-stderr "$SCRIPT" "$CFG"
-  [ "$status" -eq 0 ]
-  has_line "settings.max_context_bytes=100000"
-}
-
-@test "settings.max_run_tokens: default 0 (off), config.yml/config.local.yml precedence, env override" {
-  run --separate-stderr "$SCRIPT" "$CFG"
-  [ "$status" -eq 0 ]
-  has_line "settings.max_run_tokens=0"
-
-  printf 'settings:\n  max_run_tokens: 5000\n' >"$CFG/config.yml"
-  run --separate-stderr "$SCRIPT" "$CFG"
-  [ "$status" -eq 0 ]
-  has_line "settings.max_run_tokens=5000"
-
-  printf 'settings:\n  max_run_tokens: 10000\n' >"$CFG/config.local.yml"
-  run --separate-stderr "$SCRIPT" "$CFG"
-  [ "$status" -eq 0 ]
-  has_line "settings.max_run_tokens=10000"
-
-  RC_MAX_RUN_TOKENS=20000 run --separate-stderr "$SCRIPT" "$CFG"
-  [ "$status" -eq 0 ]
-  has_line "settings.max_run_tokens=20000"
-}
-
-@test "settings.claude_max_turns: default 30, config.yml/config.local.yml precedence, env override" {
-  run --separate-stderr "$SCRIPT" "$CFG"
-  [ "$status" -eq 0 ]
-  has_line "settings.claude_max_turns=30"
+  has_line "settings.claude_max_turns=100"
 
   printf 'settings:\n  claude_max_turns: 10\n' >"$CFG/config.yml"
   run --separate-stderr "$SCRIPT" "$CFG"
