@@ -134,7 +134,67 @@ $_record
 printf '%s' '[{"code":"F401","filename":"a.py","location":{"row":1},"message":"unused import"}]'
 exit "\${RUFF_EXIT:-0}"
 EOF
+
+  # --- fake docker (Phase 4 docker run-time gate) -------------------------
+  # `docker info` => daemon up (unless DOCKER_INFO_EXIT flips it). For
+  # `docker run … --entrypoint <tool> …` it records argv (via _record), detects
+  # the tool from --entrypoint (any leading path stripped, so /osv-scanner works),
+  # then emits the SAME canned JSON its native fake emits — to STDOUT for the
+  # stdout tools, or to the -r <path> file for gitleaks. Paths are /src/-prefixed
+  # so the strip_src_prefix logic is exercised.
+  install_fake docker <<EOF
+#!/usr/bin/env sh
+$_record
+case "\${1:-}" in
+  info) exit "\${DOCKER_INFO_EXIT:-0}" ;;
+  version) exit 0 ;;
+esac
+# docker run …: pull the --entrypoint value and (gitleaks) the -r report path.
+_ep=""; _r=""; _prev=""
+for _a in "\$@"; do
+  if [ "\$_prev" = "--entrypoint" ]; then _ep="\$_a"; fi
+  if [ "\$_prev" = "-r" ]; then _r="\$_a"; fi
+  _prev="\$_a"
+done
+_tool="\${_ep##*/}"
+case "\$_tool" in
+  gitleaks)
+    case "\${GITLEAKS_MODE:-findings}" in
+      hang) sleep "\${GITLEAKS_SLEEP:-30}" ;;
+      clean) printf '%s' '[]' >"\$_r" ;;
+      findings) printf '%s' '[{"RuleID":"generic-api-key","File":"/src/secret.txt","StartLine":1,"Description":"api key detected"}]' >"\$_r" ;;
+    esac
+    exit "\${GITLEAKS_EXIT:-1}" ;;
+  trufflehog)
+    case "\${TRUFFLEHOG_MODE:-clean}" in
+      hang) sleep "\${TRUFFLEHOG_SLEEP:-30}" ;;
+      clean) : ;;
+      findings) printf '%s\n' '{"DetectorName":"AWS","Verified":true,"SourceMetadata":{"Data":{"Filesystem":{"file":"/src/env.sh","line":2}}}}' ;;
+      netfail) echo "trufflehog: dial tcp 52.0.0.1:443: i/o timeout" >&2 ;;
+    esac
+    exit "\${TRUFFLEHOG_EXIT:-0}" ;;
+  semgrep)
+    case "\${SEMGREP_MODE:-findings}" in
+      hang) sleep "\${SEMGREP_SLEEP:-30}" ;;
+      empty) printf '%s' '{"results":[]}' ;;
+      findings) printf '%s' '{"results":[{"check_id":"rules.demo","path":"/src/a.py","start":{"line":3},"extra":{"message":"demo finding","severity":"WARNING"}}]}' ;;
+    esac
+    exit "\${SEMGREP_EXIT:-1}" ;;
+  osv-scanner)
+    case "\${OSV_MODE:-findings}" in
+      hang) sleep "\${OSV_SLEEP:-30}" ;;
+      clean) printf '%s' '{"results":[]}' ;;
+      findings) printf '%s' '{"results":[{"source":{"path":"/src/go.mod"},"packages":[{"package":{"name":"foo"},"vulnerabilities":[{"id":"GHSA-xxxx","summary":"RCE in foo","database_specific":{"severity":"HIGH"}}]}]}]}' ;;
+    esac
+    exit "\${OSV_EXIT:-1}" ;;
+esac
+exit 0
+EOF
 }
+
+# docker_run_for <tool>: did the fake docker actually 'docker run' this tool
+# (as opposed to only being probed via 'docker info')?
+docker_run_for() { grep -qF -- "--entrypoint $1" "$ARGS" || grep -qF -- "--entrypoint /$1" "$ARGS"; }
 
 # called <tool>: did the tool's fake binary run at all?
 called() { grep -qx "$1" "$CALLS"; }
@@ -607,4 +667,109 @@ called() { grep -qx "$1" "$CALLS"; }
   ! grep -qF -- '--baseline-commit' "$ARGS"
   echo "$output" | grep -qF 'TIER_B|semgrep|ERROR|a.py|3|semgrep:r.in|on a changed line'
   echo "$output" | grep -qF 'TIER_B|semgrep|ERROR|a.py|40|semgrep:r.out|far outside any hunk'
+}
+
+# ===========================================================================
+# Phase 4 — docker run-time gate (RC_STATIC_DOCKER_TOOLS). All use the FAKE
+# docker from setup_fakes; no real daemon is ever contacted.
+# ===========================================================================
+
+@test "docker gate: absent gitleaks + in docker list + daemon up -> docker_scan runs, Tier A line with repo-relative path (strip), not 'not installed'" {
+  setup_fakes
+  rm -f "$FAKEDIR/gitleaks"   # gitleaks MISSING from PATH
+  printf '%s\n' "a.py" "secret.txt" >"$CHANGED"
+  RC_STATIC_TOOLS="gitleaks" RC_STATIC_DOCKER_TOOLS="gitleaks" PATH="$SANDBOX" \
+    run --separate-stderr "$SCRIPT" "$BASE" "$HEAD" "$CHANGED"
+  echo "status=$status"
+  echo "output=<<$output>>"
+  echo "args=<<$(cat "$ARGS")>>"
+  [ "$status" -eq 0 ]
+  # docker actually ran gitleaks (filesystem `dir` mode, report to a -r file)
+  docker_run_for gitleaks
+  grep -qE '^docker: run .* dir ' "$ARGS"
+  # /src/secret.txt in the canned report is stripped to a repo-relative path
+  echo "$output" | grep -qxF 'TIER_A|gitleaks|critical|secret.txt|1|gitleaks:generic-api-key|api key detected'
+  # NOT the default absent-tool skip
+  ! echo "$output" | grep -qF 'SKIPPED: gitleaks — not installed'
+}
+
+@test "docker gate: absent stdout scanners (trufflehog/semgrep/osv) via docker -> /src paths stripped to repo-relative Tier A/B lines" {
+  setup_fakes
+  rm -f "$FAKEDIR/trufflehog" "$FAKEDIR/semgrep" "$FAKEDIR/osv-scanner"
+  printf '%s\n' "a.py" "env.sh" "go.mod" >"$CHANGED"
+  RC_STATIC_TOOLS="trufflehog,semgrep,osv-scanner" \
+    RC_STATIC_DOCKER_TOOLS="trufflehog,semgrep,osv-scanner" \
+    TRUFFLEHOG_MODE=findings SEMGREP_MODE=findings OSV_MODE=findings PATH="$SANDBOX" \
+    run --separate-stderr "$SCRIPT" "$BASE" "$HEAD" "$CHANGED"
+  echo "status=$status"
+  echo "output=<<$output>>"
+  [ "$status" -eq 0 ]
+  # each scanner ran via docker filesystem mode and its /src/ path was stripped
+  echo "$output" | grep -qxF 'TIER_A|trufflehog|critical|env.sh|0|trufflehog:aws|verified AWS secret'
+  echo "$output" | grep -qxF 'TIER_B|semgrep|WARNING|a.py|3|semgrep:rules.demo|demo finding'
+  echo "$output" | grep -qxF 'TIER_A|osv-scanner|HIGH|go.mod||osv-scanner:ghsa-xxxx|GHSA-xxxx RCE in foo'
+  # no leftover container-absolute paths leaked through
+  ! echo "$output" | grep -qF '/src/'
+  # osv used the /osv-scanner entrypoint + a --lockfile built from the diff
+  grep -qF -- '--entrypoint /osv-scanner' "$ARGS"
+  grep -qF -- '--lockfile=go.mod' "$ARGS"
+}
+
+@test "docker gate: absent tool NOT in docker list -> SKIPPED not installed (docker never invoked, default behavior)" {
+  setup_fakes
+  rm -f "$FAKEDIR/gitleaks"
+  printf '%s\n' "a.py" "secret.txt" >"$CHANGED"
+  # RC_STATIC_DOCKER_TOOLS unset — today's behavior exactly.
+  RC_STATIC_TOOLS="gitleaks" PATH="$SANDBOX" \
+    run --separate-stderr "$SCRIPT" "$BASE" "$HEAD" "$CHANGED"
+  echo "status=$status"
+  echo "output=<<$output>>"
+  [ "$status" -eq 0 ]
+  echo "$output" | grep -qF 'SKIPPED: gitleaks — not installed'
+  # docker was never touched at all (not even probed)
+  ! called docker
+}
+
+@test "docker gate: in list but daemon down (docker info fails) -> SKIPPED not installed, never crashes" {
+  setup_fakes
+  rm -f "$FAKEDIR/gitleaks"
+  printf '%s\n' "a.py" "secret.txt" >"$CHANGED"
+  RC_STATIC_TOOLS="gitleaks" RC_STATIC_DOCKER_TOOLS="gitleaks" DOCKER_INFO_EXIT=1 \
+    PATH="$SANDBOX" run --separate-stderr "$SCRIPT" "$BASE" "$HEAD" "$CHANGED"
+  echo "status=$status"
+  echo "output=<<$output>>"
+  [ "$status" -eq 0 ]
+  echo "$output" | grep -qF 'SKIPPED: gitleaks — not installed'
+  # daemon probe failed -> no docker run of gitleaks, no Tier A line
+  ! docker_run_for gitleaks
+  ! echo "$output" | grep -qF 'TIER_A|gitleaks|'
+}
+
+@test "docker gate: native present AND in docker list -> native wins, docker never invoked" {
+  setup_fakes
+  # gitleaks fake present (native) AND opted into docker.
+  printf '%s\n' "a.py" "secret.txt" >"$CHANGED"
+  RC_STATIC_TOOLS="gitleaks" RC_STATIC_DOCKER_TOOLS="gitleaks" GITLEAKS_MODE=findings \
+    PATH="$SANDBOX" run --separate-stderr "$SCRIPT" "$BASE" "$HEAD" "$CHANGED"
+  echo "status=$status"
+  echo "output=<<$output>>"
+  [ "$status" -eq 0 ]
+  # native fake ran; docker was never even probed (native short-circuits first)
+  called gitleaks
+  ! called docker
+  echo "$output" | grep -qF 'TIER_A|gitleaks|critical|secret.txt'
+}
+
+@test "docker gate: semgrep in docker list + config=auto -> SKIPPED metrics reason, docker run never invoked" {
+  setup_fakes
+  rm -f "$FAKEDIR/semgrep"
+  RC_STATIC_TOOLS="semgrep" RC_STATIC_DOCKER_TOOLS="semgrep" RC_SEMGREP_CONFIG=auto \
+    PATH="$SANDBOX" run --separate-stderr "$SCRIPT" "$BASE" "$HEAD" "$CHANGED"
+  echo "status=$status"
+  echo "output=<<$output>>"
+  echo "args=<<$(cat "$ARGS")>>"
+  [ "$status" -eq 0 ]
+  echo "$output" | grep -qF "SKIPPED: semgrep — config 'auto' needs metrics/telemetry"
+  # skipped inside docker_scan before any container run
+  ! docker_run_for semgrep
 }

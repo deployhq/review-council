@@ -289,3 +289,39 @@ is in the *configured* `static_analysis.tools` list (the user expects it) but co
 file, and the orchestrator asks whether to pause for install-then-rerun or proceed without it
 for this run. A tool skipped for any other reason (`not triggered`, `disabled`, `semgrep off`,
 `network-unreachable`, `timeout`) is a quiet, expected skip — nothing to install, no ask.
+
+### Docker run-time fallback (opt-in, `RC_STATIC_DOCKER_TOOLS`)
+
+Instead of pausing to install a missing scanner, the Step-2.5 gate can run it from its
+official Docker image for this run. It is **strictly opt-in and per-run**: set
+`RC_STATIC_DOCKER_TOOLS` (comma list, same shape as `static_analysis.tools`) to the tools you
+want a Docker fallback for. Unset/empty ⇒ no Docker path at all — the daemon is never even
+probed, so behavior is byte-for-byte today's (config-invariant).
+
+For a listed tool, the fallback fires **only** when it is *missing from `PATH`* **and** the
+Docker daemon is up (`command -v docker` + `docker info`). A **natively-installed tool always
+wins** — the image is a substitute for an absent binary, never a preference over a present one.
+A tool neither installed nor reachable via a running daemon still reports the same
+`SKIPPED: <tool> — not installed`.
+
+Only the four **core scanners** have pinned images; the lint tools
+(`ruff`/`shellcheck`/`actionlint`/`hadolint`) are **native-only** (no image, never Dockerized):
+
+| Tool | Image |
+|---|---|
+| gitleaks | `ghcr.io/gitleaks/gitleaks:latest` |
+| trufflehog | `ghcr.io/trufflesecurity/trufflehog:latest` |
+| semgrep | `semgrep/semgrep:latest` |
+| osv-scanner | `ghcr.io/google/osv-scanner:latest` (entrypoint `/osv-scanner`) |
+
+`:latest` is intentional — this is an opt-in convenience gate, so "always current" is preferred
+over a reproducible pin. Each container mounts the repo **read-only at `/src`** and scans in
+**filesystem mode** — no git in the container, so no `--baseline-commit` and none of the
+worktree "`.git` is a file" edge cases; semgrep runs a full scan with the same changed-hunk
+post-filter (lever 3) as native, and the Tier-A scanners keep only changed files. Tools report
+container paths (`/src/…`), which the runner strips back to repo-relative before the changed-
+file filters and the tier output — so a Docker-origin finding is indistinguishable downstream
+from a native one (same tier, same `severity_raw|file|line|rule|message` shape, same badges).
+Semgrep over Docker only accepts a registry ref (`p/…`, `r/…`, `http(s)://`); a repo-owned
+local ruleset path isn't mountable through this light gate and falls back to `p/default` with a
+note.

@@ -105,6 +105,16 @@ fi
 
 SEMGREP_CONFIG="${RC_SEMGREP_CONFIG:-p/default}"
 
+# Docker run-time gate (Phase 4) — opt-in, per-run. RC_STATIC_DOCKER_TOOLS is a
+# comma list of tools to run via their official docker image THIS run when the
+# tool is MISSING from PATH. Unset/empty => no docker (today's behavior exactly,
+# config-invariant: the daemon is never even probed). REPO_ROOT is the repo the
+# script scans — docker mounts it read-only at /src; DOCKER_AVAILABLE is a lazy
+# once-probed cache ("" unknown, "yes"/"no" after the first daemon check).
+STATIC_DOCKER_TOOLS="${RC_STATIC_DOCKER_TOOLS:-}"
+REPO_ROOT="$(pwd -P)"
+DOCKER_AVAILABLE=""
+
 # ---------------------------------------------------------------------------
 # Scratch buffers (TIER_A / TIER_B / SKIPPED accumulate as tools run, so the
 # final output is grouped regardless of the order tools finish in).
@@ -210,6 +220,58 @@ tool_configured() {
 # any_changed: at least one changed file was passed in.
 any_changed() {
   [ -s "$CHANGED_LIST" ]
+}
+
+# ---------------------------------------------------------------------------
+# Docker run-time gate helpers (Phase 4). All are inert when
+# RC_STATIC_DOCKER_TOOLS is empty — tool_docker_enabled short-circuits on the
+# list membership before ever probing the daemon, so an unset env is a true
+# no-op (config-invariance).
+# ---------------------------------------------------------------------------
+
+# docker_image_for <tool>: the pinned image for a docker-supported scanner, or
+# "" for anything else. Only the 4 core scanners are supported; the lint tools
+# (ruff/shellcheck/actionlint/hadolint) return "" and never run via docker.
+# `:latest` is intentional — an opt-in convenience gate, not a reproducible pin.
+docker_image_for() {
+  case "$1" in
+    gitleaks) echo "ghcr.io/gitleaks/gitleaks:latest" ;;
+    trufflehog) echo "ghcr.io/trufflesecurity/trufflehog:latest" ;;
+    semgrep) echo "semgrep/semgrep:latest" ;;
+    osv-scanner) echo "ghcr.io/google/osv-scanner:latest" ;;
+    *) echo "" ;;
+  esac
+}
+
+# docker_available: true iff the docker CLI is on PATH AND its daemon answers.
+# Probed at most once (cached in DOCKER_AVAILABLE) so N docker tools don't each
+# pay the daemon round-trip.
+docker_available() {
+  if [ -z "$DOCKER_AVAILABLE" ]; then
+    if command -v docker >/dev/null 2>&1 && docker info >/dev/null 2>&1; then
+      DOCKER_AVAILABLE=yes
+    else
+      DOCKER_AVAILABLE=no
+    fi
+  fi
+  [ "$DOCKER_AVAILABLE" = yes ]
+}
+
+# tool_docker_listed <tool>: is the tool in the effective RC_STATIC_DOCKER_TOOLS list?
+tool_docker_listed() {
+  case ",$STATIC_DOCKER_TOOLS," in
+    *",$1,"*) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+# tool_docker_enabled <tool>: true iff the tool is opted into docker this run,
+# has a supported image, AND the daemon is up. List membership is checked FIRST
+# so the daemon is never probed unless a docker run is actually possible.
+tool_docker_enabled() {
+  tool_docker_listed "$1" || return 1
+  [ -n "$(docker_image_for "$1")" ] || return 1
+  docker_available
 }
 
 # ---------------------------------------------------------------------------
@@ -470,6 +532,25 @@ filter_changed_hunks() {
       printf '%s|%s|%s|%s|%s|%s|%s\n' \
         "$_fh_tier" "$_fh_tool" "$_fh_sev" "$_fh_file" "$_fh_line" "$_fh_rule" "$_fh_msg"
     fi
+  done <"$1"
+}
+
+# strip_src_prefix <lines-file>: normalize docker tools' container paths back to
+# repo-relative. A docker scan mounts the repo read-only at /src, so the tool's
+# reported FILE field comes back as /src/<path> (semgrep, trufflehog, osv-scanner
+# all do this; gitleaks scanning `.` from -w /src already reports relative, so it
+# passes through untouched). filter_changed / filter_changed_hunks compare the
+# FILE field against the repo-relative changed list, so this MUST run before
+# them. Reads tier|tool|sev|file|line|rule|msg, strips a leading /src/ from the
+# file field only, and prints every line back through.
+strip_src_prefix() {
+  while IFS='|' read -r _sp_tier _sp_tool _sp_sev _sp_file _sp_line _sp_rule _sp_msg || [ -n "${_sp_tier:-}" ]; do
+    [ -n "${_sp_tier:-}" ] || continue
+    case "$_sp_file" in
+      /src/*) _sp_file="${_sp_file#/src/}" ;;
+    esac
+    printf '%s|%s|%s|%s|%s|%s|%s\n' \
+      "$_sp_tier" "$_sp_tool" "$_sp_sev" "$_sp_file" "$_sp_line" "$_sp_rule" "$_sp_msg"
   done <"$1"
 }
 
@@ -763,6 +844,156 @@ run_hadolint() {
 }
 
 # ---------------------------------------------------------------------------
+# docker_scan <tool> — run a MISSING core scanner via its pinned docker image
+# (Phase 4). Runs in FILESYSTEM mode (no git-in-container: sidesteps the
+# worktree ".git-is-a-file" problem and needs no --baseline-commit), mounts the
+# repo read-only at /src, then parses with the SAME per-tool *_FILTER +
+# emit_findings the native runner uses, strips the /src mount prefix, and
+# applies the same changed-file scoping. Each per-tool case mirrors its native
+# runner's skip/timeout/exec-failed handling. Reached only from the dispatch
+# elif (tool absent from PATH + opted into RC_STATIC_DOCKER_TOOLS + daemon up).
+# ---------------------------------------------------------------------------
+docker_scan() {
+  _dk_tool="$1"
+  _dk_img="$(docker_image_for "$_dk_tool")"
+  _dk_raw="$WORKDIR/dk_raw"
+  _dk_stripped="$WORKDIR/dk_stripped"
+  : >"$_dk_raw"
+  : >"$_dk_stripped"
+  case "$_dk_tool" in
+    gitleaks)
+      if ! any_changed; then
+        add_skip gitleaks "not triggered (no matching files)"
+        return
+      fi
+      _dk_report="$WORKDIR/gitleaks.json"
+      : >"$_dk_report"
+      # gitleaks writes its report to a FILE, so $WORKDIR is mounted writable;
+      # `dir .` from -w /src reports repo-relative paths (strip is then a no-op).
+      run_report docker run --rm --entrypoint gitleaks \
+        -v "$REPO_ROOT:/src:ro" -v "$WORKDIR:$WORKDIR" -w /src "$_dk_img" \
+        dir -f json -r "$_dk_report" --no-banner .
+      if hit_timeout; then
+        add_skip gitleaks "timeout"
+        return
+      fi
+      if exec_failed "0 1"; then
+        add_skip gitleaks "execution failed (exit ${LAST_RC:-0})"
+        return
+      fi
+      emit_findings "$_dk_report" "$_dk_raw" --arg tier TIER_A --arg tool gitleaks "$GITLEAKS_FILTER"
+      strip_src_prefix "$_dk_raw" >"$_dk_stripped"
+      filter_changed "$_dk_stripped" >>"$TA"
+      ;;
+    trufflehog)
+      if ! any_changed; then
+        add_skip trufflehog "not triggered (no matching files)"
+        return
+      fi
+      _dk_report="$WORKDIR/trufflehog.json"
+      # Filesystem mode reports .SourceMetadata.Data.Filesystem.file = /src/… .
+      run_stdout "$_dk_report" docker run --rm --entrypoint trufflehog \
+        -v "$REPO_ROOT:/src:ro" -w /src "$_dk_img" \
+        filesystem /src --results=verified --json
+      if hit_timeout; then
+        add_skip trufflehog "timeout"
+        return
+      fi
+      # Same network-degrade split as native run_trufflehog: only clean exit is 0.
+      if exec_failed "0"; then
+        if network_failed; then
+          add_skip trufflehog "network-unreachable"
+        else
+          add_skip trufflehog "execution failed (exit ${LAST_RC:-0})"
+        fi
+        return
+      fi
+      _dk_before="$(wc -l <"$TA" 2>/dev/null || echo 0)"
+      # Filesystem scan covers UNCHANGED files too — keep only changed files.
+      emit_findings "$_dk_report" "$_dk_raw" --arg tier TIER_A --arg tool trufflehog "$TRUFFLEHOG_FILTER"
+      strip_src_prefix "$_dk_raw" >"$_dk_stripped"
+      filter_changed "$_dk_stripped" >>"$TA"
+      _dk_after="$(wc -l <"$TA" 2>/dev/null || echo 0)"
+      if [ "$_dk_before" -eq "$_dk_after" ] && network_failed; then
+        add_skip trufflehog "network-unreachable"
+      fi
+      ;;
+    semgrep)
+      if ! any_changed; then
+        add_skip semgrep "not triggered (no matching files)"
+        return
+      fi
+      # Resolve the config ref exactly like native run_semgrep, with one docker
+      # narrowing: a repo-owned local ruleset FILE can't be mounted through this
+      # light gate, so it (readable or not) falls back to p/default with a note.
+      _dk_cfg="$SEMGREP_CONFIG"
+      case "$_dk_cfg" in
+        auto)
+          add_skip semgrep "config 'auto' needs metrics/telemetry (incompatible with --metrics=off) — set semgrep_config to a pack like p/default or a repo-owned ruleset path"
+          return
+          ;;
+        p/* | r/* | http://* | https://*)
+          : # registry/remote ref — use as-is
+          ;;
+        *)
+          if [ -f "$_dk_cfg" ]; then
+            echo "rc-static-scan: semgrep_config '$_dk_cfg' is a local ruleset; not supported over docker, using p/default" >&2
+          else
+            echo "rc-static-scan: semgrep_config '$_dk_cfg' not a readable file; using p/default" >&2
+          fi
+          _dk_cfg="p/default"
+          ;;
+      esac
+      _dk_report="$WORKDIR/semgrep.json"
+      # STDOUT JSON; -w /tmp gives semgrep a writable cwd (it errors on read-only).
+      # FULL scan (no --baseline-commit) + the changed-hunk post-filter below.
+      run_stdout "$_dk_report" docker run --rm --entrypoint semgrep \
+        -v "$REPO_ROOT:/src:ro" -w /tmp "$_dk_img" \
+        scan --config "$_dk_cfg" --metrics=off --json /src
+      if hit_timeout; then
+        add_skip semgrep "timeout"
+        return
+      fi
+      if exec_failed "0 1"; then
+        add_skip semgrep "execution failed (exit ${LAST_RC:-0})"
+        return
+      fi
+      emit_findings "$_dk_report" "$_dk_raw" --arg tier TIER_B --arg tool semgrep "$SEMGREP_FILTER"
+      strip_src_prefix "$_dk_raw" >"$_dk_stripped"
+      filter_changed_hunks "$_dk_stripped" >>"$TB"
+      ;;
+    osv-scanner)
+      set --
+      while IFS= read -r _dk_f || [ -n "$_dk_f" ]; do
+        [ -n "$_dk_f" ] || continue
+        if is_lockfile "$_dk_f"; then set -- "$@" --lockfile="$_dk_f"; fi
+      done <"$CHANGED_LIST"
+      if [ "$#" -eq 0 ]; then
+        add_skip osv-scanner "not triggered (no matching files)"
+        return
+      fi
+      _dk_report="$WORKDIR/osv.json"
+      # Entrypoint is /osv-scanner (bare `osv-scanner` is not on the image PATH).
+      # source.path comes back as /src/<lockfile>; strip restores the repo-
+      # relative path we passed — no changed-file filter needed (same as native).
+      run_stdout "$_dk_report" docker run --rm --entrypoint /osv-scanner \
+        -v "$REPO_ROOT:/src:ro" -w /src "$_dk_img" \
+        scan source "$@" --format json
+      if hit_timeout; then
+        add_skip osv-scanner "timeout"
+        return
+      fi
+      if exec_failed "0 1"; then
+        add_skip osv-scanner "execution failed (exit ${LAST_RC:-0})"
+        return
+      fi
+      emit_findings "$_dk_report" "$_dk_raw" --arg tier TIER_A --arg tool osv-scanner "$OSV_FILTER"
+      strip_src_prefix "$_dk_raw" >>"$TA"
+      ;;
+  esac
+}
+
+# ---------------------------------------------------------------------------
 # Dispatch — iterate the canonical 8 in a fixed order so every tool is
 # accounted for (configured? => probe => trigger => run). A skip at any gate
 # records a reason; the batch never stops early.
@@ -778,20 +1009,26 @@ for _tool in gitleaks trufflehog osv-scanner semgrep ruff shellcheck actionlint 
     add_skip semgrep "semgrep off"
     continue
   fi
-  if ! command -v "$_tool" >/dev/null 2>&1; then
+  # A natively-installed tool ALWAYS wins — the docker path is only ever a
+  # fallback for a tool that is MISSING from PATH and opted into the per-run
+  # RC_STATIC_DOCKER_TOOLS gate (with the daemon up). A lint tool, or any tool
+  # not opted in / no daemon, stays "not installed" exactly as before.
+  if command -v "$_tool" >/dev/null 2>&1; then
+    case "$_tool" in
+      gitleaks) run_gitleaks ;;
+      trufflehog) run_trufflehog ;;
+      osv-scanner) run_osv ;;
+      semgrep) run_semgrep ;;
+      ruff) run_ruff ;;
+      shellcheck) run_shellcheck ;;
+      actionlint) run_actionlint ;;
+      hadolint) run_hadolint ;;
+    esac
+  elif tool_docker_enabled "$_tool"; then
+    docker_scan "$_tool"
+  else
     add_skip "$_tool" "not installed"
-    continue
   fi
-  case "$_tool" in
-    gitleaks) run_gitleaks ;;
-    trufflehog) run_trufflehog ;;
-    osv-scanner) run_osv ;;
-    semgrep) run_semgrep ;;
-    ruff) run_ruff ;;
-    shellcheck) run_shellcheck ;;
-    actionlint) run_actionlint ;;
-    hadolint) run_hadolint ;;
-  esac
 done
 
 # ---------------------------------------------------------------------------
