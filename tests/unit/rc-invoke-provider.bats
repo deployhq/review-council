@@ -154,6 +154,12 @@ VERDICT_EOF
     echo "    96    notice: 'Your e-mail address has been verified. Please log in to continue.'" >&2
     exit 0
     ;;
+  quota-individual)
+    # agy's REAL quota phrasing (not the generic 429/TerminalQuotaError). Must
+    # classify QUOTA -> fast-fail (no wasted fast-empty retry), not EMPTY.
+    echo "Error: Individual quota reached. Please upgrade your subscription to increase your limits. Resets in 145h11m19s." >&2
+    exit 1
+    ;;
   hang)
     sleep "${AGY_SLEEP:-999}"
     exit 0
@@ -480,6 +486,22 @@ call_count() {
   case "$output" in
   "TOOL: Gemini"*) : ;;
   *) echo "expected TOOL: Gemini" && return 1 ;;
+  esac
+  [ "$(call_count "$AGY_CALLS")" -eq 1 ]
+}
+
+@test "quota-fail-agy-individual: agy 'Individual quota reached' -> QUOTA (one call, no retry), not EMPTY" {
+  # Regression for the deployhq#1043 smoke test: agy's real quota phrasing was
+  # missed by QUOTA_PATTERN, so it classified EMPTY -> a wasted fast-empty retry
+  # (2 calls) + a misleading 'empty output after retry' note. Must be QUOTA:
+  # exactly one agy call, straight to gemini.
+  AGY_MODE=quota-individual GEM_MODE=ok run --separate-stderr "$SCRIPT" "$AGY" "$GEMINI" "$PROMPT_FILE"
+  echo "status=$status"
+  echo "output=<<$output>>"
+  [ "$status" -eq 0 ]
+  case "$output" in
+  "TOOL: Gemini"*) : ;;
+  *) echo "expected TOOL: Gemini (agy quota -> fallback)" && return 1 ;;
   esac
   [ "$(call_count "$AGY_CALLS")" -eq 1 ]
 }

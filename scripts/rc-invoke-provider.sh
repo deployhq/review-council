@@ -269,7 +269,11 @@ build_and_run() {
 # substrings (they false-positived on real reviews discussing login/OAuth code)
 # in favor of specific auth-failure phrasings.
 AUTH_PATTERN='no longer supported|not authenticated|please migrate to the antigravity|secret keyring is locked|ineligibletiererror|dasher_user|not eligible for gemini code assist|invalid api key|not logged in|login required|please log in|oauth error|authentication failed|auth error'
-QUOTA_PATTERN='429|exhausted your daily quota|terminalquotaerror|rate limit'
+# `individual quota reached` / `upgrade your subscription` are agy's real quota
+# phrasing (Antigravity), distinct from the generic 429/TerminalQuotaError —
+# without them a quota-dead agy classifies EMPTY, wastes a fast-empty retry, and
+# reports a misleading "empty output after retry" (seen live on deployhq#1043).
+QUOTA_PATTERN='429|exhausted your daily quota|terminalquotaerror|rate limit|individual quota reached|upgrade your subscription'
 OVERLOAD_PATTERN='503|high demand'
 
 # A Step-4 REFUTATION verdict line: "<id> | UPHELD|REFUTED|INCONCLUSIVE — …".
