@@ -47,7 +47,7 @@ Google's successor to the Gemini CLI (binary `agy`). See the **Google-family rev
   ```
   **`agy` must be probed explicitly and preferred — never default the Google slot to `gemini` without checking `agy` first.** Pass the resolved full path (`$AGY`) to `scripts/rc-invoke-provider.sh` so a `PATH` gap doesn't make a present `agy` look absent — the script's `resolve_bin()` accepts either a `PATH`-findable name or an off-`PATH` executable path. (No MCP transport exists for Antigravity.)
 - **CLI invocation**: dispatch goes through `scripts/rc-invoke-provider.sh "<agy-path>" "<gemini-path-or-empty>" "<prompt-file>"` — one call, one result; the script owns the full retry/fallback state machine (see **Google-family reviewer** below). The frozen argv is:
-  ```
+  ```bash
   agy -p "<prompt>" --print-timeout "<cap>s" --dangerously-skip-permissions [--add-dir <RC_GOOGLE_ADD_DIR>] [--model <RC_GOOGLE_MODEL>]
   ```
   `--dangerously-skip-permissions` is **unconditional** — always appended, not optional — because a non-interactive run has no TTY to answer an approval prompt it can't receive. `--print-timeout` is sized to that invocation's own cap (the primary's full `RC_REVIEWER_TIMEOUT`, or the retry's time-boxed remaining budget) and **must** carry its unit suffix: agy's flag takes a Go duration string, and a bare integer (`--print-timeout 600`) is rejected with `missing unit in duration "600"` — the script always appends `s` (`"${cap}s"`). `--add-dir` / `--model` are appended only when `RC_GOOGLE_ADD_DIR` / `RC_GOOGLE_MODEL` are set. Success is validated the same way as Codex above (heading-anchored `Findings`/`Overall Assessment`, or a refutation verdict line) before any auth/quota/overload pattern is checked.

@@ -223,7 +223,7 @@ table:
 | `config 'auto' needs metrics/telemetry …` | `static_analysis.semgrep_config=auto` (semgrep-only reason): `auto` uploads project metadata and requires metrics, incompatible with the hardcoded `--metrics=off` — use a pack like `p/default` or a repo-owned ruleset path instead. |
 | `network-unreachable` | trufflehog present + triggered, but the live-verification network call couldn't complete — treated as "ran, 0 findings," never an error (see the outbound-network caveat below). |
 | `timeout` | `run_capped` killed the tool past `static_analysis.timeout_seconds`; the rest of the batch still runs. |
-| `execution failed (exit N)` | the tool ran to completion but exited with a code outside its accepted set — a genuine crash/bad-args/runtime error, distinct from a lint/scan tool's normal "found something" nonzero exit (which is in the accepted set and never reaches this reason); `N` is the tool's actual exit code. Can be emitted by any of the eight tools, native or Docker-fallback. |
+| `execution failed (exit N)` | the tool ran to completion but exited with a code outside its accepted set — a genuine crash/bad-args/runtime error, distinct from a lint/scan tool's normal "found something" nonzero exit (which is in the accepted set and never reaches this reason); `N` is the tool's actual exit code. This reason can be emitted by any of the eight tools, native or Docker-fallback. |
 
 ## Noise control
 

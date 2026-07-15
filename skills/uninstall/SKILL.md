@@ -5,7 +5,7 @@ allowed-tools: Bash, Read, Edit
 
 # Review Council — Uninstall
 
-Review Council never registers an MCP server or touches `~/.claude/settings.json` — there's nothing global to remove. Its whole on-disk footprint lives in the **target repo** (the repo being reviewed), under `.review-council/`: `config.yml`, `config.local.yml`, `learnings.md` (only if a learning was ever captured), plus a `.gitignore` line setup added for `config.local.yml`.
+**Scope:** this command clears the plugin's per-repo **configuration footprint** only. Removing the plugin itself (uninstalling `review-council` from Claude Code) is a separate action via your plugin manager / marketplace — this skill does not do it, and there is nothing global to undo: Review Council never registers an MCP server or touches `~/.claude/settings.json`. Its whole on-disk footprint lives in the **target repo** (the repo being reviewed), under `.review-council/`: `config.yml`, `config.local.yml`, `learnings.md` (only if a learning was ever captured), plus a `.gitignore` line setup added for `config.local.yml`.
 
 1. Check the target repo for `.review-council/config.yml`, `.review-council/config.local.yml`, and `.review-council/learnings.md`. Report which of these actually exist — don't assume all three are present.
 2. **`config.local.yml`** — per-machine, gitignored, never committed. If present, offer to delete it; once the user confirms, it's safe to remove outright.
