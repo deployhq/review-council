@@ -240,6 +240,12 @@ build_and_run() {
       # `--skip-git-repo-check` is defensive (lets the review run even outside a
       # git repo). If Codex's CLI surface changes, re-pin from `codex exec
       # --help` and update the codex-profile-argv test in lockstep.
+      #   4. `codex exec` DRAINS stdin even with a positional prompt ("If stdin
+      #      is piped and a prompt is also provided, stdin is appended as a
+      #      <stdin> block"), so it hangs forever on an inherited never-EOF
+      #      stdin. run_capped (rc-lib-timeout.sh) closes the child's stdin
+      #      (</dev/null) for exactly this reason; agy/gemini share the trait.
+      #      See tests/unit/rc-lib-timeout.bats.
       set -- "$_bar_bin" exec --sandbox read-only --skip-git-repo-check "$prompt"
       ;;
     *)
