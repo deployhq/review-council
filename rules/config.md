@@ -83,8 +83,8 @@ Lenses: `security`, `correctness`, `cross_file`, `performance`, `design`, `depen
 - **`providers` is ALWAYS a YAML list** (e.g. `[google]` or `[google, claude]`). It is printed
   comma-joined (`lens.security.providers=google,claude`).
 - **Omitting `providers` = `auto`** (except `dependency`, which defaults to `perplexity`) —
-  the orchestrator picks providers diff-aware (which providers actually run this lens is
-  chosen in a later PR; today the binding is recorded).
+  the orchestrator picks providers diff-aware in Step 3 (Lens Assignment); an explicit
+  `providers` list pins the lens to exactly those providers instead.
 - **Pinning `security.providers` REPLACES the dedicated security subagent.** When you set
   `lenses.security.providers` to an explicit list, that list *becomes* the security review —
   it does **not** add a second security pass on top of the dedicated one. The reader signals
@@ -113,8 +113,11 @@ settings:
 | `settings.reviewer_timeout_seconds` | `600` | `RC_REVIEWER_TIMEOUT` | Per-invocation wall-clock cap (seconds) for CLI/API reviewers. |
 | `settings.run_budget_seconds` | `600` | `RC_RUN_BUDGET` | Total wall-clock budget (seconds) for the whole run. |
 | `settings.auto_retry` | `false` | `RC_AUTO_RETRY` | Retry failed reviewers without prompting (CI-friendly). |
+| `settings.health_probe` | `false` | `RC_HEALTH_PROBE` | Opt-in Step-0 health probe (Codex + Google slots) so `available`/`min_reviewers` reflect *usable*, not merely installed. Default off; a provider is dropped only on positive hard-fail evidence (auth/quota/overload), fail-open otherwise. |
+| `settings.health_probe_timeout_seconds` | `20` | `RC_HEALTH_PROBE_TIMEOUT` | Short wall-clock cap (seconds) for each health probe. |
+| `settings.claude_max_turns` | `100` | `RC_CLAUDE_MAX_TURNS` | Turn budget (`maxTurns`) for the native Claude and Security reviewer subagents. Default 100 (lenient); lower it to cap local review cost. |
 
-Booleans must be `true`/`false`; the four numeric knobs must be positive integers.
+Booleans must be `true`/`false`; numeric knobs must be positive integers.
 
 ## `static_analysis:` block
 
@@ -135,7 +138,7 @@ static_analysis:
 | `static_analysis.enabled` | `true` | `RC_STATIC_ANALYSIS` | Turn the whole static-analysis layer on/off. |
 | `static_analysis.tools` | `gitleaks,trufflehog,osv-scanner,semgrep,ruff,shellcheck,actionlint,hadolint` | `RC_STATIC_TOOLS` | Which tools run (comma-separated when set via env). |
 | `static_analysis.timeout_seconds` | `60` | `RC_STATIC_TIMEOUT` | Per-tool wall-clock cap (seconds). |
-| `static_analysis.semgrep_config` | `auto` | `RC_SEMGREP_CONFIG` | `auto` (registry rules), `off` (skip semgrep), or a repo-owned ruleset path. |
+| `static_analysis.semgrep_config` | `p/default` | `RC_SEMGREP_CONFIG` | A registry pack ref (`p/default`, `p/ruby`, …), `off` (skip semgrep), or a repo-owned ruleset path. `auto` is unsupported (it uploads project metadata and requires metrics, which we disable) and is skipped with guidance. |
 
 - **`tools` is a list**, like `lenses.<lens>.providers` — but unlike lenses, it **does**
   have an env override: `RC_STATIC_TOOLS` (comma-separated) fully replaces the
@@ -148,6 +151,10 @@ static_analysis:
   `trufflehog` from `tools` to opt out if that outbound call is undesirable in your
   environment (see `rules/static-analysis.md`).
 - `semgrep_config: off` skips semgrep unconditionally, regardless of `tools`.
+- `semgrep_config` defaults to the **`p/default`** registry pack. `auto` is **not** usable
+  here — it uploads project metadata and requires semgrep metrics, which Review Council
+  disables (`--metrics=off`); setting it to `auto` skips semgrep with a note pointing at
+  `p/default`. Use a `p/…`/`r/…` registry ref or a committed, repo-owned ruleset path.
 
 ## Learnings
 
@@ -328,20 +335,23 @@ uncomment only what you want to change.
 #     # providers: [perplexity]         # default when omitted -> [perplexity]
 
 # settings:                      # run knobs (each also settable via its RC_* env var, which wins)
-#   personas:                 true     # RC_PERSONAS
-#   verify:                   true     # RC_VERIFY
-#   verify_max_findings:      12       # RC_VERIFY_CAP
-#   learn:                    true     # RC_LEARN
-#   min_reviewers:            2        # RC_MIN_REVIEWERS
-#   reviewer_timeout_seconds: 600      # RC_REVIEWER_TIMEOUT
-#   run_budget_seconds:       600      # RC_RUN_BUDGET
-#   auto_retry:               false    # RC_AUTO_RETRY
+#   personas:                     true     # RC_PERSONAS
+#   verify:                       true     # RC_VERIFY
+#   verify_max_findings:          12       # RC_VERIFY_CAP
+#   learn:                        true     # RC_LEARN
+#   min_reviewers:                2        # RC_MIN_REVIEWERS
+#   reviewer_timeout_seconds:     600      # RC_REVIEWER_TIMEOUT
+#   run_budget_seconds:           600      # RC_RUN_BUDGET
+#   auto_retry:                   false    # RC_AUTO_RETRY
+#   health_probe:                 false    # RC_HEALTH_PROBE
+#   health_probe_timeout_seconds: 20       # RC_HEALTH_PROBE_TIMEOUT
+#   claude_max_turns:             100      # RC_CLAUDE_MAX_TURNS
 
 # static_analysis:               # deterministic tool layer (each also settable via its RC_* env var, which wins)
 #   enabled: true                    # RC_STATIC_ANALYSIS
 #   tools: [gitleaks, trufflehog, osv-scanner, semgrep, ruff, shellcheck, actionlint, hadolint]   # RC_STATIC_TOOLS (comma-separated)
 #   timeout_seconds: 60              # RC_STATIC_TIMEOUT
-#   semgrep_config: auto             # RC_SEMGREP_CONFIG — auto | off | a repo-owned ruleset path
+#   semgrep_config: p/default        # RC_SEMGREP_CONFIG — a registry pack (p/…) | off | a repo-owned ruleset path (auto is skipped: needs metrics)
 ```
 
 See `skills/run/SKILL.md` Step 0 for how the orchestrator reads and applies this, and

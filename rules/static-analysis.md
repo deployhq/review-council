@@ -39,8 +39,8 @@ this runs — Step 2.5 is a no-op.
 
 | Tool | Tier | Install (macOS/brew) | Probe | Diff-scoped invocation | Output format | Domain trigger (run only if diff touches…) |
 |---|---|---|---|---|---|---|
-| **gitleaks** | A — secrets | `brew install gitleaks` | `command -v gitleaks` | `gitleaks git --log-opts="<base>..<head>" -f json -r <out>.json .` (a) | `-f json` (also `sarif` / `csv` / `junit`) | always — secrets can appear in any changed file, incl. non-code |
-| **trufflehog** | A — secrets, live-verified | `brew install trufflehog` (or the official install script) | `command -v trufflehog` | `trufflehog git file://. --since-commit <base> --branch <head> --results=verified --json` (b) | `--json` (verbose per-finding JSON) | always — see the **outbound-network caveat** below before enabling anywhere network-restricted |
+| **gitleaks** | A — secrets | `brew install gitleaks` | `command -v gitleaks` | commit-range: `gitleaks git --log-opts="<base>..<head>" -f json -r <out>.json .`; working-tree: `gitleaks dir -f json -r <out>.json .` (a) | `-f json` (also `sarif` / `csv` / `junit`) | always — secrets can appear in any changed file, incl. non-code |
+| **trufflehog** | A — secrets, live-verified | `brew install trufflehog` (or the official install script) | `command -v trufflehog` | commit-range: `trufflehog git file://. --since-commit <base> --branch <head> --results=verified --json`; working-tree: `trufflehog filesystem . --results=verified --json` (b) | `--json` (verbose per-finding JSON) | always — see the **outbound-network caveat** below before enabling anywhere network-restricted |
 | **osv-scanner** | A — known CVEs | `brew install osv-scanner` | `command -v osv-scanner` | `osv-scanner scan source --lockfile=<changed-lockfile-path> --format json` (repeat `--lockfile=` per changed lockfile) (c) | `--format json` (also `sarif` / `markdown`) | a dependency manifest/lockfile is present in the diff (`package-lock.json`, `yarn.lock`, `Gemfile.lock`, `go.sum`, `requirements.txt`, `Cargo.lock`, etc.) |
 | **semgrep** | B — SAST | `brew install semgrep` (or `pipx install semgrep`) | `command -v semgrep` | `semgrep scan --config <config> --baseline-commit <base> --json --output <out>.json --metrics=off .` (d) | `--json` (primary; `--sarif` also available) | always (broadest rule coverage; fast enough at diff scale) |
 | **ruff** | B — Python lint | `brew install ruff` (or `pipx install ruff` / `uvx ruff`) | `command -v ruff` | `ruff check --output-format json --exit-zero <changed *.py files>` (no native diff flag — scope by file list) | `--output-format json` (also `sarif`, `github`, `gitlab`, others) | `*.py` files changed |
@@ -48,15 +48,46 @@ this runs — Step 2.5 is a no-op.
 | **actionlint** | B — CI workflow lint | `brew install actionlint` | `command -v actionlint` | `actionlint -format '{{json .}}' <changed .github/workflows/*.yml>` (e) | JSON via Go-template (`-format '{{json .}}'`) | `.github/workflows/*.yml` / `*.yaml` changed |
 | **hadolint** | B — Dockerfile lint | `brew install hadolint` | `command -v hadolint` | `hadolint --format json <changed Dockerfile*>` (scope by file list) | `--format json` (also `sarif`, `checkstyle`, `codeclimate`, `gnu`) | `Dockerfile*` changed |
 
-**(a) gitleaks CLI shape.** As of **v8.19.0** the top-level subcommands are `git` / `dir` /
-`stdin` (`detect`/`protect` are deprecated — still work, but hidden from `--help`; older
-tutorials referencing them are now stale). Use `git` for a repo, `dir` for a plain directory
-scan. Config: `-c .gitleaks.toml` (repo-owned only) and `-i .gitleaksignore` — never a
-PR-supplied path (see Security, below).
+**Two invocation modes: commit-range vs. working-tree.** Every "Diff-scoped invocation" cell
+above shows the **commit-range** form, scoped to `<base>..<head>` via git. Review Council also
+runs a **local, staged/unstaged working-tree review** — the orchestrator passes a head that
+isn't a distinct, resolvable git ref (empty, `.`, or a worktree path, typically with
+`base=HEAD`), including whenever `base == head`. A git-range scan in that mode would cover an
+empty/invalid range and silently report zero findings, so the two Tier-A scanners that shell
+out to a `git <range>` form under the hood — gitleaks and trufflehog — switch to a
+**working-tree** invocation instead: a direct scan of the working tree's files. Because that
+also covers files the diff never touched, results are then post-filtered down to just the
+changed-file list before entering Tier A (a secret already sitting in an untouched file must
+not be reported as introduced by this change). See (a) and (b) below for the exact commands.
+`osv-scanner` (footnote (c)) is unaffected by this split — it always takes the changed lockfile
+paths directly, never a git range. `semgrep`'s equivalent local-review fallback (footnote (d))
+is a separate mechanism — a full scan plus the changed-hunk post-filter, triggered by
+`--baseline-commit`'s own unstaged-changes restriction — that already covers this case.
 
-**(b) trufflehog live verification.** `--results=verified` makes real outbound network calls
-to confirm a found credential is currently live. Read the **prominent caveat** near the end of
-this file before relying on this in any network-restricted or air-gapped environment.
+**(a) gitleaks — two invocation modes.** As of **v8.19.0** the top-level subcommands are `git` /
+`dir` / `stdin` (`detect`/`protect` are deprecated — still work, but hidden from `--help`; older
+tutorials referencing them are now stale).
+- **Commit-range** (a real base/head pair, e.g. reviewing a PR): `gitleaks git
+  --log-opts="<base>..<head>" -f json -r <out>.json .` (modern) / `gitleaks detect --source .
+  --log-opts="<base>..<head>" -f json -r <out>.json` (legacy).
+- **Working-tree** (no distinct head, or `base == head` — local staged/unstaged review):
+  `gitleaks dir -f json -r <out>.json .` (modern) / `gitleaks detect --no-git --source . -f json
+  -r <out>.json` (legacy) — `dir` / `--no-git --source` scans the working tree directly instead
+  of git history.
+
+Config: `-c .gitleaks.toml` (repo-owned only) and `-i .gitleaksignore` — never a PR-supplied
+path (see Security, below); both modes take the same config flags.
+
+**(b) trufflehog — two invocation modes, live verification.** Mirrors gitleaks' mode split:
+- **Commit-range:** `trufflehog git file://. --since-commit <base> --branch <head>
+  --results=verified --json`.
+- **Working-tree** (no distinct head, or `base == head` — local staged/unstaged review):
+  `trufflehog filesystem . --results=verified --json`, results likewise post-filtered down to
+  the changed-file list.
+
+`--results=verified` makes real outbound network calls to confirm a found credential is
+currently live, in either mode. Read the **prominent caveat** near the end of this file before
+relying on this in any network-restricted or air-gapped environment.
 
 **(c) osv-scanner is not line-diff-scoped.** It evaluates the full resolved dependency graph
 in the lockfile present in the diff and reports every CVE hit for that manifest — there is no
@@ -71,10 +102,13 @@ to Codex/Google in `rules/providers.md`).
 has unstaged changes or isn't a git dir — which collides with Review Council's own
 "review my unstaged working changes" mode. When `--baseline-commit` can't be used, drop it,
 run a **full scan**, and apply the **changed-hunk post-filter** instead (Noise Control, lever
-3, below). `<config>` comes from `static_analysis.semgrep_config`: `auto` (default) uses
-semgrep's own registry auto-config; `off` skips semgrep unconditionally regardless of the
-domain trigger; any other value is a **repo-owned local ruleset path**, passed verbatim as
-`--config <path>` — never a PR-supplied path (see Security, below).
+3, below). `<config>` comes from `static_analysis.semgrep_config` (default **`p/default`**): a
+registry pack ref (`p/…`, `r/…`, or an `http(s)://` URL) is passed through as `--config <ref>`;
+`off` skips semgrep unconditionally regardless of the domain trigger; any other value is a
+**repo-owned local ruleset path**, passed verbatim as `--config <path>` — never a PR-supplied
+path (see Security, below). **`auto` is not usable here:** it uploads project metadata and
+requires semgrep metrics, which we run with `--metrics=off`, so `auto` is skipped with a note
+pointing at `p/default`.
 
 **(e) actionlint has no turnkey SARIF output** — only a hand-written Go-template mapping,
 which its own maintainers call nontrivial. Its JSON template output (`-format '{{json .}}'`)
@@ -173,18 +207,23 @@ compact form that gets expanded into the full table above once it reaches Step 2
 judge. `severity_raw` is the tool's own vocabulary (Tier A/B tables above), not yet mapped to
 Critical/Important/Suggestion.
 
-Skipped tools get one `SKIPPED: <tool> — <reason>` line each, with a fixed reason vocabulary
-(the Step 2.5 orchestrator, `skills/run/SKILL.md`, keys its "missing configured tool" ask flow
-off this exact set — do not invent new reason strings):
+Skipped tools get one `SKIPPED: <tool> — <reason>` line each. The table below includes every
+reason `rc-static-scan.sh`'s `add_skip` call sites emit as of this writing — treat it as a
+snapshot of the current script, not a promise the set can never grow. The Step 2.5 orchestrator
+(`skills/run/SKILL.md`) keys its "missing configured tool" ask flow off `not installed`
+specifically — do not invent new reason strings without updating both the script and this
+table:
 
 | Reason | Meaning |
 |---|---|
-| `not installed` | `command -v` probe found nothing. The one reason the orchestrator surfaces to the user (with this file's install command) and asks whether to pause-and-install or proceed without it. |
-| `not triggered` | tool present, but no changed file matched its domain-trigger column — nothing to install, quiet skip. |
+| `not installed` | `command -v` probe found nothing (and, if the tool was opted into `RC_STATIC_DOCKER_TOOLS`, the Docker fallback wasn't available either — see Docker run-time fallback, below). The one reason the orchestrator surfaces to the user (with this file's install command) and asks whether to pause-and-install or proceed without it. |
+| `not triggered (no matching files)` | tool present, but no changed file matched its domain-trigger column — nothing to install, quiet skip. |
 | `disabled` | tool present and triggered, but not in the configured `static_analysis.tools` list. |
 | `semgrep off` | `static_analysis.semgrep_config=off` (semgrep-only reason). |
+| `config 'auto' needs metrics/telemetry …` | `static_analysis.semgrep_config=auto` (semgrep-only reason): `auto` uploads project metadata and requires metrics, incompatible with the hardcoded `--metrics=off` — use a pack like `p/default` or a repo-owned ruleset path instead. |
 | `network-unreachable` | trufflehog present + triggered, but the live-verification network call couldn't complete — treated as "ran, 0 findings," never an error (see the outbound-network caveat below). |
 | `timeout` | `run_capped` killed the tool past `static_analysis.timeout_seconds`; the rest of the batch still runs. |
+| `execution failed (exit N)` | the tool ran to completion but exited with a code outside its accepted set — a genuine crash/bad-args/runtime error, distinct from a lint/scan tool's normal "found something" nonzero exit (which is in the accepted set and never reaches this reason); `N` is the tool's actual exit code. This reason can be emitted by any of the eight tools, native or Docker-fallback. |
 
 ## Noise control
 
@@ -217,9 +256,9 @@ Every tool invocation may use **only** a config file already committed to the ta
 precedent this whole evolution explicitly refuses to repeat — CodeRabbit's "run whatever
 config the PR author supplies" design is exactly the failure mode this rule prevents.
 
-- **Allowed:** a committed, repo-owned config/ruleset file. `semgrep --config auto`'s network
-  fetch of *rules* from semgrep's registry is fine — rules are data, not arbitrary executable
-  code.
+- **Allowed:** a committed, repo-owned config/ruleset file. semgrep's network fetch of *rules*
+  from its registry (e.g. `--config p/default`) is fine — rules are data, not arbitrary
+  executable code.
 - **Forbidden, full stop:** fetching or executing a PR-supplied tool config, ruleset, or
   plugin — a `.semgrep.yml`/`.gitleaks.toml`/ruleset/ast-grep-style scriptable rule pack
   sourced from the diff itself. Never resolve a tool config path from anything the diff under
@@ -284,5 +323,42 @@ At **review-run time** (Step 2.5, `skills/run/SKILL.md`), the story is different
 is in the *configured* `static_analysis.tools` list (the user expects it) but comes back
 `SKIPPED: <tool> — not installed` is surfaced to the user with its install command from this
 file, and the orchestrator asks whether to pause for install-then-rerun or proceed without it
-for this run. A tool skipped for any other reason (`not triggered`, `disabled`, `semgrep off`,
-`network-unreachable`, `timeout`) is a quiet, expected skip — nothing to install, no ask.
+for this run. A tool skipped for any other reason (`not triggered (no matching files)`,
+`disabled`, `semgrep off`, `config 'auto' needs metrics/telemetry …`, `network-unreachable`,
+`timeout`, `execution failed (exit N)`) is a quiet, expected skip — nothing to install, no ask.
+
+### Docker run-time fallback (opt-in, `RC_STATIC_DOCKER_TOOLS`)
+
+Instead of pausing to install a missing scanner, the Step-2.5 gate can run it from its
+official Docker image for this run. It is **strictly opt-in and per-run**: set
+`RC_STATIC_DOCKER_TOOLS` (comma list, same shape as `static_analysis.tools`) to the tools you
+want a Docker fallback for. Unset/empty ⇒ no Docker path at all — the daemon is never even
+probed, so behavior is byte-for-byte today's (config-invariant).
+
+For a listed tool, the fallback fires **only** when it is *missing from `PATH`* **and** the
+Docker daemon is up (`command -v docker` + `docker info`). A **natively-installed tool always
+wins** — the image is a substitute for an absent binary, never a preference over a present one.
+A tool neither installed nor reachable via a running daemon still reports the same
+`SKIPPED: <tool> — not installed`.
+
+Only the four **core scanners** have pinned images; the lint tools
+(`ruff`/`shellcheck`/`actionlint`/`hadolint`) are **native-only** (no image, never Dockerized):
+
+| Tool | Image |
+|---|---|
+| gitleaks | `ghcr.io/gitleaks/gitleaks:latest` |
+| trufflehog | `ghcr.io/trufflesecurity/trufflehog:latest` |
+| semgrep | `semgrep/semgrep:latest` |
+| osv-scanner | `ghcr.io/google/osv-scanner:latest` (entrypoint `/osv-scanner`) |
+
+`:latest` is intentional — this is an opt-in convenience gate, so "always current" is preferred
+over a reproducible pin. Each container mounts the repo **read-only at `/src`** and scans in
+**filesystem mode** — no git in the container, so no `--baseline-commit` and none of the
+worktree "`.git` is a file" edge cases; semgrep runs a full scan with the same changed-hunk
+post-filter (lever 3) as native, and the Tier-A scanners keep only changed files. Tools report
+container paths (`/src/…`), which the runner strips back to repo-relative before the changed-
+file filters and the tier output — so a Docker-origin finding is indistinguishable downstream
+from a native one (same tier, same `severity_raw|file|line|rule|message` shape, same badges).
+Semgrep over Docker only accepts a registry ref (`p/…`, `r/…`, `http(s)://`); a repo-owned
+local ruleset path isn't mountable through this light gate and falls back to `p/default` with a
+note.

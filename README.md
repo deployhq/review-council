@@ -13,7 +13,7 @@ Single-model code review has blind spots. Different models catch different thing
 - **Genuine disagreements** (a reviewer's counter-evidence refutes another's finding, or an unresolved conflict survives the judge) = documented as a dropped/refuted finding or a Dissenting Opinion, not just discarded
 - **Learns from your triage** — a human-confirmed capture gate after each report distills your skip decisions into persisted false-positive suppressions & conventions in a committed `learnings.md`, recalled automatically on future runs
 
-The result: fewer false positives, broader coverage, and a clear priority order. Review Council is orchestrated locally, inside a single Claude Code session, and only ever prints a report — it never pushes commits, opens PRs, or posts PR comments on its own (see [GitHub Actions (Roadmap)](#github-actions-roadmap) for a possible future CI mode). Note the data egress this implies: when Codex, Google, or Perplexity are enabled, the gathered review context (diff, file contents, etc.) is sent to those third-party tools/APIs — only Claude (the native subagent) stays fully local.
+The result: fewer false positives, broader coverage, and a clear priority order. Review Council is orchestrated locally, inside a single Claude Code session, and only ever prints a report — it never pushes commits, opens PRs, or posts PR comments on its own (see [GitHub Actions (Roadmap)](#github-actions-roadmap) for a possible future CI mode). Note the data egress this implies: when Codex, Google, or Perplexity are enabled, the gathered review context (diff, file contents, etc.) is sent to those third-party tools/APIs — only Claude (the native subagent) stays fully local. Codex's own shell access during review is sandboxed read-only (`codex exec --sandbox read-only`) — it can read the repo but cannot write to it or reach the network.
 
 ## Quick Start
 
@@ -181,6 +181,7 @@ Providers are auto-detected at runtime. Run `/review-council:setup` to check whi
 
 - **[yq](https://github.com/mikefarah/yq) (mikefarah v4)** — enables the optional config file (`.review-council/config.yml`). Run `/review-council:setup` and, with your consent, it will install `yq` for you; or install it yourself with `brew install yq` (macOS) or see the [yq install guide](https://github.com/mikefarah/yq#install). **Without `yq`, config files are ignored and the plugin runs on built-in defaults + `RC_*` env overrides** — still fully functional. (Heads-up: a *different* Python tool is also named `yq`; Review Council needs **mikefarah/yq**, whose `yq --version` prints a `github.com/mikefarah/yq` URL.)
 - **[bats](https://github.com/bats-core/bats-core) + yq** — only for running the unit-test suite (`bats tests/unit/`); not needed to use the plugin.
+- **[Docker](https://www.docker.com/)** — optional, opt-in fallback for the static-analysis scan (Step 2.5): if a configured core scanner (`gitleaks`, `trufflehog`, `semgrep`, `osv-scanner`) isn't installed and Docker is running, the scan can run it from its official image instead — no local install needed. Set `RC_STATIC_DOCKER_TOOLS` (or confirm at the run-time prompt) to opt in; see [Static Analysis](#static-analysis-phase-2-step-25) → "Run a missing tool via Docker".
 
 ### Configuration
 
@@ -198,7 +199,9 @@ Each run setting (`settings.*`) is also tunable via its `RC_*` environment varia
 | `RC_REVIEWER_TIMEOUT` | `600` | **Hard** per-invocation wall-clock cap (**seconds**, 10 min) for CLI/API reviewers; sized to cover `agy`'s multi-minute cold start (`agy`'s own `--print-timeout` is raised to match, as a unit-suffixed duration like `600s`/`10m`). Raise for very large diffs or slow networks. |
 | `RC_RUN_BUDGET` | `600` | **Soft** total wall-clock budget (**seconds**) for the whole run — see "The two-cap model" below |
 | `RC_AUTO_RETRY` | `false` | If `true`, retry failed reviewers without asking (CI-friendly) |
-| `RC_CLAUDE_MAX_TURNS` | `30` | Max turns for the Claude/Security reviewer subagents (not part of the config schema — read directly) |
+| `RC_HEALTH_PROBE` | `false` | Opt-in Step-0 health probe (Codex + Google slots) so `available`/`min_reviewers` reflect *usable*, not merely installed. Default off; a provider is dropped only on positive hard-fail evidence (auth/quota/overload), fail-open otherwise. |
+| `RC_HEALTH_PROBE_TIMEOUT` | `20` | Short wall-clock cap (seconds) for each health probe |
+| `RC_CLAUDE_MAX_TURNS` | `100` | Turn budget (`maxTurns`) for the native Claude and Security reviewer subagents. Default 100 (lenient); lower it to cap local review cost. |
 | `PERPLEXITY_API_KEY` | — | Enables Perplexity reviewer via Sonar API |
 
 **The two-cap model.** Review Council bounds time with two independent caps, not one:
@@ -229,8 +232,9 @@ The judge (Step 5) turns those verdicts into the badges shown in the final repor
 | `[cross-reviewed]` | Raised by ≥2 reviewer families, or UPHELD by a different-family verifier |
 | `[1 reviewer · unverified]` | A single reviewer raised it and it wasn't (yet) cross-verified — critical findings are **never** demoted out of Critical for this |
 | `[unverified]` | Not verified this run — over the `verify_max_findings` cap, or the run budget was spent before verification (solo-Claude findings get `[1 reviewer · unverified]` instead) |
+| `[tool-only:<rule>]` | A Tier B static-analysis signal no reviewer corroborated on the same fingerprint — stays a low-severity Suggestion, never Critical/Important on tool say-so alone — see [Static Analysis](#static-analysis-phase-2-step-25) |
 
-Badge precedence when more than one could apply: `[verified]` > `[cross-reviewed]` > `[1 reviewer · unverified]` > `[unverified]` — the strongest badge is shown; others are noted in prose where relevant.
+Badge precedence when more than one could apply: `[verified]` > `[cross-reviewed]` > `[1 reviewer · unverified]` > `[unverified]` > `[tool-only:<rule>]` — the strongest badge is shown; others are noted in prose where relevant.
 
 ### Static Analysis (Phase 2, Step 2.5)
 
@@ -261,9 +265,11 @@ Static analysis is never a voting reviewer: no lens, doesn't count toward `min_r
 | `static_analysis.enabled` | `true` | `RC_STATIC_ANALYSIS` | Turn the whole Step 2.5 scan on/off |
 | `static_analysis.tools` | all 8 (`gitleaks, trufflehog, osv-scanner, semgrep, ruff, shellcheck, actionlint, hadolint`) | `RC_STATIC_TOOLS` | Which tools to run (comma-separated); unknown names are dropped with a note |
 | `static_analysis.timeout_seconds` | `60` | `RC_STATIC_TIMEOUT` | Per-tool hard timeout (same watchdog machinery as the reviewer timeout) |
-| `static_analysis.semgrep_config` | `auto` | `RC_SEMGREP_CONFIG` | `auto`, `off`, or a repo-owned ruleset path |
+| `static_analysis.semgrep_config` | `p/default` | `RC_SEMGREP_CONFIG` | A registry pack (`p/default`, `p/ruby`, …), `off`, or a repo-owned ruleset path (`auto` is skipped — it needs metrics we disable) |
 
 **Setup.** `/review-council:setup` probes all eight tools (grouped Tier A / Tier B) and, for anything missing, prints its install command — **print-only**: unlike the `yq` flow, `setup` never installs a static-analysis tool itself, even with consent. Install whichever you want; Review Council picks them up automatically on the next run (`command -v` probe, no restart needed).
+
+**Run a missing tool via Docker (no install).** When a configured tool is missing and Docker is running, the Step-2.5 gate offers to run it from its official image for that run — the four core scanners (`gitleaks`, `trufflehog`, `semgrep`, `osv-scanner`) only. It's opt-in per-run via `RC_STATIC_DOCKER_TOOLS` (nothing changes unless you set it or confirm at the prompt), a natively-installed tool always takes precedence, and the finding is indistinguishable from a native one. First use pulls the image (one-time, a few hundred MB); images are `:latest`; `trufflehog`'s verified-mode egress is unchanged.
 
 **`trufflehog` outbound-network caveat.** `trufflehog`'s `--results=verified` mode makes **live outbound network calls**, authenticating with each found credential against its actual provider (e.g. confirming an AWS key is real by calling AWS with it). That's what makes its hits verified/high-precision, but it means a "local, report-only" tool reaches out to third-party services, and the verification call itself could trip the *credential owner's* own anomaly detection. `trufflehog` is **default-on**; the one-line opt-out is dropping it from `static_analysis.tools` (or `RC_STATIC_TOOLS`). If the network is unreachable, the scan degrades gracefully (treated as "ran, 0 findings") rather than erroring the run.
 
@@ -285,37 +291,50 @@ Static analysis is never a voting reviewer: no lens, doesn't count toward `min_r
 **Type:** PR
 **Reviewers:** Claude, Security, Codex, Antigravity (4 of 5 — Perplexity: PERPLEXITY_API_KEY not set)
 **Lens map:** Security: Security (dedicated) · Claude: Correctness + Data-integrity & migration · Codex: Correctness + Cross-file / API-contract · Antigravity: Correctness + Performance & reliability
-**Pipeline:** Round 1 → well-formed check → refutation → judge → report
+**Pipeline:** static scan → Round 1 → well-formed check → refutation → judge → report
+Static analysis: gitleaks (ok, 0), trufflehog (ok, 1 verified secret), osv-scanner (ok, 0), semgrep (ok, 3 signals), ruff (skipped: no *.py in diff), shellcheck (skipped: not installed — proceeding), actionlint (skipped: no workflow changes), hadolint (skipped: no Dockerfile changes)
 
 Judge ledger:
-fingerprint                                  | origin-families    | verdict      | suppression? | tool? | final-severity | final-confidence
-rate-limit.ts::ratelimiter::in-memory-store  | codex,claude        | UPHELD       | no           | —     | critical       | high
-rate-limit.ts::ratelimiter::ip-only-key      | claude              | INCONCLUSIVE | no           | —     | important      | high
-api.ts::handler::missing-rate-limit-headers  | codex,antigravity   | UPHELD       | no           | —     | important      | medium
+fingerprint                                       | origin-families    | verdict      | suppression? | tool?      | final-severity | final-confidence
+config/redis.yml::_::hardcoded-aws-key            | —                   | TOOL-VERIFIED| no           | trufflehog | critical       | high
+rate-limit.ts::ratelimiter::in-memory-store       | codex,claude        | UPHELD       | no           | —          | critical       | high
+rate-limit.ts::ratelimiter::ip-only-key           | claude              | INCONCLUSIVE | no           | —          | important      | high
+api.ts::handler::missing-rate-limit-headers       | codex,antigravity   | UPHELD       | no           | —          | important      | medium
+rate-limit.ts::ratelimiter::empty-catch-swallows  | —                   | TOOL-ONLY    | no           | semgrep    | suggestion     | medium
 Suppressions applied: 0
 
 ### Critical Issues
 
-1. **[critical] [high]** `[cross-reviewed]` — `src/middleware/rate-limit.ts:28`
+1. **[critical] [high]** `[verified]` — `config/redis.yml:12`
+   - Issue: Hardcoded AWS access key, confirmed live by trufflehog's verified scan
+   - Why: A committed, working credential grants an attacker direct account access
+   - Fix: Revoke the key immediately, rotate credentials, and load secrets from the environment or a secret manager instead
+
+2. **[critical] [high]** `[cross-reviewed]` — `src/middleware/rate-limit.ts:28`
    - Issue: Rate limit counter uses in-memory store — resets on every deploy
    - Why: Users get full quota back on each deployment, defeating the purpose
    - Fix: Use Redis or PostgreSQL for counter storage
 
 ### Important Findings
 
-2. **[important] [high]** `[1 reviewer · unverified]` — `src/middleware/rate-limit.ts:15`
+3. **[important] [high]** `[1 reviewer · unverified]` — `src/middleware/rate-limit.ts:15`
    - Issue: Rate limit key uses IP only — shared IPs (corporate NAT) throttle all users
    - Why: Enterprise customers behind NAT will hit limits quickly
    - Fix: Use authenticated user ID as primary key, fall back to IP for anonymous
 
-3. **[important] [medium]** `[cross-reviewed]` — `src/routes/api.ts:44`
+4. **[important] [medium]** `[cross-reviewed]` — `src/routes/api.ts:44`
    - Issue: Rate limit headers (X-RateLimit-Remaining) not included in responses
    - Why: Clients can't implement backoff without knowing their remaining quota
    - Fix: Add standard rate limit headers per RFC 6585
 
 ### Suggestions
 
-4. **[suggestion] [medium]** `[unverified]` — `docs/api.md`
+5. **[suggestion] [medium]** `[tool-only:semgrep:javascript.lang.best-practice.no-empty-catch]` — `src/middleware/rate-limit.ts:52`
+   - Issue: Empty catch block silently swallows errors from the counter increment
+   - Why: Failures in the rate-limit check disappear without a trace, masking real bugs
+   - Fix: Log the caught error (or handle it explicitly) instead of an empty catch
+
+6. **[suggestion] [medium]** `[unverified]` — `docs/api.md`
    - Issue: No documentation of rate limit behavior for API consumers
    - Fix: Add rate limits section to API docs
 
@@ -349,11 +368,12 @@ review-council/
 │   ├── config.md            # Config schema (reviewers, lenses, settings, static_analysis)
 │   └── static-analysis.md   # Static-analysis tool registry, tiers, noise-control (Phase 2)
 ├── scripts/
-│   ├── rc-invoke-provider.sh # Google-slot invocation state machine
-│   ├── rc-config.sh          # Config reader (files + env + defaults)
+│   ├── rc-invoke-provider.sh  # Shared provider-dispatch state machine (Codex + Google)
+│   ├── rc-config.sh           # Config reader (files + env + defaults)
 │   ├── rc-static-scan.sh      # Static-analysis runner (Phase 2)
 │   ├── rc-learn.sh            # learnings.md writer — Step 7 capture (Phase 3)
-│   └── rc-lib-timeout.sh      # Shared timeout/watchdog helper
+│   ├── rc-lib-timeout.sh      # Shared timeout/watchdog helper
+│   └── sync-metadata.sh       # Propagates plugin.json's description to README/CLAUDE.md/marketplace.json
 ├── tests/
 │   ├── unit/                # bats unit tests for the scripts
 │   └── fixtures/            # Tier-2 artifact-shape fixtures (local/on-demand, never CI)

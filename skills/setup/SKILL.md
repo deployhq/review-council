@@ -16,7 +16,7 @@ Always available. Skip detection.
 
 ### Codex
 ```bash
-which codex 2>/dev/null && codex --version
+command -v codex 2>/dev/null && codex --version
 ```
 - If found: "Codex (CLI) ........... available"
 - If not found, check if `mcp__codex__codex` tool is available: "Codex (MCP) ........... available"
@@ -53,7 +53,7 @@ test -n "$PERPLEXITY_API_KEY" && echo "set" || echo "not set"
 
 ### GitHub CLI (for PR reviews)
 ```bash
-which gh 2>/dev/null && gh auth status 2>&1 | head -3
+command -v gh 2>/dev/null && gh auth status 2>&1 | head -3
 ```
 - If authenticated: "GitHub CLI ............ authenticated"
 - If not: "GitHub CLI ............. not found or not authenticated (PR reviews disabled)"
@@ -130,6 +130,8 @@ For each tool **found** → "available (\<version\>)". For each tool **missing**
 | `hadolint` | B | `brew install hadolint` |
 
 State this plainly to the user: "Install any of these you want — Review Council picks them up automatically on the next run (`command -v` probe, no restart needed). `setup` only ever detects and prints; it never installs a static-analysis tool for you, even with consent."
+
+**No-install Docker option.** If Docker is running, a *missing* core scanner (`gitleaks`, `trufflehog`, `semgrep`, `osv-scanner` — the four with official images) can be run **from its image** at review time with no local install: the Step-2.5 gate offers "run via Docker" when the tool is missing and the daemon is up. It's opt-in per-run, a natively-installed tool always takes precedence, and the finding is indistinguishable from a native one. The lint tools (`ruff`/`shellcheck`/`actionlint`/`hadolint`) have no Docker path — install them natively.
 
 **trufflehog outbound-network caveat.** `trufflehog`'s `--results=verified` mode makes **live outbound network calls**, authenticating with each discovered credential against its actual provider (e.g. confirming an AWS key is real by calling AWS with it) — that live check is what makes its hits verified/high-precision. Implications worth surfacing: it requires network egress from the machine running the review, and the verification call itself could trip the *credential owner's* own anomaly detection, even though the intent is benign. `trufflehog` is **default-on** (included in the default `static_analysis.tools` list) — the one-line opt-out is dropping `trufflehog` from `static_analysis.tools` in `.review-council/config.yml` (or via `RC_STATIC_TOOLS`). If the network is unreachable, the scan degrades gracefully (treated as "ran, 0 findings") — it never errors the run.
 
@@ -237,20 +239,23 @@ If the user accepts, write **`.review-council/config.yml`** with the **full-refe
 #     # providers: [perplexity]         # default when omitted -> [perplexity]
 
 # settings:                      # run knobs (each also settable via its RC_* env var, which wins)
-#   personas:                 true     # RC_PERSONAS
-#   verify:                   true     # RC_VERIFY
-#   verify_max_findings:      12       # RC_VERIFY_CAP
-#   learn:                    true     # RC_LEARN
-#   min_reviewers:            2        # RC_MIN_REVIEWERS
-#   reviewer_timeout_seconds: 600      # RC_REVIEWER_TIMEOUT
-#   run_budget_seconds:       600      # RC_RUN_BUDGET
-#   auto_retry:               false    # RC_AUTO_RETRY
+#   personas:                     true     # RC_PERSONAS
+#   verify:                       true     # RC_VERIFY
+#   verify_max_findings:          12       # RC_VERIFY_CAP
+#   learn:                        true     # RC_LEARN
+#   min_reviewers:                2        # RC_MIN_REVIEWERS
+#   reviewer_timeout_seconds:     600      # RC_REVIEWER_TIMEOUT
+#   run_budget_seconds:           600      # RC_RUN_BUDGET
+#   auto_retry:                   false    # RC_AUTO_RETRY
+#   health_probe:                 false    # RC_HEALTH_PROBE
+#   health_probe_timeout_seconds: 20       # RC_HEALTH_PROBE_TIMEOUT
+#   claude_max_turns:             100      # RC_CLAUDE_MAX_TURNS
 
 # static_analysis:               # deterministic tool layer (each also settable via its RC_* env var, which wins)
 #   enabled: true                    # RC_STATIC_ANALYSIS
 #   tools: [gitleaks, trufflehog, osv-scanner, semgrep, ruff, shellcheck, actionlint, hadolint]   # RC_STATIC_TOOLS (comma-separated)
 #   timeout_seconds: 60              # RC_STATIC_TIMEOUT
-#   semgrep_config: auto             # RC_SEMGREP_CONFIG — auto | off | a repo-owned ruleset path
+#   semgrep_config: p/default        # RC_SEMGREP_CONFIG — a registry pack (p/…) | off | a repo-owned ruleset path (auto is skipped: needs metrics)
 ```
 
 And write **`.review-council/config.local.yml`** (per-machine overrides — identical schema, wins over `config.yml`):

@@ -39,12 +39,18 @@ has_line() {
   has_line "settings.run_budget_seconds=600"
   has_line "settings.min_reviewers=2"
   has_line "settings.auto_retry=false"
+  # Phase-4 knobs -> defaults chosen so absent config = today's behavior
+  # (probe off/opt-in; claude_max_turns lenient at 100 so wiring the knob
+  # never clamps reviewers shorter than they run today).
+  has_line "settings.health_probe=false"
+  has_line "settings.health_probe_timeout_seconds=20"
+  has_line "settings.claude_max_turns=100"
   # static_analysis.* is now emitted (previously: no `static_analysis:` block ->
   # the whole thing was ignored, no lines at all). Absent block -> defaults.
   has_line "static_analysis.enabled=true"
   has_line "static_analysis.tools=gitleaks,trufflehog,osv-scanner,semgrep,ruff,shellcheck,actionlint,hadolint"
   has_line "static_analysis.timeout_seconds=60"
-  has_line "static_analysis.semgrep_config=auto"
+  has_line "static_analysis.semgrep_config=p/default"
 }
 
 @test "provider enable/disable from config.yml" {
@@ -93,6 +99,66 @@ EOF
   has_line "settings.verify_max_findings=5"
   has_line "settings.run_budget_seconds=300"
   has_line "settings.min_reviewers=3"
+}
+
+@test "settings.health_probe: default false, config.yml/config.local.yml precedence, env override" {
+  run --separate-stderr "$SCRIPT" "$CFG"
+  [ "$status" -eq 0 ]
+  has_line "settings.health_probe=false"
+
+  printf 'settings:\n  health_probe: false\n' >"$CFG/config.yml"
+  run --separate-stderr "$SCRIPT" "$CFG"
+  [ "$status" -eq 0 ]
+  has_line "settings.health_probe=false"
+
+  printf 'settings:\n  health_probe: true\n' >"$CFG/config.local.yml"
+  run --separate-stderr "$SCRIPT" "$CFG"
+  [ "$status" -eq 0 ]
+  has_line "settings.health_probe=true"
+
+  RC_HEALTH_PROBE=false run --separate-stderr "$SCRIPT" "$CFG"
+  [ "$status" -eq 0 ]
+  has_line "settings.health_probe=false"
+}
+
+@test "settings.health_probe_timeout_seconds: default 20, config.yml/config.local.yml precedence, env override" {
+  run --separate-stderr "$SCRIPT" "$CFG"
+  [ "$status" -eq 0 ]
+  has_line "settings.health_probe_timeout_seconds=20"
+
+  printf 'settings:\n  health_probe_timeout_seconds: 10\n' >"$CFG/config.yml"
+  run --separate-stderr "$SCRIPT" "$CFG"
+  [ "$status" -eq 0 ]
+  has_line "settings.health_probe_timeout_seconds=10"
+
+  printf 'settings:\n  health_probe_timeout_seconds: 15\n' >"$CFG/config.local.yml"
+  run --separate-stderr "$SCRIPT" "$CFG"
+  [ "$status" -eq 0 ]
+  has_line "settings.health_probe_timeout_seconds=15"
+
+  RC_HEALTH_PROBE_TIMEOUT=5 run --separate-stderr "$SCRIPT" "$CFG"
+  [ "$status" -eq 0 ]
+  has_line "settings.health_probe_timeout_seconds=5"
+}
+
+@test "settings.claude_max_turns: default 100, config.yml/config.local.yml precedence, env override" {
+  run --separate-stderr "$SCRIPT" "$CFG"
+  [ "$status" -eq 0 ]
+  has_line "settings.claude_max_turns=100"
+
+  printf 'settings:\n  claude_max_turns: 10\n' >"$CFG/config.yml"
+  run --separate-stderr "$SCRIPT" "$CFG"
+  [ "$status" -eq 0 ]
+  has_line "settings.claude_max_turns=10"
+
+  printf 'settings:\n  claude_max_turns: 20\n' >"$CFG/config.local.yml"
+  run --separate-stderr "$SCRIPT" "$CFG"
+  [ "$status" -eq 0 ]
+  has_line "settings.claude_max_turns=20"
+
+  RC_CLAUDE_MAX_TURNS=5 run --separate-stderr "$SCRIPT" "$CFG"
+  [ "$status" -eq 0 ]
+  has_line "settings.claude_max_turns=5"
 }
 
 @test "precedence: config.local.yml > config.yml" {
@@ -215,7 +281,7 @@ EOF
   has_line "static_analysis.enabled=true"
   has_line "static_analysis.tools=gitleaks,trufflehog,osv-scanner,semgrep,ruff,shellcheck,actionlint,hadolint"
   has_line "static_analysis.timeout_seconds=60"
-  has_line "static_analysis.semgrep_config=auto"
+  has_line "static_analysis.semgrep_config=p/default"
 }
 
 @test "static_analysis.enabled: config.yml sets false, then RC_STATIC_ANALYSIS env overrides back to true" {
@@ -295,10 +361,10 @@ EOF
   has_line "static_analysis.timeout_seconds=45"
 }
 
-@test "static_analysis.semgrep_config: default auto, off, custom path, env override" {
+@test "static_analysis.semgrep_config: default p/default, off, custom path, env override" {
   run --separate-stderr "$SCRIPT" "$CFG"
   [ "$status" -eq 0 ]
-  has_line "static_analysis.semgrep_config=auto"
+  has_line "static_analysis.semgrep_config=p/default"
 
   printf 'static_analysis:\n  semgrep_config: "off"\n' >"$CFG/config.yml"
   run --separate-stderr "$SCRIPT" "$CFG"
@@ -340,7 +406,7 @@ EOF
   echo "stderr=<<$stderr>>"
   [ "$status" -eq 0 ]
   # crafted value rejected -> falls back to the default ("auto")
-  has_line "static_analysis.semgrep_config=auto"
+  has_line "static_analysis.semgrep_config=p/default"
   printf '%s\n' "$stderr" | grep -q 'static_analysis.semgrep_config'
   ! printf '%s\n' "$output" | grep -q 'injected.line'
   ! printf '%s\n' "$output" | grep -vE '^#|='

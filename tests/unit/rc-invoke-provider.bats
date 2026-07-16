@@ -31,6 +31,10 @@ setup() {
   #   overload    -> 503 / high demand error, exit 1
   #   authish-prose -> inline (non-heading) Findings/Overall Assessment + auth
   #                    error; must classify AUTH, not OK
+  #   rubric-echo-auth -> echoes the refutation prompt's rubric enumeration
+  #                    ("Allowed: UPHELD | REFUTED | INCONCLUSIVE") + a real
+  #                    auth-error phrase, no actual <id> | VERDICT line; must
+  #                    classify AUTH, not OK (CR-1 regression)
   #   hang        -> sleep $AGY_SLEEP (default 999s) to force a wrapper kill
   #   hang-notrap -> trap '' TERM then sleep; only SIGKILL can stop it
   # Bookkeeping (set only if the env var is exported by the test):
@@ -130,6 +134,46 @@ REVIEW_EOF
     echo "Authentication failed: not authenticated. I could not generate the Findings section or the Overall Assessment for this review." >&2
     exit 1
     ;;
+  rubric-echo-auth)
+    # CR-1 regression: the merged stream echoes the refutation prompt's rubric
+    # enumeration verbatim ("Allowed: UPHELD | REFUTED | INCONCLUSIVE") plus a
+    # genuine auth-error phrase, but contains NO actual "<id> | VERDICT — ..."
+    # line. The old loose VERDICT_PATTERN matched the bare "| REFUTED" / "|
+    # INCONCLUSIVE" substrings in the rubric line and misclassified this as
+    # OK, hiding the real auth failure. Must classify AUTH.
+    echo "Error: not logged in. Allowed: UPHELD | REFUTED | INCONCLUSIVE" >&2
+    exit 1
+    ;;
+  verdicts)
+    # Step-4 REFUTATION output: pipe-delimited verdict lines, NO review headings.
+    # Must classify OK (the Phase-4 collapse routes refutation through this same
+    # script; verdict output carries none of the review headings the OK-guard
+    # keyed on).
+    cat <<'VERDICT_EOF'
+F1 | REFUTED — @user is loaded only from current_account.users, so it is scoped.
+F2 | UPHELD — token login emits the event on the GET with no interstitial.
+F3 | INCONCLUSIVE — cannot execute the spreadsheet scenario here.
+VERDICT_EOF
+    exit 0
+    ;;
+  verdicts-authish)
+    # Verdict output whose MERGED stream (run_capped 2>&1) also carries a repo
+    # phrase the model echoed while exploring — here a Rails flash "Please log in
+    # to continue." that matches AUTH_PATTERN. Must STILL classify OK: the verdict
+    # shape wins before the hard-fail patterns (the exact live smoke-test bug).
+    cat <<'VERDICT_EOF'
+F1 | UPHELD — token login emits auth.session_started directly on GET /login?token=...
+F2 | REFUTED — @user is already account-scoped at this call site.
+VERDICT_EOF
+    echo "    96    notice: 'Your e-mail address has been verified. Please log in to continue.'" >&2
+    exit 0
+    ;;
+  quota-individual)
+    # agy's REAL quota phrasing (not the generic 429/TerminalQuotaError). Must
+    # classify QUOTA -> fast-fail (no wasted fast-empty retry), not EMPTY.
+    echo "Error: Individual quota reached. Please upgrade your subscription to increase your limits. Resets in 145h11m19s." >&2
+    exit 1
+    ;;
   hang)
     sleep "${AGY_SLEEP:-999}"
     exit 0
@@ -201,14 +245,91 @@ esac
 GEM_EOF
   chmod +x "$FAKEDIR/gemini"
 
+  # --- fake codex -------------------------------------------------------
+  # Codex has NO CLI fallback, so it is invoked as
+  #   rc-invoke-provider.sh <codex> "" <prompt-file>.
+  # The prompt reaches `codex exec` as a POSITIONAL arg (for codex, -p is
+  # --profile, not the prompt), so unlike agy/gemini this fake ignores -p and
+  # just records its full argv for the codex-profile-argv assertion.
+  # Modes (CDX_MODE, or CDX_MODE_1 / CDX_MODE_2 to vary per call):
+  #   ok          -> valid review, exit 0
+  #   empty       -> nothing, exit 0
+  #   empty-slow  -> sleep $CDX_SLEEP then nothing, exit 0
+  #   auth        -> auth error, exit 1
+  #   quota       -> quota error, exit 1
+  #   timeout     -> sleep $CDX_SLEEP (default 999s) to force a wrapper kill
+  # Bookkeeping (set only if the env var is exported by the test):
+  #   CDX_CALLS -> one "call" line appended per invocation (call counting)
+  #   CDX_ARGS  -> one space-joined line of this call's argv appended
+  cat >"$FAKEDIR/codex" <<'CDX_EOF'
+#!/usr/bin/env sh
+call_n=1
+if [ -n "${CDX_CALLS:-}" ]; then
+  echo call >>"$CDX_CALLS"
+  call_n=$(wc -l <"$CDX_CALLS" | tr -d ' ')
+fi
+
+if [ -n "${CDX_ARGS:-}" ]; then
+  {
+    printf '==CALL %s==\n' "$call_n"
+    for a in "$@"; do printf '%s ' "$a"; done
+    printf '\n'
+  } >>"$CDX_ARGS"
+fi
+
+case "$call_n" in
+  1) mode="${CDX_MODE_1:-${CDX_MODE:-ok}}" ;;
+  2) mode="${CDX_MODE_2:-${CDX_MODE:-ok}}" ;;
+  *) mode="${CDX_MODE:-ok}" ;;
+esac
+
+case "$mode" in
+  ok)
+    cat <<'REVIEW_EOF'
+Findings:
+- [P2] Example finding from codex.
+
+What's Good:
+- Reasonable structure.
+
+Overall Assessment: Looks fine.
+REVIEW_EOF
+    exit 0
+    ;;
+  empty)
+    exit 0
+    ;;
+  empty-slow)
+    sleep "${CDX_SLEEP:-1}"
+    exit 0
+    ;;
+  auth)
+    echo "Error: not authenticated. Please login to continue." >&2
+    exit 1
+    ;;
+  quota)
+    echo "Error: 429 Too Many Requests -- TerminalQuotaError" >&2
+    exit 1
+    ;;
+  timeout)
+    sleep "${CDX_SLEEP:-999}"
+    exit 0
+    ;;
+esac
+CDX_EOF
+  chmod +x "$FAKEDIR/codex"
+
   AGY="$FAKEDIR/agy"
   GEMINI="$FAKEDIR/gemini"
+  CODEX="$FAKEDIR/codex"
 
   AGY_CALLS="$BATS_TEST_TMPDIR/agy_calls"
   AGY_ARGS="$BATS_TEST_TMPDIR/agy_args"
   GEM_CALLS="$BATS_TEST_TMPDIR/gem_calls"
   GEM_ARGS="$BATS_TEST_TMPDIR/gem_args"
-  export AGY_CALLS AGY_ARGS GEM_CALLS GEM_ARGS
+  CDX_CALLS="$BATS_TEST_TMPDIR/cdx_calls"
+  CDX_ARGS="$BATS_TEST_TMPDIR/cdx_args"
+  export AGY_CALLS AGY_ARGS GEM_CALLS GEM_ARGS CDX_CALLS CDX_ARGS
 }
 
 # call_count <file>: prints 0 if the bookkeeping file doesn't exist yet.
@@ -264,6 +385,56 @@ call_count() {
   esac
   [ "$(call_count "$AGY_CALLS")" -eq 1 ]
   [ "$(call_count "$GEM_CALLS")" -eq 1 ]
+}
+
+@test "refutation-verdicts: UPHELD/REFUTED/INCONCLUSIVE output (no review headings) classifies OK, returned as TOOL" {
+  # The Phase-4 collapse routes Step-4 refutation through this script; a verdict
+  # set has none of the review headings, so it must be recognized on its own
+  # shape or it falls through to the hard-fail patterns.
+  AGY_MODE=verdicts run --separate-stderr "$SCRIPT" "$AGY" "$GEMINI" "$PROMPT_FILE"
+  echo "status=$status"
+  echo "output=<<$output>>"
+  [ "$status" -eq 0 ]
+  case "$output" in
+  "TOOL: Antigravity"*) : ;;
+  *) echo "expected TOOL: Antigravity (verdict output must classify OK, not a hard fail)" && return 1 ;;
+  esac
+  echo "$output" | grep -qi 'REFUTED'
+  [ "$(call_count "$GEM_CALLS")" -eq 0 ]
+}
+
+@test "refutation-verdicts-authish: verdict output whose merged stream echoes repo source ('please log in') still classifies OK, not AUTH" {
+  # The live smoke-test bug: a successful refutation of an auth PR was dropped as
+  # 'auth failure' because the model's reasoning (merged via 2>&1) echoed a
+  # 'Please log in' flash from the code, and the verdict format wasn't recognized.
+  AGY_MODE=verdicts-authish GEM_MODE=ok run --separate-stderr "$SCRIPT" "$AGY" "$GEMINI" "$PROMPT_FILE"
+  echo "status=$status"
+  echo "output=<<$output>>"
+  [ "$status" -eq 0 ]
+  case "$output" in
+  "TOOL: Antigravity"*) : ;;
+  *) echo "expected TOOL: Antigravity (verdicts must not fall through to AUTH on echoed source)" && return 1 ;;
+  esac
+  # agy succeeded on its own shape → gemini fallback must NOT be consulted
+  [ "$(call_count "$GEM_CALLS")" -eq 0 ]
+}
+
+@test "rubric-echo-not-verdict: rubric enumeration ('Allowed: UPHELD | REFUTED | INCONCLUSIVE') + auth phrase classifies AUTH, not OK (CR-1 regression)" {
+  # CodeRabbit CR-1: the old loose VERDICT_PATTERN matched a bare verdict word
+  # adjacent to ANY pipe on a line, so the refutation prompt's own rubric
+  # enumeration -- echoed back verbatim by a model quoting its instructions --
+  # false-positived the OK-guard and hid a genuine auth failure reported on
+  # the same merged-stream line. No fallback bin, so a correct classification
+  # exits 1 with a SKIPPED "... auth failure" line; the old bug exited 0 as OK.
+  AGY_MODE=rubric-echo-auth run --separate-stderr "$SCRIPT" "$AGY" "" "$PROMPT_FILE"
+  echo "status=$status"
+  echo "output=<<$output>>"
+  [ "$status" -eq 1 ]
+  case "$output" in
+  SKIPPED:*) : ;;
+  *) echo "expected SKIPPED (AUTH), not OK/TOOL" && return 1 ;;
+  esac
+  echo "$output" | grep -qi 'auth failure'
 }
 
 @test "fast-empty-then-retry-success: primary empty fast, retry succeeds, gemini never called" {
@@ -347,6 +518,22 @@ call_count() {
   case "$output" in
   "TOOL: Gemini"*) : ;;
   *) echo "expected TOOL: Gemini" && return 1 ;;
+  esac
+  [ "$(call_count "$AGY_CALLS")" -eq 1 ]
+}
+
+@test "quota-fail-agy-individual: agy 'Individual quota reached' -> QUOTA (one call, no retry), not EMPTY" {
+  # Regression for the deployhq#1043 smoke test: agy's real quota phrasing was
+  # missed by QUOTA_PATTERN, so it classified EMPTY -> a wasted fast-empty retry
+  # (2 calls) + a misleading 'empty output after retry' note. Must be QUOTA:
+  # exactly one agy call, straight to gemini.
+  AGY_MODE=quota-individual GEM_MODE=ok run --separate-stderr "$SCRIPT" "$AGY" "$GEMINI" "$PROMPT_FILE"
+  echo "status=$status"
+  echo "output=<<$output>>"
+  [ "$status" -eq 0 ]
+  case "$output" in
+  "TOOL: Gemini"*) : ;;
+  *) echo "expected TOOL: Gemini (agy quota -> fallback)" && return 1 ;;
   esac
   [ "$(call_count "$AGY_CALLS")" -eq 1 ]
 }
@@ -520,4 +707,164 @@ call_count() {
   "SKIPPED: Google (Antigravity) unavailable — agy: absent"*) : ;;
   *) echo "expected SKIPPED absent attributed to agy" && return 1 ;;
   esac
+}
+
+# ===========================================================================
+# Phase 4 — Codex slot (codex primary, NO fallback) + tool-agnostic attribution
+# ===========================================================================
+
+@test "codex-success: primary codex returns a valid review -> TOOL: Codex" {
+  CDX_MODE=ok run --separate-stderr "$SCRIPT" "$CODEX" "" "$PROMPT_FILE"
+  echo "status=$status"
+  echo "output=<<$output>>"
+  echo "stderr=<<$stderr>>"
+  [ "$status" -eq 0 ]
+  case "$output" in
+  "TOOL: Codex"*) : ;;
+  *) echo "expected output to start with TOOL: Codex" && return 1 ;;
+  esac
+  echo "$output" | grep -qi 'findings'
+  echo "$stderr" | grep -q 'ELAPSED:'
+}
+
+@test "codex-no-fallback-auth: codex auth-fails, no fallback -> SKIPPED led by Codex (not Google)" {
+  CDX_MODE=auth run --separate-stderr "$SCRIPT" "$CODEX" "" "$PROMPT_FILE"
+  echo "status=$status"
+  echo "output=<<$output>>"
+  [ "$status" -eq 1 ]
+  case "$output" in
+  "SKIPPED: Codex unavailable — codex: auth failure"*) : ;;
+  *) echo "expected SKIPPED led by Codex with the codex auth note" && return 1 ;;
+  esac
+  # Attribution must have generalized: a codex SKIPPED must NOT say "Google".
+  ! echo "$output" | grep -q 'Google'
+  # no fallback clause at all
+  ! echo "$output" | grep -q 'fallback:'
+}
+
+@test "codex-profile-argv: frozen 'codex exec' argv (subcommand + read-only sandbox, positional prompt)" {
+  CDX_MODE=ok run --separate-stderr "$SCRIPT" "$CODEX" "" "$PROMPT_FILE"
+  echo "status=$status"
+  [ "$status" -eq 0 ]
+  [ -f "$CDX_ARGS" ]
+  echo "codex argv: $(cat "$CDX_ARGS")"
+  # Frozen shape: the non-interactive `exec` subcommand, then the least-privilege
+  # read-only sandbox, pinned against `codex exec --help`.
+  grep -qF -- 'exec --sandbox read-only --skip-git-repo-check' "$CDX_ARGS"
+  # Least privilege: the reviewer must NOT run with the "EXTREMELY DANGEROUS"
+  # no-sandbox flag.
+  ! grep -qF -- 'dangerously-bypass' "$CDX_ARGS"
+  # The prompt is a POSITIONAL arg for codex (NOT after -p) — prove it arrived.
+  grep -qF -- 'Please review this change' "$CDX_ARGS"
+  # And codex must NOT be handed a -p flag (that is --profile for codex exec).
+  ! grep -qE -- '(^| )-p( |$)' "$CDX_ARGS"
+}
+
+@test "codex-fast-empty-retry: codex empty-fast -> exactly one retry (shared state machine)" {
+  RC_REVIEWER_TIMEOUT=6 CDX_MODE_1=empty CDX_MODE_2=ok \
+    run --separate-stderr "$SCRIPT" "$CODEX" "" "$PROMPT_FILE"
+  echo "status=$status"
+  echo "output=<<$output>>"
+  [ "$status" -eq 0 ]
+  case "$output" in
+  "TOOL: Codex"*) : ;;
+  *) echo "expected TOOL: Codex after the one fast-empty retry" && return 1 ;;
+  esac
+  # Exactly one retry -> two codex invocations total, no more.
+  [ "$(call_count "$CDX_CALLS")" -eq 2 ]
+}
+
+@test "attribution-per-family: SKIPPED lead label maps by basename (agy->Antigravity, codex->Codex)" {
+  # agy (no fallback) auth-fails -> leads with Google (Antigravity).
+  AGY_MODE=auth run --separate-stderr "$SCRIPT" "$AGY" "" "$PROMPT_FILE"
+  echo "agy-status=$status agy-output=<<$output>>"
+  [ "$status" -eq 1 ]
+  case "$output" in
+  "SKIPPED: Google (Antigravity) unavailable"*) : ;;
+  *) echo "expected agy SKIPPED to lead with Google (Antigravity)" && return 1 ;;
+  esac
+
+  # codex (no fallback) auth-fails -> leads with Codex, never Google.
+  CDX_MODE=auth run --separate-stderr "$SCRIPT" "$CODEX" "" "$PROMPT_FILE"
+  echo "codex-status=$status codex-output=<<$output>>"
+  [ "$status" -eq 1 ]
+  case "$output" in
+  "SKIPPED: Codex unavailable"*) : ;;
+  *) echo "expected codex SKIPPED to lead with Codex" && return 1 ;;
+  esac
+  ! echo "$output" | grep -q 'Google'
+}
+
+@test "google-single-row (double-vote guard): agy present -> exactly one TOOL line, gemini only via internal fallback" {
+  AGY_MODE=ok run --separate-stderr "$SCRIPT" "$AGY" "$GEMINI" "$PROMPT_FILE"
+  echo "status=$status"
+  echo "output=<<$output>>"
+  [ "$status" -eq 0 ]
+  # The Google slot is a single dispatch unit: exactly one TOOL: line emitted.
+  [ "$(printf '%s\n' "$output" | grep -c '^TOOL:')" -eq 1 ]
+  case "$output" in
+  "TOOL: Antigravity"*) : ;;
+  *) echo "expected the single row to be TOOL: Antigravity" && return 1 ;;
+  esac
+  # gemini is reached ONLY as an internal fallback (never here, agy succeeded).
+  [ "$(call_count "$GEM_CALLS")" -eq 0 ]
+}
+
+# ===========================================================================
+# Phase 4 — --probe health check (reuses the frozen profiles + classifier)
+# ===========================================================================
+
+@test "probe-healthy: codex responds cleanly -> HEALTHY" {
+  CDX_MODE=ok run "$SCRIPT" --probe "$CODEX" ""
+  echo "status=$status"
+  echo "output=<<$output>>"
+  [ "$status" -eq 0 ]
+  [ "$output" = "HEALTHY" ]
+}
+
+@test "probe-cold-inconclusive: probe TIMEOUT -> INCONCLUSIVE, never UNHEALTHY (cold agy must survive)" {
+  _p_start=$(date +%s)
+  RC_HEALTH_PROBE_TIMEOUT=2 CDX_MODE=timeout CDX_SLEEP=40 \
+    run "$SCRIPT" --probe "$CODEX" ""
+  _p_elapsed=$(( $(date +%s) - _p_start ))
+  echo "status=$status wall=${_p_elapsed}s"
+  echo "output=<<$output>>"
+  [ "$status" -eq 0 ]
+  case "$output" in
+  "INCONCLUSIVE"*) : ;;
+  *) echo "expected INCONCLUSIVE for a probe timeout (cold start)" && return 1 ;;
+  esac
+  # A timeout must NEVER be reported as a health failure.
+  ! echo "$output" | grep -q 'UNHEALTHY'
+  # Bounded by the short probe cap + KILL grace, not the 40s sleep.
+  [ "$_p_elapsed" -lt 10 ]
+}
+
+@test "probe-unhealthy-auth: codex auth-fails -> UNHEALTHY (positive evidence)" {
+  CDX_MODE=auth run "$SCRIPT" --probe "$CODEX" ""
+  echo "status=$status"
+  echo "output=<<$output>>"
+  [ "$status" -eq 0 ]
+  case "$output" in
+  "UNHEALTHY:"*) : ;;
+  *) echo "expected UNHEALTHY: for a codex auth failure" && return 1 ;;
+  esac
+  echo "$output" | grep -qi 'auth'
+}
+
+@test "probe-google-slot-fallback: agy unhealthy, gemini healthy -> slot HEALTHY" {
+  AGY_MODE=auth GEM_MODE=ok run "$SCRIPT" --probe "$AGY" "$GEMINI"
+  echo "status=$status"
+  echo "output=<<$output>>"
+  [ "$status" -eq 0 ]
+  [ "$output" = "HEALTHY" ]
+  # The slot's own fallback logic ran: agy probed (unhealthy), gemini probed.
+  [ "$(call_count "$AGY_CALLS")" -eq 1 ]
+  [ "$(call_count "$GEM_CALLS")" -eq 1 ]
+}
+
+@test "probe usage-error: --probe with wrong arg count exits 2" {
+  run "$SCRIPT" --probe "$CODEX"
+  echo "status=$status"
+  [ "$status" -eq 2 ]
 }
