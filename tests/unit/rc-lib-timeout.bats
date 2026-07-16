@@ -49,6 +49,12 @@ start_neverending_stdin() {
 
 @test "run_capped (timeout branch) closes child stdin — a stdin-draining CLI is not hung by inherited never-EOF stdin" {
   . "$LIB"
+  # This test targets the `timeout`-binary branch specifically. Without a
+  # timeout binary run_capped takes the bg+watchdog branch instead (covered by
+  # the next test), so skip rather than silently exercise the wrong branch.
+  if ! command -v timeout >/dev/null 2>&1 && ! command -v gtimeout >/dev/null 2>&1; then
+    skip "no external timeout binary — the timeout branch is unreachable on this host"
+  fi
   FIFO="$BATS_TEST_TMPDIR/fifo1"
   start_neverending_stdin "$FIFO"
 
@@ -68,10 +74,18 @@ start_neverending_stdin() {
   start_neverending_stdin "$FIFO"
   RCFILE="$BATS_TEST_TMPDIR/rc2"
 
-  # Force the no-timeout-binary path: with PATH restricted to the base dirs,
-  # `command -v timeout`/`gtimeout` find nothing (macOS has neither), so
-  # run_capped takes its bg+watchdog fallback. sh/cat/env still resolve.
-  ( PATH=/usr/bin:/bin; run_capped 3 "$OUT" "$DRAINER" <"$FIFO"; printf '%s' "$LAST_RC" >"$RCFILE" )
+  # Force the no-timeout-binary path DETERMINISTICALLY: an isolated PATH with
+  # only the helpers the fallback needs — sh/cat for the child, sleep for the
+  # watchdog — so no `timeout`/`gtimeout` is discoverable on ANY host and
+  # run_capped must take its bg+watchdog branch. (PATH=/usr/bin:/bin was not
+  # enough: standard Linux ships `timeout` in /usr/bin.) The DRAINER's
+  # `/usr/bin/env sh` shebang is an absolute path, so `env` needs no PATH; it
+  # then resolves `sh` from the isolated dir.
+  TEST_PATH="$BATS_TEST_TMPDIR/isolated-bin"
+  mkdir -p "$TEST_PATH"
+  for _t in sh cat sleep; do ln -s "$(command -v "$_t")" "$TEST_PATH/$_t"; done
+
+  ( PATH="$TEST_PATH"; run_capped 3 "$OUT" "$DRAINER" <"$FIFO"; printf '%s' "$LAST_RC" >"$RCFILE" )
 
   kill "$PRODUCER_PID" 2>/dev/null || true
   wait "$PRODUCER_PID" 2>/dev/null || true
