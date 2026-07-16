@@ -1,7 +1,7 @@
 ---
 description: Multi-agent code review for Claude Code. Multiple AI models review your PR, code, or plan independently; a cross-family refutation pass and an active judge then distill the findings into a curated, severity-ranked list of what actually needs changing.
 argument-hint: "[PR number | file/directory path | blank for auto-detect]"
-allowed-tools: Agent, Bash, Read, Glob, Grep, Write, mcp__codex__codex, mcp__codex__codex-reply
+allowed-tools: Agent, Bash, Read, Glob, Grep, mcp__codex__codex, mcp__codex__codex-reply
 ---
 
 # Review Council — Multi-Agent Review
@@ -167,7 +167,7 @@ Reuse the BASE ref and changed-file list **already computed in Step 1/2** — do
 - **Unstaged working changes** → base = `HEAD`, head = the working tree; changed files = `git diff --name-only`.
 - **Plan/document review** → there is no code diff; **skip Step 2.5 entirely** (nothing for the scanners to scope to) and note `static analysis: off (no code diff)`.
 
-Write the changed-file list (one repo-relative path per line) to a temp file, then dispatch **one** `general-purpose` Agent with the prompt below. Pass the effective `static_analysis.*` values resolved in Step 0 as env vars **on the invocation** (the script reads them via env, matching `rc-config.sh`'s output; do not rely on ambient env carrying across separate tool calls):
+Write the changed-file list (one repo-relative path per line) to a temp file **with `Bash`** (e.g. `printf '%s\n' path/a path/b … > "$CF"`), then dispatch **one** `general-purpose` Agent with the prompt below. Pass the effective `static_analysis.*` values resolved in Step 0 as env vars **on the invocation** (the script reads them via env, matching `rc-config.sh`'s output; do not rely on ambient env carrying across separate tool calls):
 
 > You are running the Review Council deterministic static scan. Run the bundled scanner script **once** and return its output verbatim. Do NOT interpret, summarize, re-run individual tools, or add commentary.
 >
@@ -656,9 +656,41 @@ The judge ledger from Step 5 is printed **before** this prose report. Then emit 
 
 ---
 
-## Step 7: Capture Gate (Phase 3 — not built here)
+## Step 7: Capture Gate (learning capture)
 
-**Placeholder only — do not implement in this phase.** In Phase 3 (PR #3), when `settings.learn` is true, this step will walk the final findings interactively (which the author *tackles* vs. *skips* / marks as a false positive) and append the outcomes to `.review-council/learnings.md` — feeding the Step-0.5 recall and the Step-5 suppressions on future runs. This phase ships the read side (recall + suppress) only; the capture/write side lands in Phase 3.
+**Gated on `settings.learn` (resolved in Step 0).** If `settings.learn` is **false**, skip this step entirely — no gate, no prompt, no writes. (Symmetric with Step 0.5's recall gate: the one knob turns both the read and write sides off.)
+
+When `settings.learn` is true, after the Step-6 report, run a short **capture gate** that distills this run's *skips* into persisted learnings — the write side of the loop whose read side ran in Step 0.5. It mirrors `reply-pr`'s human gate: **propose, then stop and wait, then write only what the human confirms.** It is **record-only** — it never edits code, never re-runs a reviewer, never changes the report already emitted.
+
+### 7.1 Walk the findings
+Drive off the **Step-5 ledger** (its rows already carry the judge's canonical fingerprint) and the Step-6 grouping. Present the surviving findings as a compact list and, for each, ask the author to mark one of:
+- **tackle** — they'll fix it → capture **nothing** (a real finding they're acting on is not a false positive).
+- **skip** — they're not acting on it, with a **one-line reason**.
+- **skip all** — blanket-skip the remainder.
+
+Show it as an editable proposal (a sensible default per finding is fine), never auto-applied.
+
+### 7.2 Distill a skip into a learning
+Only a **skip with a generalizable reason** becomes a learning; a one-off skip (*"not now / out of scope"*) captures **nothing**.
+- Reason framed as *"this specific finding is a known false positive here"* → a **Suppression**, keyed by the finding's **ledger fingerprint** (§5.1 — use it **verbatim**; never re-author a fingerprint by hand).
+- Reason framed as a **general rule** (*"we never flag X in this repo"*) → a **Convention** (a one-line rule).
+- If several skips this run share one general reason, propose a **single Convention** rather than N Suppressions (one confirmation, less noise).
+
+### 7.3 Confirm, then write (human-confirmed only — D7)
+Before writing anything, show the **exact** entries that would be appended:
+- Suppression → `- fingerprint: <fp> | reason: <reason> | added: <today>`
+- Convention → `- <one-line rule>`
+
+**Wait for explicit approval.** On approval, append each via `Bash` — one call per entry (the script writes the `§3.6` format; you never hand-format `learnings.md`):
+```bash
+"${CLAUDE_PLUGIN_ROOT}/scripts/rc-learn.sh" add-suppression "<ledger-fingerprint>" "<reason>"
+"${CLAUDE_PLUGIN_ROOT}/scripts/rc-learn.sh" add-convention  "<one-line rule>"
+```
+The script creates `.review-council/learnings.md` (canonical §3.6 skeleton) if absent, appends under the right section, and is **idempotent** — re-approving an existing learning is a safe no-op, so the gate never has to dedupe against the file. Decline (or `settings.learn` off) → write nothing; no confirmation for a given entry → skip just that entry.
+
+**Check each call's exit status before summarizing.** `rc-learn.sh` exits **0** on a successful (or idempotent no-op) write and **2** on a validation failure — a `|` or control character in the fingerprint/reason/convention, an empty field, a malformed date — printing the reason on stderr and writing **nothing**. If a call exits non-zero, **surface its stderr message to the user** and do **not** count that entry as captured (the rest still write; the run isn't blocked). Count only the entries that actually landed.
+
+Print a one-line summary of **what actually wrote** (e.g. `Captured: 1 suppression, 1 convention → .review-council/learnings.md`; note any failures, e.g. `1 skipped: reason contained "|"`), the same observable-artifact spirit as the lens map / ledger — the summary must never report a capture that didn't happen. These entries feed **Step 0.5 recall** and **Step 5 suppression** on the next run.
 
 ## Step 8: Cleanup
 

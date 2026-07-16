@@ -11,6 +11,7 @@ Single-model code review has blind spots. Different models catch different thing
 - **Cross-reviewed findings** (raised by multiple reviewer families, or independently upheld by a different-family refutation pass) = high confidence, badged `[cross-reviewed]`
 - **Single-reviewer findings** (one reviewer, not yet cross-verified) = worth considering, badged `[unverified]` or `[1 reviewer · unverified]` — never silently dropped for being unverified
 - **Genuine disagreements** (a reviewer's counter-evidence refutes another's finding, or an unresolved conflict survives the judge) = documented as a dropped/refuted finding or a Dissenting Opinion, not just discarded
+- **Learns from your triage** — a human-confirmed capture gate after each report distills your skip decisions into persisted false-positive suppressions & conventions in a committed `learnings.md`, recalled automatically on future runs
 
 The result: fewer false positives, broader coverage, and a clear priority order. Review Council is orchestrated locally, inside a single Claude Code session, and only ever prints a report — it never pushes commits, opens PRs, or posts PR comments on its own (see [GitHub Actions (Roadmap)](#github-actions-roadmap) for a possible future CI mode). Note the data egress this implies: when Codex, Google, or Perplexity are enabled, the gathered review context (diff, file contents, etc.) is sent to those third-party tools/APIs — only Claude (the native subagent) stays fully local.
 
@@ -85,6 +86,12 @@ flowchart TD
 
     N --> O["Step 6: Severity-First Report<br/>badges + dissent + lens map"]
 
+    O --> P7{"Step 7: Capture Gate<br/>(if settings.learn)"}
+    P7 -->|"human: tackle / skip / skip-all"| P7D["Distill generalizable skips →<br/>Suppression or Convention"]
+    P7D -->|"human confirms exact entry"| P7W["rc-learn.sh writes<br/>learnings.md"]
+    P7D -->|"declined"| P7X["Nothing written"]
+    P7W -.->|"recalled next run"| Z05
+
     style A fill:#7c3aed,color:#fff
     style Z0 fill:#7c3aed,color:#fff
     style S25 fill:#0891b2,color:#fff
@@ -98,6 +105,8 @@ flowchart TD
     style O fill:#16a34a,color:#fff
     style K2 fill:#d97706,color:#fff
     style K3 fill:#d97706,color:#fff
+    style P7 fill:#d97706,color:#fff
+    style P7W fill:#16a34a,color:#fff
 ```
 
 **Auto-detection** means you usually just run `/review-council:run` with no arguments. It checks for an open PR on the current branch, then staged changes, then unstaged changes.
@@ -107,6 +116,8 @@ flowchart TD
 **Refutation pass (Step 4).** Gated on `settings.verify` (default on). Each candidate finding is routed to an isolated, different-family verifier — one that never sees the synthesis or any other reviewer's opinion, only the finding and the actual code — which returns **UPHELD** (positive supporting evidence), **REFUTED** (positive counter-evidence it's not a bug), or **INCONCLUSIVE** (can't decide; absence of proof is *never* REFUTED). Skipped entirely in solo-Claude mode, or once the run budget is spent — see [Verification & Badges](#verification--badges).
 
 **Judge (Step 5).** A single active judge computes a canonical fingerprint per finding, deduplicates across models, and recalibrates severity/confidence: +1 tier when a finding was raised by ≥2 reviewer families *or* UPHELD by a different family, drop only when REFUTED with counter-evidence, keep-and-tag `[unverified]` when INCONCLUSIVE or unverified. A single-reviewer `critical` is never demoted for being unverified — it stays Critical, tagged `[1 reviewer · unverified]`. The judge also suppresses findings matching a learnings Suppression and emits a per-finding ledger before the prose report.
+
+**Capture Gate (Step 7).** Gated on `settings.learn` (same knob as Step 0.5's recall) — off skips this step entirely. After the report, walks the surviving findings with you: mark each **tackle** (fixing it — nothing captured), **skip** (a one-line reason), or **skip all**. Only a skip with a *generalizable* reason becomes a learning — a scoped "known false positive here" becomes a **Suppression** keyed by the finding's ledger fingerprint, a general "we never flag X" becomes a **Convention**; a one-off "not now" captures nothing. Nothing is written until you explicitly confirm the exact entry text — then it's appended to `.review-council/learnings.md` via `scripts/rc-learn.sh`, which the next run's Step 0.5 recalls. Record-only: it never edits code, re-runs a reviewer, or changes the report just emitted.
 
 ## Reviewers
 
@@ -182,7 +193,7 @@ Each run setting (`settings.*`) is also tunable via its `RC_*` environment varia
 | `RC_PERSONAS` | `true` | Use reviewer lenses/personas when prompting reviewers; `false` reverts to the identical legacy (non-lens) prompt for every reviewer |
 | `RC_VERIFY` | `true` | Run the refutation pass over candidate findings |
 | `RC_VERIFY_CAP` | `12` | Cap on findings sent to the refutation pass (top by severity; the rest ship `[unverified]`) |
-| `RC_LEARN` | `true` | Enable learnings recall (Step 0.5) and, in a later phase, capture |
+| `RC_LEARN` | `true` | Enable learnings recall (Step 0.5) and capture (Step 7) |
 | `RC_MIN_REVIEWERS` | `2` | Minimum successful reviewers required for council mode |
 | `RC_REVIEWER_TIMEOUT` | `600` | **Hard** per-invocation wall-clock cap (**seconds**, 10 min) for CLI/API reviewers; sized to cover `agy`'s multi-minute cold start (`agy`'s own `--print-timeout` is raised to match, as a unit-suffixed duration like `600s`/`10m`). Raise for very large diffs or slow networks. |
 | `RC_RUN_BUDGET` | `600` | **Soft** total wall-clock budget (**seconds**) for the whole run — see "The two-cap model" below |
@@ -197,12 +208,14 @@ Each run setting (`settings.*`) is also tunable via its `RC_*` environment varia
 
 ### Learnings
 
-Review Council can read a repo's shared, checked-in `.review-council/learnings.md` to make each run informed by past decisions (capture — automatically writing to this file — lands in a later phase; today it is recall-only). Gated on `settings.learn` (`RC_LEARN`, default on). The file has two sections:
+Review Council reads and writes a repo's shared, checked-in `.review-council/learnings.md` so each run is informed by — and each run's triage feeds — past decisions. Gated end-to-end on `settings.learn` (`RC_LEARN`, default on): the same knob turns off both the read side (Step 0.5) and the write side (Step 7). The file has two sections:
 
 - **Conventions** — project-specific rules about what not to flag (e.g. "Migrations are auto-generated; do not flag missing down-migrations"). Folded once into the shared Step-2 baseline context package, so every reviewer sees it.
 - **Suppressions** — known false positives keyed by fingerprint (e.g. `src/adapters/*::*::unchecked-any | reason: intentional, see ADR-012`). Held for the judge (Step 5), which suppresses any surviving finding whose fingerprint matches and reports `Suppressions applied: N`.
 
-If the file is absent, both are skipped silently — a missing `learnings.md` is the normal case, not a warning.
+If the file is absent, both are skipped silently on recall — a missing `learnings.md` is the normal case, not a warning.
+
+**Capture (Step 7)** is the write side: after the report, a human-confirmed gate walks the surviving findings with you (tackle / skip / skip-all) and distills a skip with a *generalizable* reason into a new Suppression or Convention — never auto-applied, never written until you confirm the exact entry text. Approved entries are appended via `scripts/rc-learn.sh`, which creates the file (canonical §3.6 skeleton) if it's absent and is idempotent — re-confirming an existing entry is a safe no-op. See [`rules/config.md`](rules/config.md) → Learnings for the full format and lifecycle.
 
 ### Verification & Badges
 
@@ -339,6 +352,7 @@ review-council/
 │   ├── rc-invoke-provider.sh # Google-slot invocation state machine
 │   ├── rc-config.sh          # Config reader (files + env + defaults)
 │   ├── rc-static-scan.sh      # Static-analysis runner (Phase 2)
+│   ├── rc-learn.sh            # learnings.md writer — Step 7 capture (Phase 3)
 │   └── rc-lib-timeout.sh      # Shared timeout/watchdog helper
 ├── tests/
 │   ├── unit/                # bats unit tests for the scripts
@@ -386,6 +400,8 @@ sequenceDiagram
     O->>O: Promote if raised by ≥2 reviewer families OR UPHELD by a different family, drop only if REFUTED, otherwise keep it tagged unverified
 
     Note over O: Severity-First Report — badges, dissent, lens map
+
+    Note over O: Capture Gate (Step 7, if settings.learn) — human-confirmed<br/>tackle/skip/skip-all, distill into Suppression/Convention, write via rc-learn.sh
 ```
 
 ### Design Decisions

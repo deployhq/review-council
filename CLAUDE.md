@@ -24,6 +24,7 @@ Everything below is orchestrated locally inside a single Claude Code session and
 8. **Refutation pass** — Gated on `settings.verify` and budget-bounded: candidate findings are routed to an isolated, different-family verifier that returns UPHELD / REFUTED (counter-evidence) / INCONCLUSIVE. Skipped in solo-Claude mode or once `run_budget_seconds` is spent — findings are tagged `[1 reviewer · unverified]` (solo-Claude) or `[unverified]` (budget/over-cap) instead, never dropped.
 9. **Judge** — Computes a canonical fingerprint per finding (LLM and tool findings alike), deduplicates across models, recalibrates severity/confidence (promote on cross-family UPHELD, drop only on REFUTED, suppress known false positives from learnings), merges in the Tier A/B static-analysis findings, and emits a per-finding ledger.
 10. **Report** — Outputs a severity-first curated list (Critical / Important / Suggestions) with confidence badges (`[verified]` > `[cross-reviewed]` > `[1 reviewer · unverified]` > `[unverified]`), dissenting opinions where genuinely unresolved, and the lens map.
+11. **Capture Gate** (Step 7, gated on `settings.learn`) — Record-only: after the report, walks the surviving findings with the author (tackle / skip / skip-all), distills a *skip with a generalizable reason* into a Suppression (keyed by the judge's canonical fingerprint) or a Convention, and — human-confirmed only — appends it to `.review-council/learnings.md` via `scripts/rc-learn.sh`. This is the write side of the learnings loop; what it writes here, step 2 (Recall learnings) reads on the next run.
 
 ## Static Analysis (Step 2.5)
 
@@ -91,6 +92,13 @@ Round 1 is **lens-differentiated**: the dedicated Security reviewer always carri
       v
   Step 6: Severity-first report
       badges [verified] > [cross-reviewed] > [1 reviewer · unverified] > [unverified]; dissent; lens map
+      |
+      v
+  Step 7: Capture Gate (record-only, gated on settings.learn)
+      Human-confirmed: tackle/skip/skip-all -> distill generalizable skips into
+      Suppression (by fingerprint) or Convention -> rc-learn.sh writes learnings.md
+      |
+      v (feeds Step 0.5 recall on the next run)
 ```
 
 ## File Structure
@@ -101,7 +109,7 @@ review-council/
   skills/             Slash commands (run, setup, uninstall)
   agents/             Subagent definitions (Claude reviewer persona, dedicated Security reviewer)
   rules/              Orchestration logic, delegation format, provider registry, config schema (rules/config.md), static-analysis tool registry (rules/static-analysis.md)
-  scripts/            Config reader (rc-config.sh), static-analysis runner (rc-static-scan.sh), shared timeout lib (rc-lib-timeout.sh), Google-slot invocation state machine (rc-invoke-provider.sh)
+  scripts/            Config reader (rc-config.sh), static-analysis runner (rc-static-scan.sh), learnings writer (rc-learn.sh), shared timeout lib (rc-lib-timeout.sh), Google-slot invocation state machine (rc-invoke-provider.sh)
   tests/              bats unit tests for the scripts, plus Tier-2 artifact-shape fixtures (local/on-demand, never CI)
 ```
 
