@@ -330,6 +330,20 @@ REVIEW_EOF
     echo "Error: 429 Too Many Requests. Retry-After: 2" >&2
     exit 1
     ;;
+  rate-limit-int64)
+    # Retry-After at the INT64 boundary. It is ALL DIGITS, so a charset-only
+    # guard admits it — and `$((v + 1))` then WRAPS NEGATIVE, sailing past the
+    # `-lt $(remaining)` budget check and sleeping ~forever.
+    echo "Error: 429 Too Many Requests. Retry-After: 9223372036854775807" >&2
+    exit 1
+    ;;
+  rate-limit-huge)
+    # Retry-After beyond INT64. Also all digits, but here dash aborts outright
+    # with "Illegal number" under `set -e` — losing the attributed SKIPPED and
+    # the ELAPSED line the orchestrator meters its run budget with.
+    echo "Error: 429 Too Many Requests. Retry-After: 999999999999999999999999" >&2
+    exit 1
+    ;;
   timeout)
     sleep "${CDX_SLEEP:-999}"
     exit 0
@@ -996,4 +1010,54 @@ call_count() {
     run --separate-stderr "$SCRIPT" "$AGY" "$GEMINI" "$PROMPT_FILE"
   [ "$status" -eq 0 ]
   [ "$(call_count "$AGY_CALLS")" -eq 1 ]
+}
+
+@test "rate-limit: INT64-boundary Retry-After must not wrap past the budget guard" {
+  # CodeRabbit #14: `$((9223372036854775807 + 1))` wraps to a NEGATIVE number, so
+  # the `-lt $(remaining)` guard passes and the script sleeps ~forever. The value
+  # is all digits, so the charset guard never sees a problem — only a LENGTH
+  # bound applied BEFORE the arithmetic catches it.
+  RC_REVIEWER_TIMEOUT=6 CDX_MODE=rate-limit-int64 \
+    run --separate-stderr "$SCRIPT" "$CODEX" "" "$PROMPT_FILE"
+  echo "status=$status"
+  echo "output=<<$output>>"
+  echo "stderr=<<$stderr>>"
+  [ "$status" -eq 1 ]
+  echo "$output" | grep -qF 'SKIPPED: Codex unavailable'
+  echo "$output" | grep -qF 'rate limited'
+  # It must return PROMPTLY — a wrap would have slept for ~292 billion years.
+  _el="$(printf '%s\n' "$stderr" | sed -n 's/^ELAPSED: //p' | head -1)"
+  echo "elapsed=$_el"
+  [ -n "$_el" ]
+  [ "$_el" -le 6 ]
+}
+
+@test "rate-limit: oversized Retry-After is clamped, never aborts the script" {
+  # CodeRabbit #14: a value beyond INT64 makes dash exit with "Illegal number"
+  # under `set -e` — the script dies mid-flight, so the orchestrator gets no
+  # attributed SKIPPED line and no ELAPSED to meter the run budget with.
+  RC_REVIEWER_TIMEOUT=6 CDX_MODE=rate-limit-huge \
+    run --separate-stderr "$SCRIPT" "$CODEX" "" "$PROMPT_FILE"
+  echo "status=$status"
+  echo "output=<<$output>>"
+  echo "stderr=<<$stderr>>"
+  [ "$status" -eq 1 ]
+  echo "$output" | grep -qF 'rate limited'
+  # a structured result, not a shell crash
+  ! printf '%s\n' "$stderr" | grep -qi 'illegal number'
+  _el="$(printf '%s\n' "$stderr" | sed -n 's/^ELAPSED: //p' | head -1)"
+  echo "elapsed=$_el"
+  [ -n "$_el" ]
+  [ "$_el" -le 6 ]
+}
+
+@test "usage-error: RC_RATE_LIMIT_BACKOFF beyond the ceiling exits 2 (no wrap)" {
+  # The env knob shares the hole: it is validated digits-only, so an INT64
+  # boundary value would reach the same $(( )) wrap. User config gets a LOUD
+  # error (unlike a provider's Retry-After, which is clamped defensively).
+  RC_RATE_LIMIT_BACKOFF=9223372036854775807 CDX_MODE=ok \
+    run --separate-stderr "$SCRIPT" "$CODEX" "" "$PROMPT_FILE"
+  echo "status=$status"
+  echo "stderr=<<$stderr>>"
+  [ "$status" -eq 2 ]
 }

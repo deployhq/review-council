@@ -309,6 +309,11 @@ QUOTA_PATTERN='exhausted your daily quota|terminalquotaerror|individual quota re
 RATE_LIMIT_PATTERN='429|rate limit|rate_limit_exceeded|too many requests|retry.after'
 OVERLOAD_PATTERN='503|high demand'
 
+# Hard ceiling for ANY backoff. Nothing legitimate throttles for longer than an
+# hour, and RC_REVIEWER_TIMEOUT (default 600s) already bounds the useful range —
+# a backoff that doesn't fit the budget simply means "don't retry".
+RATE_LIMIT_MAX_BACKOFF=3600
+
 # Backoff before the single RATE_LIMIT retry, in seconds. A provider-stated
 # `Retry-After` in the body wins over this default (see retry_after_of). Exposed
 # as an env knob — unlike KILL_GRACE — because the bats suite must exercise the
@@ -321,11 +326,54 @@ case "$RATE_LIMIT_BACKOFF" in
     exit 2
     ;;
 esac
+# Bound it BEFORE it can reach any arithmetic. The LENGTH test must come FIRST
+# and short-circuit: `[ <24-digit> -gt N ]` is itself an arithmetic context that
+# dash rejects with "Illegal number" (exit 2), so testing the value first would
+# reintroduce the very abort this guards against. This is user config, so an
+# out-of-range value is a LOUD usage error — a provider's Retry-After is remote
+# input and gets clamped instead (see clamp_seconds).
+if [ "${#RATE_LIMIT_BACKOFF}" -gt 6 ] || [ "$RATE_LIMIT_BACKOFF" -gt "$RATE_LIMIT_MAX_BACKOFF" ]; then
+  echo "Usage: RC_RATE_LIMIT_BACKOFF must be <= $RATE_LIMIT_MAX_BACKOFF seconds" >&2
+  exit 2
+fi
+
+# clamp_seconds <value>: prints a usable, bounded second-count, or NOTHING when
+# the input isn't one (caller then falls back to its default).
+#
+# The LENGTH check before any arithmetic is the whole point — a digits-only
+# guard is NOT enough, because the dangerous values are all digits:
+#   - At the INT64 boundary, `$((9223372036854775807 + 1))` WRAPS NEGATIVE on
+#     both bash and dash. A negative is `-lt $(remaining)`, so it sails straight
+#     through the budget check and we sleep ~forever (GNU sleep accepts it; BSD
+#     sleep errors out and kills the script under `set -e` — neither is OK).
+#   - Beyond INT64, dash aborts with "Illegal number" (exit 2) while bash
+#     silently wraps to an arbitrary value. So the failure is both
+#     platform-dependent AND value-dependent: 999999999999999999999999 happens
+#     to wrap large under bash and get caught, but a neighbouring value could
+#     wrap small and pass. Never let either reach `$(( ))`.
+# 7+ digits (>= 1,000,000s, ~11 days) is never a real backoff, so length alone
+# is a safe and total discriminator.
+clamp_seconds() {
+  _cs_v="$1"
+  case "$_cs_v" in
+    '' | *[!0-9]*) return 0 ;;
+  esac
+  if [ "${#_cs_v}" -gt 6 ]; then
+    printf '%s' "$RATE_LIMIT_MAX_BACKOFF"
+    return 0
+  fi
+  if [ "$_cs_v" -gt "$RATE_LIMIT_MAX_BACKOFF" ]; then
+    printf '%s' "$RATE_LIMIT_MAX_BACKOFF"
+    return 0
+  fi
+  printf '%s' "$_cs_v"
+}
 
 # retry_after_of <out-file>: prints the provider's stated Retry-After value in
 # whole seconds, or nothing when it didn't state one. Lowercases via `tr` rather
 # than using a case-insensitive sed flag (`I` is GNU-only; BSD/macOS sed lacks
-# it), keeping this portable.
+# it), keeping this portable. The result is UNTRUSTED remote input — always pass
+# it through clamp_seconds before using it.
 retry_after_of() {
   tr '[:upper:]' '[:lower:]' <"$1" 2>/dev/null |
     sed -n 's/.*retry[ _-]*after[":= ][^0-9]*\([0-9][0-9]*\).*/\1/p' |
@@ -642,13 +690,18 @@ case "$primary_class" in
     # their paid quota is gone and to stop trying; "rate limited" tells them to
     # re-run. The old shared bucket said the former for a 60-second blip.
     primary_note="rate limited"
-    _rl_wait="$(retry_after_of "$primary_out")"
-    case "$_rl_wait" in
-      '' | *[!0-9]*) _rl_wait="$RATE_LIMIT_BACKOFF" ;;
-    esac
+    # clamp_seconds bounds the provider's stated Retry-After (untrusted remote
+    # input) to RATE_LIMIT_MAX_BACKOFF *before* it can reach `$(( ))`, and prints
+    # nothing when the body stated no usable value — fall back to the default.
+    _rl_wait="$(clamp_seconds "$(retry_after_of "$primary_out")")"
+    if [ -z "$_rl_wait" ]; then
+      _rl_wait="$RATE_LIMIT_BACKOFF"
+    fi
     # Retry only if the backoff AND a non-trivial attempt both still fit in what
-    # is left of the budget. This also bounds a hostile/garbage `Retry-After:
-    # 99999` — it simply never fits, so we report honestly instead of sleeping.
+    # is left of the budget. A clamped-but-large backoff (e.g. a provider asking
+    # for an hour) simply never fits, so we report honestly instead of sleeping.
+    # Both operands are now guaranteed <= RATE_LIMIT_MAX_BACKOFF, so this
+    # arithmetic cannot overflow.
     if [ "$((_rl_wait + 1))" -lt "$(remaining)" ]; then
       if [ "$_rl_wait" -gt 0 ]; then
         sleep "$_rl_wait"
