@@ -311,6 +311,39 @@ REVIEW_EOF
     echo "Error: 429 Too Many Requests -- TerminalQuotaError" >&2
     exit 1
     ;;
+  rate-limit)
+    # A BARE 429 with NO terminal-quota phrase: a tokens-per-minute throttle
+    # that clears in seconds. Must classify RATE_LIMIT (soft, retryable) —
+    # NOT QUOTA, which permanently kills the slot for the whole run.
+    echo "Error: 429 Too Many Requests" >&2
+    exit 1
+    ;;
+  rate-limit-hard)
+    # 429 AND a terminal phrase. OpenAI returns HTTP 429 for BOTH a per-minute
+    # throttle AND a real insufficient_quota, so the HARD check must win the
+    # precedence. This is the guard that stops the fix from over-correcting.
+    echo "Error: 429 - insufficient_quota: You exceeded your current quota." >&2
+    exit 1
+    ;;
+  rate-limit-retryafter)
+    # A throttle that states its own backoff.
+    echo "Error: 429 Too Many Requests. Retry-After: 2" >&2
+    exit 1
+    ;;
+  rate-limit-int64)
+    # Retry-After at the INT64 boundary. It is ALL DIGITS, so a charset-only
+    # guard admits it — and `$((v + 1))` then WRAPS NEGATIVE, sailing past the
+    # `-lt $(remaining)` budget check and sleeping ~forever.
+    echo "Error: 429 Too Many Requests. Retry-After: 9223372036854775807" >&2
+    exit 1
+    ;;
+  rate-limit-huge)
+    # Retry-After beyond INT64. Also all digits, but here dash aborts outright
+    # with "Illegal number" under `set -e` — losing the attributed SKIPPED and
+    # the ELAPSED line the orchestrator meters its run budget with.
+    echo "Error: 429 Too Many Requests. Retry-After: 999999999999999999999999" >&2
+    exit 1
+    ;;
   timeout)
     sleep "${CDX_SLEEP:-999}"
     exit 0
@@ -866,5 +899,165 @@ call_count() {
 @test "probe usage-error: --probe with wrong arg count exits 2" {
   run "$SCRIPT" --probe "$CODEX"
   echo "status=$status"
+  [ "$status" -eq 2 ]
+}
+
+# ---------------------------------------------------------------------------
+# Rate limit (transient) vs. quota (terminal)
+#
+# QUOTA_PATTERN used to bundle a bare `429`/`rate limit` together with the real
+# terminal phrasings, so a 60-second tokens-per-minute throttle classified as
+# QUOTA -> "quota exhausted" -> a HARD skip: no retry, no MCP fallback, slot
+# gone for the whole run. Observed live: Codex reviewed fine in Round 1, was
+# "quota exhausted" for the Step-4 refutation ~2min later, then answered a
+# direct probe 6s afterwards. The council's own Round-1 -> refutation burst is
+# what trips the per-minute limit, so it recurs on any large diff.
+#
+# Precedence is the crux: OpenAI returns HTTP 429 for BOTH a throttle AND a real
+# insufficient_quota, so HARD must be checked BEFORE soft.
+# ---------------------------------------------------------------------------
+
+@test "rate-limit: bare 429 is retried once and succeeds -> TOOL: Codex" {
+  RC_REVIEWER_TIMEOUT=6 RC_RATE_LIMIT_BACKOFF=0 \
+    CDX_MODE_1=rate-limit CDX_MODE_2=ok \
+    run --separate-stderr "$SCRIPT" "$CODEX" "" "$PROMPT_FILE"
+  echo "status=$status"
+  echo "output=<<$output>>"
+  [ "$status" -eq 0 ]
+  case "$output" in
+  "TOOL: Codex"*) : ;;
+  *) echo "expected TOOL: Codex (a throttle must not kill the slot)" && return 1 ;;
+  esac
+  # exactly two calls: the throttled first try + the one retry
+  [ "$(call_count "$CDX_CALLS")" -eq 2 ]
+}
+
+@test "rate-limit-precedence: 429 WITH insufficient_quota stays QUOTA (hard, no retry)" {
+  # The guard against over-correcting: a real hard quota that happens to arrive
+  # over HTTP 429 must NOT be softened into a retryable throttle.
+  RC_REVIEWER_TIMEOUT=6 RC_RATE_LIMIT_BACKOFF=0 CDX_MODE=rate-limit-hard \
+    run --separate-stderr "$SCRIPT" "$CODEX" "" "$PROMPT_FILE"
+  echo "output=<<$output>>"
+  [ "$status" -eq 1 ]
+  echo "$output" | grep -qF 'quota exhausted'
+  ! echo "$output" | grep -qF 'rate limited'
+  # hard = terminal: exactly ONE call, no retry wasted
+  [ "$(call_count "$CDX_CALLS")" -eq 1 ]
+}
+
+@test "rate-limit: retry that is throttled again -> 'rate limited on retry', within one budget" {
+  RC_REVIEWER_TIMEOUT=6 RC_RATE_LIMIT_BACKOFF=0 CDX_MODE=rate-limit \
+    run --separate-stderr "$SCRIPT" "$CODEX" "" "$PROMPT_FILE"
+  echo "output=<<$output>>"
+  echo "stderr=<<$stderr>>"
+  [ "$status" -eq 1 ]
+  echo "$output" | grep -qF 'SKIPPED: Codex unavailable'
+  echo "$output" | grep -qF 'rate limited on retry'
+  # It must NOT lie about the cause — "quota exhausted" tells the user to stop
+  # trying; "rate limited" tells them to re-run.
+  ! echo "$output" | grep -qF 'quota exhausted'
+  [ "$(call_count "$CDX_CALLS")" -eq 2 ]
+  # first-try + backoff + retry can never exceed ONE budget
+  _el="$(printf '%s\n' "$stderr" | sed -n 's/^ELAPSED: //p' | head -1)"
+  echo "elapsed=$_el"
+  [ -n "$_el" ]
+  [ "$_el" -le 6 ]
+}
+
+@test "rate-limit: the note is never 'quota exhausted' (attribution must not lie)" {
+  RC_REVIEWER_TIMEOUT=6 RC_RATE_LIMIT_BACKOFF=0 CDX_MODE_1=rate-limit CDX_MODE_2=auth \
+    run --separate-stderr "$SCRIPT" "$CODEX" "" "$PROMPT_FILE"
+  [ "$status" -eq 1 ]
+  # the retry's REAL class is preserved, exactly as the fast-empty retry does
+  echo "$output" | grep -qF 'auth failure on retry'
+  ! echo "$output" | grep -qF 'quota exhausted'
+}
+
+@test "rate-limit: a throttle body is never a valid RESULT" {
+  # A rate-limit body carries no Findings/Overall Assessment headings and no
+  # verdict line, so it must never satisfy the OK-guard and be returned as a
+  # review.
+  RC_REVIEWER_TIMEOUT=6 RC_RATE_LIMIT_BACKOFF=0 CDX_MODE=rate-limit \
+    run --separate-stderr "$SCRIPT" "$CODEX" "" "$PROMPT_FILE"
+  [ "$status" -eq 1 ]
+  ! echo "$output" | grep -q '^TOOL:'
+}
+
+@test "rate-limit: Retry-After in the body is honoured as the backoff" {
+  # RC_RATE_LIMIT_BACKOFF is deliberately NOT set here: the provider stated
+  # "Retry-After: 2", so the wait must come from the body, not the default.
+  RC_REVIEWER_TIMEOUT=30 CDX_MODE_1=rate-limit-retryafter CDX_MODE_2=ok \
+    run --separate-stderr "$SCRIPT" "$CODEX" "" "$PROMPT_FILE"
+  echo "output=<<$output>>"
+  echo "stderr=<<$stderr>>"
+  [ "$status" -eq 0 ]
+  case "$output" in
+  "TOOL: Codex"*) : ;;
+  *) echo "expected TOOL: Codex after honouring Retry-After" && return 1 ;;
+  esac
+  # the stated 2s backoff is accounted for in the reported elapsed (it is real
+  # wall-clock), and it must not have used the 20s default
+  _el="$(printf '%s\n' "$stderr" | sed -n 's/^ELAPSED: //p' | head -1)"
+  echo "elapsed=$_el"
+  [ "$_el" -ge 2 ]
+  [ "$_el" -lt 20 ]
+}
+
+@test "rate-limit: agy 'Individual quota reached' still classifies QUOTA (no regression)" {
+  # deployhq#1043 regression guard, re-asserted after splitting the patterns:
+  # agy's real terminal phrasing must stay HARD.
+  RC_RATE_LIMIT_BACKOFF=0 AGY_MODE=quota-individual GEM_MODE=ok \
+    run --separate-stderr "$SCRIPT" "$AGY" "$GEMINI" "$PROMPT_FILE"
+  [ "$status" -eq 0 ]
+  [ "$(call_count "$AGY_CALLS")" -eq 1 ]
+}
+
+@test "rate-limit: INT64-boundary Retry-After must not wrap past the budget guard" {
+  # CodeRabbit #14: `$((9223372036854775807 + 1))` wraps to a NEGATIVE number, so
+  # the `-lt $(remaining)` guard passes and the script sleeps ~forever. The value
+  # is all digits, so the charset guard never sees a problem — only a LENGTH
+  # bound applied BEFORE the arithmetic catches it.
+  RC_REVIEWER_TIMEOUT=6 CDX_MODE=rate-limit-int64 \
+    run --separate-stderr "$SCRIPT" "$CODEX" "" "$PROMPT_FILE"
+  echo "status=$status"
+  echo "output=<<$output>>"
+  echo "stderr=<<$stderr>>"
+  [ "$status" -eq 1 ]
+  echo "$output" | grep -qF 'SKIPPED: Codex unavailable'
+  echo "$output" | grep -qF 'rate limited'
+  # It must return PROMPTLY — a wrap would have slept for ~292 billion years.
+  _el="$(printf '%s\n' "$stderr" | sed -n 's/^ELAPSED: //p' | head -1)"
+  echo "elapsed=$_el"
+  [ -n "$_el" ]
+  [ "$_el" -le 6 ]
+}
+
+@test "rate-limit: oversized Retry-After is clamped, never aborts the script" {
+  # CodeRabbit #14: a value beyond INT64 makes dash exit with "Illegal number"
+  # under `set -e` — the script dies mid-flight, so the orchestrator gets no
+  # attributed SKIPPED line and no ELAPSED to meter the run budget with.
+  RC_REVIEWER_TIMEOUT=6 CDX_MODE=rate-limit-huge \
+    run --separate-stderr "$SCRIPT" "$CODEX" "" "$PROMPT_FILE"
+  echo "status=$status"
+  echo "output=<<$output>>"
+  echo "stderr=<<$stderr>>"
+  [ "$status" -eq 1 ]
+  echo "$output" | grep -qF 'rate limited'
+  # a structured result, not a shell crash
+  ! printf '%s\n' "$stderr" | grep -qi 'illegal number'
+  _el="$(printf '%s\n' "$stderr" | sed -n 's/^ELAPSED: //p' | head -1)"
+  echo "elapsed=$_el"
+  [ -n "$_el" ]
+  [ "$_el" -le 6 ]
+}
+
+@test "usage-error: RC_RATE_LIMIT_BACKOFF beyond the ceiling exits 2 (no wrap)" {
+  # The env knob shares the hole: it is validated digits-only, so an INT64
+  # boundary value would reach the same $(( )) wrap. User config gets a LOUD
+  # error (unlike a provider's Retry-After, which is clamped defensively).
+  RC_RATE_LIMIT_BACKOFF=9223372036854775807 CDX_MODE=ok \
+    run --separate-stderr "$SCRIPT" "$CODEX" "" "$PROMPT_FILE"
+  echo "status=$status"
+  echo "stderr=<<$stderr>>"
   [ "$status" -eq 2 ]
 }
