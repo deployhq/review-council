@@ -48,6 +48,12 @@
 #                            slot, in seconds. Default 600.
 #   RC_HEALTH_PROBE_TIMEOUT  probe mode: short per-tool cap, in seconds.
 #                            Default 20.
+#   RC_RATE_LIMIT_BACKOFF    seconds to wait before the single RATE_LIMIT retry.
+#                            Default 20. A provider-stated `Retry-After` in the
+#                            response body wins over it. The backoff is charged
+#                            to the reported ELAPSED, and the retry is time-boxed
+#                            to the remaining budget, so first-try + backoff +
+#                            retry never exceed one RC_REVIEWER_TIMEOUT.
 #   RC_GOOGLE_ADD_DIR        optional, agy-only: appends --add-dir "<val>".
 #   RC_GOOGLE_MODEL          optional, agy-only: appends --model "<val>".
 #
@@ -267,7 +273,11 @@ build_and_run() {
 #                  "oauth". Anchoring to heading lines (not bare substrings)
 #                  stops an error page that merely echoes a prompt mentioning
 #                  those words from false-positiving as a valid review.
-#   3. AUTH -> QUOTA -> (exhausted+quota) -> OVERLOAD — hard failures.
+#   3. AUTH -> QUOTA -> (exhausted+quota) -> RATE_LIMIT -> OVERLOAD.
+#                  QUOTA (terminal) MUST precede RATE_LIMIT (transient): a
+#                  provider returns HTTP 429 for both a per-minute throttle and
+#                  a real insufficient_quota, so a 429 carrying a terminal
+#                  phrase stays hard while a bare 429 is soft and retryable.
 #   4. EMPTY     — anything else (empty/whitespace or missing a review section).
 # ---------------------------------------------------------------------------
 
@@ -275,12 +285,52 @@ build_and_run() {
 # substrings (they false-positived on real reviews discussing login/OAuth code)
 # in favor of specific auth-failure phrasings.
 AUTH_PATTERN='no longer supported|not authenticated|please migrate to the antigravity|secret keyring is locked|ineligibletiererror|dasher_user|not eligible for gemini code assist|invalid api key|not logged in|login required|please log in|oauth error|authentication failed|auth error'
+# QUOTA is TERMINAL: the provider will not serve us again until a reset or an
+# upgrade, so the slot is dead for this run — no retry, and skills/run/SKILL.md
+# Step 3 treats it as a HARD reason (not even the MCP fallback is tried).
+#
 # `individual quota reached` / `upgrade your subscription` are agy's real quota
-# phrasing (Antigravity), distinct from the generic 429/TerminalQuotaError —
-# without them a quota-dead agy classifies EMPTY, wastes a fast-empty retry, and
-# reports a misleading "empty output after retry" (seen live on deployhq#1043).
-QUOTA_PATTERN='429|exhausted your daily quota|terminalquotaerror|rate limit|individual quota reached|upgrade your subscription'
+# phrasing (Antigravity), distinct from the generic TerminalQuotaError — without
+# them a quota-dead agy classifies EMPTY, wastes a fast-empty retry, and reports
+# a misleading "empty output after retry" (seen live on deployhq#1043).
+QUOTA_PATTERN='exhausted your daily quota|terminalquotaerror|individual quota reached|upgrade your subscription|insufficient_quota|exceeded your current quota'
+# RATE_LIMIT is TRANSIENT: a tokens-per-minute throttle that clears in seconds.
+# It used to live in QUOTA_PATTERN, which meant a 60-second blip permanently
+# removed a reviewer from the run and told the user their paid quota was gone.
+# Observed live: Codex reviewed fine in Round 1, reported "quota exhausted" for
+# the Step-4 refutation ~2 minutes later, then answered a direct probe 6s after
+# that. The council's own Round-1 -> refutation burst is what trips the limit,
+# so it recurs on any large diff.
+#
+# PRECEDENCE IS LOAD-BEARING: classify() checks QUOTA *before* RATE_LIMIT
+# because OpenAI returns HTTP 429 for BOTH a per-minute throttle AND a real
+# `insufficient_quota`. A bare 429 with no terminal phrase is soft; a 429
+# carrying one is hard.
+RATE_LIMIT_PATTERN='429|rate limit|rate_limit_exceeded|too many requests|retry.after'
 OVERLOAD_PATTERN='503|high demand'
+
+# Backoff before the single RATE_LIMIT retry, in seconds. A provider-stated
+# `Retry-After` in the body wins over this default (see retry_after_of). Exposed
+# as an env knob — unlike KILL_GRACE — because the bats suite must exercise the
+# retry path without a real 20s sleep, and because a user hitting an unusually
+# aggressive throttle may want to lengthen it.
+RATE_LIMIT_BACKOFF="${RC_RATE_LIMIT_BACKOFF:-20}"
+case "$RATE_LIMIT_BACKOFF" in
+  '' | *[!0-9]*)
+    echo "Usage: RC_RATE_LIMIT_BACKOFF must be a non-negative integer (seconds)" >&2
+    exit 2
+    ;;
+esac
+
+# retry_after_of <out-file>: prints the provider's stated Retry-After value in
+# whole seconds, or nothing when it didn't state one. Lowercases via `tr` rather
+# than using a case-insensitive sed flag (`I` is GNU-only; BSD/macOS sed lacks
+# it), keeping this portable.
+retry_after_of() {
+  tr '[:upper:]' '[:lower:]' <"$1" 2>/dev/null |
+    sed -n 's/.*retry[ _-]*after[":= ][^0-9]*\([0-9][0-9]*\).*/\1/p' |
+    head -1
+}
 
 # A Step-4 REFUTATION verdict line has the shape (rules/delegation-format.md's
 # Refutation Template, "Return one line per finding"):
@@ -336,12 +386,21 @@ classify() {
     return 0
   fi
 
+  # QUOTA (terminal) is checked BEFORE RATE_LIMIT (transient), and the order is
+  # load-bearing: OpenAI returns HTTP 429 for both a per-minute throttle and a
+  # real `insufficient_quota`, so a 429 that also carries a terminal phrase must
+  # stay hard. A bare 429 falls through to RATE_LIMIT below.
   if grep -qiE "$QUOTA_PATTERN" "$_cl_out" 2>/dev/null; then
     CLASS=QUOTA
     return 0
   fi
   if grep -qi 'exhausted your' "$_cl_out" 2>/dev/null && grep -qi 'quota' "$_cl_out" 2>/dev/null; then
     CLASS=QUOTA
+    return 0
+  fi
+
+  if grep -qiE "$RATE_LIMIT_PATTERN" "$_cl_out" 2>/dev/null; then
+    CLASS=RATE_LIMIT
     return 0
   fi
 
@@ -475,6 +534,15 @@ probe_bin() {
     PROBE_REASON="quota exhausted"
     return 0
   fi
+  # A transient throttle is NOT positive evidence of a dead provider. The probe
+  # is fail-OPEN by design — only positive hard-fail evidence drops a slot — and
+  # dropping a reviewer for a 60-second blip is the exact bug the QUOTA /
+  # RATE_LIMIT split fixes. Same QUOTA-before-RATE_LIMIT precedence as classify().
+  if grep -qiE "$RATE_LIMIT_PATTERN" "$_pb_out" 2>/dev/null; then
+    PROBE_VERDICT=INCONCLUSIVE
+    PROBE_REASON="rate limited"
+    return 0
+  fi
   if grep -qiE "$OVERLOAD_PATTERN" "$_pb_out" 2>/dev/null; then
     PROBE_VERDICT=UNHEALTHY
     PROBE_REASON="overloaded"
@@ -564,6 +632,49 @@ case "$primary_class" in
   QUOTA)
     primary_note="quota exhausted"
     ;;
+  RATE_LIMIT)
+    # A TRANSIENT throttle, not a terminal quota. Retry ONCE after a backoff,
+    # time-boxed to the REMAINING budget (T - spent) and never a fresh
+    # RC_REVIEWER_TIMEOUT — so first-try + backoff + retry can never exceed one
+    # budget, exactly like the fast-empty retry below.
+    #
+    # The note text matters as much as the retry: "quota exhausted" tells a user
+    # their paid quota is gone and to stop trying; "rate limited" tells them to
+    # re-run. The old shared bucket said the former for a 60-second blip.
+    primary_note="rate limited"
+    _rl_wait="$(retry_after_of "$primary_out")"
+    case "$_rl_wait" in
+      '' | *[!0-9]*) _rl_wait="$RATE_LIMIT_BACKOFF" ;;
+    esac
+    # Retry only if the backoff AND a non-trivial attempt both still fit in what
+    # is left of the budget. This also bounds a hostile/garbage `Retry-After:
+    # 99999` — it simply never fits, so we report honestly instead of sleeping.
+    if [ "$((_rl_wait + 1))" -lt "$(remaining)" ]; then
+      if [ "$_rl_wait" -gt 0 ]; then
+        sleep "$_rl_wait"
+      fi
+      # The backoff is real wall-clock. Charge it to `spent` so remaining() and
+      # the ELAPSED line the orchestrator meters its run budget with stay honest.
+      spent=$((spent + _rl_wait))
+      invoke_once "$primary_bin" "$(remaining)"
+      retry_class="$INVOKE_CLASS"
+      retry_out="$INVOKE_OUT"
+      retry_resolved="$INVOKE_BIN"
+      if [ "$retry_class" = "OK" ]; then
+        succeed "$retry_resolved" "$retry_out"
+      fi
+      # Preserve the retry's REAL class, same as the fast-empty retry does.
+      case "$retry_class" in
+        AUTH) primary_note="auth failure on retry" ;;
+        QUOTA) primary_note="quota exhausted on retry" ;;
+        RATE_LIMIT) primary_note="rate limited on retry" ;;
+        OVERLOAD) primary_note="overloaded on retry" ;;
+        TIMEOUT) primary_note="timed out on retry" ;;
+        ABSENT) primary_note="absent on retry" ;;
+        *) primary_note="empty output after retry" ;;
+      esac
+    fi
+    ;;
   OVERLOAD)
     primary_note="overloaded"
     ;;
@@ -625,6 +736,9 @@ case "$fb_class" in
   ABSENT) fb_note="absent" ;;
   AUTH) fb_note="ineligible (auth/DASHER)" ;;
   QUOTA) fb_note="quota exhausted" ;;
+  # The fallback is never retried (rules/providers.md), so a throttled fallback
+  # is reported as-is — but still labelled honestly, never "quota exhausted".
+  RATE_LIMIT) fb_note="rate limited" ;;
   OVERLOAD) fb_note="overloaded" ;;
   TIMEOUT) fb_note="timed out" ;;
   EMPTY) fb_note="empty output" ;;
