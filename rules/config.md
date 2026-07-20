@@ -3,7 +3,11 @@
 Review Council reads an optional per-repo config file that controls the reviewer roster,
 the review lenses, and run settings. Configuration is **declarative data** — it is parsed,
 never executed. There are no arbitrary-command reviewers or hooks; a config file can only
-select from the built-in providers/lenses and set the documented knobs.
+select from the built-in providers/lenses and set the documented knobs. It is read from the
+**reviewed repo's** directory, so treat every value as untrusted: any value that can reach a
+command line or query expression is charset-validated at the reader before it is emitted (see
+`valid_modelslug` and CLAUDE.md → Security Invariants). *Parsed, never executed* is enforced
+there.
 
 Everything here is optional. With **no config file at all**, the plugin runs on built-in
 defaults (plus any `RC_*` environment overrides) — byte-identical to its pre-config

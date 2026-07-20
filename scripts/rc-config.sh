@@ -128,12 +128,38 @@ valid_str() {
   return 0
 }
 
+# valid_modelslug <val>: a reviewer model slug. STRICTER than valid_str because
+# a model value is interpolated UNQUOTED into a shell command the orchestrator
+# composes (skills/run/SKILL.md's `RC_GOOGLE_MODEL=<model>` template et al.),
+# in the orchestrator's own session, OUTSIDE any sandbox. A control-chars-only
+# guard let spaces, `;`, `|`, backticks and `$(...)` through, so a repo-committed
+# config.yml could reach command position — and double-quoting the template does
+# NOT help, since `$(...)` expands inside double quotes. The reader is therefore
+# the only real defense: reject anything outside the slug allowlist here.
+#
+# Allowlist (charset): letters, digits, and . _ : ~ @ / - — admits every real
+# OpenRouter/OpenAI/Google slug: gemini-2.5-pro, sonar, moonshotai/kimi-k2.7-code,
+# ~moonshotai/kimi-latest, openai/gpt-4o:free. Anchor: the first character must
+# be alphanumeric, `~`, or `@`, so a leading `-` (a would-be CLI flag) is
+# rejected. Empty is allowed — it means "use the tool's own default", exactly as
+# the old `str` kind treated it (so an explicit empty model never regresses).
+valid_modelslug() {
+  [ -z "$1" ] && return 0
+  [ "${#1}" -le 128 ] || return 1
+  case "$1" in
+    *[!A-Za-z0-9._:~@/-]*) return 1 ;;  # any char outside the allowlist
+    [!A-Za-z0-9~@]*) return 1 ;;        # leading char must be alnum / ~ / @
+  esac
+  return 0
+}
+
 # valid_kind <val> <kind>: bool|posint|str
 valid_kind() {
   case "$2" in
     bool) valid_bool "$1" ;;
     posint) valid_posint "$1" ;;
     str) valid_str "$1" ;;
+    modelslug) valid_modelslug "$1" ;;
   esac
 }
 
@@ -180,7 +206,7 @@ emit_reviewer() {
   _er_p="$1"
   _er_defmodel="$2"
   _er_enabled="$(resolve ".reviewers.$_er_p.enabled" "true" bool "reviewer.$_er_p.enabled")"
-  _er_model="$(resolve ".reviewers.$_er_p.model" "$_er_defmodel" str "reviewer.$_er_p.model")"
+  _er_model="$(resolve ".reviewers.$_er_p.model" "$_er_defmodel" modelslug "reviewer.$_er_p.model")"
   printf 'reviewer.%s.enabled=%s\n' "$_er_p" "$_er_enabled"
   printf 'reviewer.%s.model=%s\n' "$_er_p" "$_er_model"
 }
