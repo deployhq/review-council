@@ -113,6 +113,12 @@ review-council/
   tests/              bats unit tests for the scripts, plus Tier-2 artifact-shape fixtures (local/on-demand, never CI)
 ```
 
+## Security Invariants
+
+**Config is read from the *reviewed repo's* working directory, so every config value is attacker-controlled** — a repository you review can commit a `.review-council/config.yml`. Treat it as untrusted input, not trusted settings.
+
+**Any config value that can reach a command line, a query/`yq` expression, or a shell env-assignment must be charset-validated at the reader (`scripts/rc-config.sh`) before it is emitted.** The reader is the only deterministic layer: downstream, values are interpolated into command lines an LLM composes, and quoting does not save you (`$(...)` and backticks expand inside double quotes too). Validate at the reader, reject to the key's default with a stderr note — never emit a raw value and hope a later consumer quotes it. Follow the `valid_modelslug` pattern (allowlist the safe charset; reject everything else). This is the operational form of `rules/config.md`'s "configuration is declarative data — parsed, never executed": *parsed* means validated here, so it can never become *executed* downstream.
+
 ## Versioning
 
 Bump the `version` field in `.claude-plugin/plugin.json` whenever you ship a bug fix or new feature (semver: patch for fixes, minor for features, major for breaking changes). `marketplace.json` inherits the `version` from `plugin.json` via strict-mode merge — do not duplicate the version there. Pair the bump with a `chore: bump version to X.Y.Z` commit after the change.
