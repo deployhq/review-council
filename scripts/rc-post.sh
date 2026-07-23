@@ -152,9 +152,10 @@ do_post() {
 
   # Who we post as. Used to only ever update OUR OWN prior comment: the marker is
   # a public string, so without this a third party could plant a marked comment
-  # and get it edited under our token (or, in bot mode, force an endless spam
-  # loop). If the identity can't be resolved (e.g. a GitHub App installation
-  # token can't call /user), fall back to marker-only matching.
+  # and get it edited under our token (or force an endless spam loop). If the
+  # identity can't be resolved (e.g. a GitHub App installation token cannot call
+  # /user), fall back to matching only BOT-authored comments — on that path we are
+  # a bot, and a human attacker's planted comment is type "User", so it's ignored.
   _me="$(gh_post api user 2>/dev/null | jq -r '.login // empty' 2>/dev/null)" || _me=""
 
   # List existing comments. A FAILED list must NOT look like an empty list: if we
@@ -172,7 +173,8 @@ do_post() {
   # to "no match" / fail-soft, never abort the script under `set -e`.
   _id="$(printf '%s' "$_comments" | jq -s --arg m "$MARKER" --arg me "$_me" '
     [ .[] | arrays | .[]
-      | select(.body != null and (.body | contains($m)) and ($me == "" or .user.login == $me)) ]
+      | select(.body != null and (.body | contains($m))
+          and (if $me == "" then (.user.type == "Bot") else (.user.login == $me) end)) ]
     | max_by(.id) | .id // empty' 2>/dev/null)" || _id=""
 
   if [ -n "$_id" ]; then

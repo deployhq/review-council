@@ -59,7 +59,7 @@ case "$1" in
       *"-X POST"*)   cat >"$POSTBODY";  printf '%s\n' "$POST_RESP" ;;
       *"-X PATCH"*)  cat >"$PATCHBODY"; printf '%s\n' "$PATCH_RESP" ;;
       *comments*)    [ -n "${LIST_FAIL:-}" ] && exit 3; cat "$COMMENTS" ;;
-      *user*)        printf '{"login":"rc-bot"}\n' ;;
+      *user*)        [ -n "${USER_FAIL:-}" ] && exit 1; printf '{"login":"rc-bot"}\n' ;;
       *)             printf '{}\n' ;;
     esac
     ;;
@@ -149,6 +149,25 @@ EOF
   # comment edited under our token. We author as 'rc-bot' (the fake's gh api user).
   printf '[{"id":42,"user":{"login":"attacker"},"body":"<!-- rc:report --> pwn"}]\n' >"$COMMENTS"
   PATH="$SANDBOX" run "$SCRIPT" post 5 "$BODY"
+  [ "$status" -eq 0 ]
+  has "action=created"
+  ! grep -qF -- "issues/comments/42" "$GHLOG"
+}
+
+@test "post: unresolved identity (App token) matches only a BOT-authored marked comment" {
+  # gh api user fails (installation token) -> _me empty -> fall back to Bot-typed.
+  printf '[{"id":42,"user":{"login":"review-council[bot]","type":"Bot"},"body":"<!-- rc:report -->"}]\n' >"$COMMENTS"
+  USER_FAIL=1 PATH="$SANDBOX" run "$SCRIPT" post 5 "$BODY"
+  [ "$status" -eq 0 ]
+  has "action=updated"
+  logged "issues/comments/42"
+}
+
+@test "post: unresolved identity ignores a USER-authored marked comment (no hijack)" {
+  # A human attacker plants a marked comment (type User); with _me empty it must
+  # NOT be selected — we create our own instead.
+  printf '[{"id":42,"user":{"login":"attacker","type":"User"},"body":"<!-- rc:report --> pwn"}]\n' >"$COMMENTS"
+  USER_FAIL=1 PATH="$SANDBOX" run "$SCRIPT" post 5 "$BODY"
   [ "$status" -eq 0 ]
   has "action=created"
   ! grep -qF -- "issues/comments/42" "$GHLOG"
