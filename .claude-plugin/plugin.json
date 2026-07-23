@@ -1,7 +1,7 @@
 {
   "name": "review-council",
   "description": "Multi-agent code review for Claude Code. Multiple AI models review your PR, code, or plan independently; a cross-family refutation pass and an active judge then distill the findings into a curated, severity-ranked list of what actually needs changing.",
-  "version": "0.9.4",
+  "version": "0.10.0",
   "author": {
     "name": "DeployHQ",
     "url": "https://github.com/deployhq"

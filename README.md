@@ -13,7 +13,7 @@ Single-model code review has blind spots. Different models catch different thing
 - **Genuine disagreements** (a reviewer's counter-evidence refutes another's finding, or an unresolved conflict survives the judge) = documented as a dropped/refuted finding or a Dissenting Opinion, not just discarded
 - **Learns from your triage** — a human-confirmed capture gate after each report distills your skip decisions into persisted false-positive suppressions & conventions in a committed `learnings.md`, recalled automatically on future runs
 
-The result: fewer false positives, broader coverage, and a clear priority order. Review Council is orchestrated locally, inside a single Claude Code session, and only ever prints a report — it never pushes commits, opens PRs, or posts PR comments on its own (see [GitHub Actions (Roadmap)](#github-actions-roadmap) for a possible future CI mode). Note the data egress this implies: when Codex, Google, or Perplexity are enabled, the gathered review context (diff, file contents, etc.) is sent to those third-party tools/APIs — only Claude (the native subagent) stays fully local. Codex's own shell access during review is sandboxed read-only (`codex exec --sandbox read-only`) — it can read the repo but cannot write to it or reach the network.
+The result: fewer false positives, broader coverage, and a clear priority order. Review Council is orchestrated locally, inside a single Claude Code session, and by default only ever prints a report — it never pushes commits or posts to a PR on its own. Optionally (off by default) it can post a single review-digest comment to the PR after you confirm — see [Posting to PRs](#posting-to-prs). Note the data egress this implies: when Codex, Google, or Perplexity are enabled, the gathered review context (diff, file contents, etc.) is sent to those third-party tools/APIs — only Claude (the native subagent) stays fully local. Codex's own shell access during review is sandboxed read-only (`codex exec --sandbox read-only`) — it can read the repo but cannot write to it or reach the network.
 
 ## Quick Start
 
@@ -437,6 +437,24 @@ sequenceDiagram
 **Why two budget caps?** `reviewer_timeout_seconds` bounds each individual CLI/API call so one stuck provider can't hang the run. `run_budget_seconds` bounds the whole run and degrades gracefully — shrinking or skipping the refutation pass rather than aborting — once the measured elapsed time adds up (e.g. a slow `agy` cold start plus several reviewers).
 
 **Why filter aggressively?** The biggest failure mode of AI code review is noise — too many low-value findings. Review Council filters: confidence from cross-family verification (not just raw agreement), severity-first ordering, and explicit rules against style nitpicks.
+
+## Posting to PRs
+
+By default Review Council is **report-only**. You can opt in to have it post a single **review-digest comment** to the pull request — a summary of the AI's run, not an inline line-by-line review. The comment has three sections: **what was found (and by whom)**, **what the council decided**, and **what was fixed** (your triage). Re-running updates the *same* comment in place, so there is no spam.
+
+Turn it on in `.review-council/config.yml` (or `config.local.yml`):
+
+```yaml
+pr_comments:
+  enabled: true                  # default false
+  bot_token_env: RC_PR_BOT_TOKEN # optional; see "Identity" below
+```
+
+**It never posts on its own.** After the report you triage each finding (fix / defer / won't-fix), review the composed digest, and explicitly confirm before anything is posted. If the branch has no open PR, it offers to open a **draft** so the digest has a home. Nothing is posted if you decline.
+
+**Identity.** With no token configured, the comment posts under **your own authenticated `gh` account**, clearly marked as an automated Review Council comment (not a personal one). To post under a distinct identity instead, put a token in the env var named by `bot_token_env` (default `RC_PR_BOT_TOKEN`) — a bot account's fine-grained PAT (posts as that bot user) or a GitHub App installation token (posts as `review-council[bot]`). The token only ever comes from your environment, never from committed config, and the target PR is always taken from your local git — a repo you review can't redirect where comments land.
+
+This reverses the report-only posture behind an explicit opt-in; the digest (findings + your decisions) is sent to GitHub when you post.
 
 ## GitHub Actions (Roadmap)
 

@@ -153,13 +153,31 @@ valid_modelslug() {
   return 0
 }
 
-# valid_kind <val> <kind>: bool|posint|str
+# valid_envname <val>: the NAME of an env var (pr_comments.bot_token_env). The
+# reader emits this name; a consumer (scripts/rc-post.sh) then reads the env var
+# it names via indirect expansion and uses its value as a GitHub token. Because
+# the name reaches a shell parameter-expansion / command position, it must be a
+# strict POSIX identifier — same reasoning as valid_modelslug, applied to a
+# variable name. Empty is allowed: it means "no bot-token var configured" ->
+# post as the authenticated user, never a failure.
+valid_envname() {
+  [ -z "$1" ] && return 0
+  [ "${#1}" -le 128 ] || return 1
+  case "$1" in
+    *[!A-Za-z0-9_]*) return 1 ;;  # only letters, digits, underscore
+    [!A-Za-z_]*) return 1 ;;      # must not start with a digit
+  esac
+  return 0
+}
+
+# valid_kind <val> <kind>: bool|posint|str|modelslug|envname
 valid_kind() {
   case "$2" in
     bool) valid_bool "$1" ;;
     posint) valid_posint "$1" ;;
     str) valid_str "$1" ;;
     modelslug) valid_modelslug "$1" ;;
+    envname) valid_envname "$1" ;;
   esac
 }
 
@@ -195,6 +213,34 @@ resolve() {
     fi
   done
   printf '%s' "$_rs_val"
+}
+
+# resolve_over <yq-path> <default> <kind> <key-name>: like resolve() but reads
+# ONLY the config.local.yml (over) layer — never the committed config.yml (base).
+# For values whose meaning is security-sensitive because the reviewed repo could
+# weaponize them: pr_comments.bot_token_env NAMES the env var whose value is read
+# and sent to GitHub as a bearer token, so a committed (untrusted) config must not
+# be able to point it at an arbitrary local secret (e.g. AWS_SECRET_ACCESS_KEY).
+# config.local.yml is gitignored and operator-owned, hence trusted. If base tries
+# to set it, note that it was ignored.
+resolve_over() {
+  _ro_path="$1"
+  _ro_val="$2"
+  _ro_kind="$3"
+  _ro_key="$4"
+  if [ "$base_ok" -eq 1 ] && get_raw "$base_file" "$_ro_path" >/dev/null 2>&1; then
+    echo "rc-config: $_ro_key ignored in the committed config.yml (untrusted); set it in config.local.yml or via its env override" >&2
+  fi
+  if [ "$over_ok" -eq 1 ]; then
+    if _ro_raw="$(get_raw "$over_file" "$_ro_path")"; then
+      if valid_kind "$_ro_raw" "$_ro_kind"; then
+        _ro_val="$_ro_raw"
+      else
+        note_bad "$_ro_key" "$_ro_raw"
+      fi
+    fi
+  fi
+  printf '%s' "$_ro_val"
 }
 
 # ---------------------------------------------------------------------------
@@ -421,5 +467,35 @@ resolve_static_tools "gitleaks,trufflehog,osv-scanner,semgrep,ruff,shellcheck,ac
 printf 'static_analysis.tools=%s\n' "$STATIC_TOOLS_VALUE"
 emit_setting static_analysis.timeout_seconds ".static_analysis.timeout_seconds" "60" posint RC_STATIC_TIMEOUT
 emit_setting static_analysis.semgrep_config ".static_analysis.semgrep_config" "p/default" str RC_SEMGREP_CONFIG
+
+# ---------------------------------------------------------------------------
+# PR comments — files AND env for `enabled` (env wins); its own top-level
+# section (sibling to reviewers/lenses/settings/static_analysis). Gates the
+# optional PR-digest posting engine (scripts/rc-post.sh). Default OFF so an
+# absent block is byte-identical to today's report-only behavior.
+#
+# bot_token_env names the env var that (optionally) holds a GitHub token used to
+# post as a distinct bot identity. When that var is unset/empty at post time the
+# engine posts as the authenticated `gh` user; the token VALUE never touches
+# config. Crucially, the NAME selects which local env var is read and egressed to
+# GitHub, so it is resolved from TRUSTED layers only — config.local.yml (over) or
+# the RC_PR_BOT_TOKEN_ENV env override — NEVER the committed config.yml (which is
+# attacker-controlled when reviewing an untrusted repo). The default names
+# RC_PR_BOT_TOKEN. `enabled` stays file+env (a committed team default is fine —
+# posting is human-gated and, absent a bot token, posts as the operator).
+# ---------------------------------------------------------------------------
+
+echo "# pr_comments"
+emit_setting pr_comments.enabled ".pr_comments.enabled" "false" bool RC_PR_COMMENTS
+_pc_tokenenv="$(resolve_over ".pr_comments.bot_token_env" "RC_PR_BOT_TOKEN" envname "pr_comments.bot_token_env")"
+_pc_env="${RC_PR_BOT_TOKEN_ENV:-}"
+if [ -n "$_pc_env" ]; then
+  if valid_kind "$_pc_env" envname; then
+    _pc_tokenenv="$_pc_env"
+  else
+    echo "rc-config: pr_comments.bot_token_env: invalid RC_PR_BOT_TOKEN_ENV='$_pc_env'; ignoring env override" >&2
+  fi
+fi
+printf 'pr_comments.bot_token_env=%s\n' "$_pc_tokenenv"
 
 exit 0
