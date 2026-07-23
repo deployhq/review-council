@@ -33,6 +33,7 @@ rm -f "$RC_NOTES"
 - `lens.<l>.enabled` / `lens.<l>.providers` for `l` in `security`, `correctness`, `cross_file`, `performance`, `design`, `dependency` — plus `lens.security.replaces_dedicated`.
 - `settings.<k>` for `personas`, `verify`, `verify_max_findings`, `learn`, `min_reviewers`, `reviewer_timeout_seconds`, `run_budget_seconds`, `auto_retry`, `health_probe`, `health_probe_timeout_seconds`, `claude_max_turns`.
 - `static_analysis.<k>` for `enabled`, `tools`, `timeout_seconds`, `semgrep_config` — the deterministic static-scan layer consumed in **Step 2.5**. (An older reader that does not emit a `# static_analysis` section → fall back to the defaults: `enabled=true`, `tools=gitleaks,trufflehog,osv-scanner,semgrep,ruff,shellcheck,actionlint,hadolint`, `timeout_seconds=60`, `semgrep_config=p/default`.)
+- `pr_comments.<k>` for `enabled` (default `false`) and `bot_token_env` (default `RC_PR_BOT_TOKEN`) — the optional PR-digest posting engine consumed in **Step 6.6**. (An older reader that does not emit a `# pr_comments` section → fall back to `enabled=false`, `bot_token_env=RC_PR_BOT_TOKEN`, i.e. posting off = today's report-only behavior.)
 
 If `yq` is missing, the reader prints a `yq not found` note and falls back to defaults + env; the run proceeds normally (config files are simply ignored). `rules/config.md` documents the one-time `brew install yq` (mikefarah v4) needed to *use* config files.
 
@@ -691,6 +692,57 @@ The judge ledger from Step 5 is printed **before** this prose report. Then emit 
 
 ---
 
+## Step 6.6: Post the Review Digest to the PR (optional)
+
+**Gated on `pr_comments.enabled` (resolved in Step 0).** If it is **false** (the default), skip this step entirely — the run stays report-only, byte-identical to today. This is the plugin's one sanctioned outward-posting path, and it **never auto-posts**: a human confirms before anything leaves the session (the `reply-pr` pattern). Posting is fail-soft — any failure is surfaced and the run continues; it never blocks or mutates the review already emitted.
+
+Posting anchors to a **PR**, so it applies to a PR review (or a code review whose branch has / can open a PR). All GitHub calls go through the deterministic plumbing in `scripts/rc-post.sh` (it does the mechanics, never any judgment — you compose the digest, it posts it).
+
+### 6.6.1 Resolve the target PR
+```bash
+"${CLAUDE_PLUGIN_ROOT}/scripts/rc-post.sh" detect
+```
+- `pr=<n>` (with `url`, `head`) → that open PR is the target.
+- `pr=` (empty) → no open PR. **Ask the author** whether to open one as a **draft** so the digest has a home. Only on an explicit yes:
+  ```bash
+  "${CLAUDE_PLUGIN_ROOT}/scripts/rc-post.sh" open-draft
+  ```
+  It pushes the branch if needed and prints the new `url=`; re-run `detect` for the number. On the default branch or with no remote it declines (exit ≠ 0) — note it and **skip posting** (don't error the run).
+
+### 6.6.2 Triage walk (shared with Step 7)
+Drive off the **Step-5 ledger** and the **Step-6** grouping. Present the surviving findings and, for each, ask the author to mark one disposition:
+- **fix** — they'll address it.
+- **defer** — not now (optionally a one-line reason).
+- **won't-fix** — declining it (optionally a one-line reason).
+- **all** — apply one disposition to the remainder.
+
+Show it as an editable proposal (a sensible default per finding is fine), never auto-applied. **Collect these dispositions once** — Step 7 (learnings) reuses them; do not walk the author twice.
+
+### 6.6.3 Compose the digest
+Build the single digest markdown — three sections:
+1. **What was found — and by whom** — a table: severity · finding · `location` · **found by** (the ledger's origin-families) · **council verdict** (verified / cross-reviewed / upheld / unverified / dropped-refuted).
+2. **What the council decided** — the judge's synthesis: promotions on cross-family agreement, drops on refutation, the final tally, any dissent.
+3. **What was fixed** — finding → status from the 6.6.2 dispositions (✅ Fixing / ⏭️ Deferred / ❌ Won't fix).
+
+Body rules:
+- The **first line is the hidden marker `<!-- rc:report -->`**, verbatim — the engine keys idempotency off it (and `rc-post.sh` refuses to post a body that lacks it).
+- End with the identity-aware footer: `by @<user> (not a personal comment)` when posting as the authenticated user, or `review-council[bot]` when a bot token is set.
+- **Escape cell content**: a `|` or newline in any `location`/finding string is escaped (`\|`) so untrusted (model/repo-derived) text can't break the table or the comment.
+- **Never echo secret material.** A Tier A secret finding (gitleaks/trufflehog) is referenced by **rule + `path:line` only** — never the credential value (or any recognizable fragment). The digest may be posted to a public PR; do not republish what the scanner just flagged as sensitive.
+
+Write it to a temp file with `Bash`: `RC_DIGEST="$(mktemp "${TMPDIR:-/tmp}/rc-digest.XXXXXX")"`.
+
+### 6.6.4 Confirm, then post (human-confirmed only)
+Show the composed digest and the target and **stop and wait**. In the confirmation, state explicitly: the **PR** (`#<n>` + repo), and the **identity** that will post — resolve and name it (run `gh api user --jq .login`, prefixed with the bot token when `pr_comments.bot_token_env` names a set var) — plus, when a bot token is used, the **env-var name** it came from. This lets the author catch an unexpected identity (e.g. a mis-set token var) *before* anything is posted. On explicit approval:
+```bash
+"${CLAUDE_PLUGIN_ROOT}/scripts/rc-post.sh" post <pr-number> "$RC_DIGEST" "<pr_comments.bot_token_env>"
+```
+Pass the resolved `pr_comments.bot_token_env` (from Step 0) as the third argument. The script reads that env var; when it is unset/empty the comment posts as the authenticated `gh` user (the default identity), otherwise as the bot that token authenticates. It finds the marked comment and **updates it in place**, else creates it, printing `action=created|updated` and `url=`. Surface the `url`. On non-zero exit, surface the script's stderr and **do not** claim a post happened. Then `rm -f "$RC_DIGEST"`.
+
+Decline at any gate → post nothing, write nothing.
+
+---
+
 ## Step 7: Capture Gate (learning capture)
 
 **Gated on `settings.learn` (resolved in Step 0).** If `settings.learn` is **false**, skip this step entirely — no gate, no prompt, no writes. (Symmetric with Step 0.5's recall gate: the one knob turns both the read and write sides off.)
@@ -698,7 +750,9 @@ The judge ledger from Step 5 is printed **before** this prose report. Then emit 
 When `settings.learn` is true, after the Step-6 report, run a short **capture gate** that distills this run's *skips* into persisted learnings — the write side of the loop whose read side ran in Step 0.5. It mirrors `reply-pr`'s human gate: **propose, then stop and wait, then write only what the human confirms.** It is **record-only** — it never edits code, never re-runs a reviewer, never changes the report already emitted.
 
 ### 7.1 Walk the findings
-Drive off the **Step-5 ledger** (its rows already carry the judge's canonical fingerprint) and the Step-6 grouping. Present the surviving findings as a compact list and, for each, ask the author to mark one of:
+**Reuse the Step-6.6 walk if it ran.** When Step 6.6 posted a digest it already collected a per-finding disposition — map it here rather than re-asking: **fix** → *tackle*, **defer** / **won't-fix** (with a reason) → *skip* (with that reason). Only walk the author from scratch when Step 6.6 was skipped (posting off).
+
+Drive off the **Step-5 ledger** (its rows already carry the judge's canonical fingerprint) and the Step-6 grouping. Present the surviving findings as a compact list and, for each, mark one of:
 - **tackle** — they'll fix it → capture **nothing** (a real finding they're acting on is not a false positive).
 - **skip** — they're not acting on it, with a **one-line reason**.
 - **skip all** — blanket-skip the remainder.

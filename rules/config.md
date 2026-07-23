@@ -160,6 +160,42 @@ static_analysis:
   disables (`--metrics=off`); setting it to `auto` skips semgrep with a note pointing at
   `p/default`. Use a `p/…`/`r/…` registry ref or a committed, repo-owned ruleset path.
 
+## `pr_comments:` block
+
+Gates the optional PR-digest posting engine (Step 6.6 of `skills/run/SKILL.md`, plumbed
+by `scripts/rc-post.sh`). Off by default, so an absent block is byte-identical to today's
+report-only behavior.
+
+```yaml
+pr_comments:
+  enabled: false            # master switch. Env override: RC_PR_COMMENTS
+  bot_token_env: RC_PR_BOT_TOKEN  # NAME of an env var holding a bot token (optional).
+                                  # TRUSTED layers only — config.local.yml or the
+                                  # RC_PR_BOT_TOKEN_ENV env override, NOT config.yml.
+```
+
+- `enabled` (bool, default `false`) — when true, after the report Review Council offers to
+  post a single review-digest comment to the PR (always human-confirmed, never automatic).
+  `RC_PR_COMMENTS` overrides it (env wins), so CI can force it on.
+- `bot_token_env` (string, default `RC_PR_BOT_TOKEN`) — the **name** of an environment
+  variable that (optionally) holds a GitHub token. When that variable is set and non-empty
+  at post time, the comment is posted as the identity that token authenticates (a bot user
+  for a PAT, `review-council[bot]` for a GitHub App token); when it is unset/empty the
+  comment posts as the authenticated `gh` user, clearly marked automated. The token
+  **value** never lives in config — only the variable's name does.
+- **Security.** `bot_token_env` is charset-validated as a strict POSIX identifier
+  (`[A-Za-z_][A-Za-z0-9_]*`) at the reader — it is read via indirect expansion downstream,
+  so anything outside that charset is rejected to the default with a note (the same
+  reader-side discipline as `reviewers.*.model`; see "Security Invariants" in `CLAUDE.md`).
+  An explicit empty value is honored (means "no bot token → post as the `gh` user"). Because
+  the **name** selects which local env var is read and sent to GitHub as a bearer token,
+  `bot_token_env` is honored **only from trusted layers** — `config.local.yml` (gitignored,
+  operator-owned) or the `RC_PR_BOT_TOKEN_ENV` env override — and is **ignored (with a note)
+  if set in the committed `config.yml`**, which is attacker-controlled when reviewing an
+  untrusted repo. Otherwise a reviewed repo could point it at a local secret
+  (e.g. `AWS_SECRET_ACCESS_KEY` — a perfectly valid identifier). The destination PR is always
+  taken from local git, never from config.
+
 ## Learnings
 
 `.review-council/learnings.md` is a **committed, team-shared** file (unlike `config.local.yml`,

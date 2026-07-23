@@ -51,6 +51,10 @@ has_line() {
   has_line "static_analysis.tools=gitleaks,trufflehog,osv-scanner,semgrep,ruff,shellcheck,actionlint,hadolint"
   has_line "static_analysis.timeout_seconds=60"
   has_line "static_analysis.semgrep_config=p/default"
+  # pr_comments.* -> default OFF (absent block == today's report-only behavior),
+  # and the bot-token env var name defaults to RC_PR_BOT_TOKEN.
+  has_line "pr_comments.enabled=false"
+  has_line "pr_comments.bot_token_env=RC_PR_BOT_TOKEN"
 }
 
 @test "provider enable/disable from config.yml" {
@@ -584,4 +588,90 @@ EOF
   [ "$status" -eq 0 ]
   has_line "reviewer.perplexity.model="
   ! printf '%s\n' "$stderr" | grep -q 'reviewer.perplexity.model'
+}
+
+# ---------------------------------------------------------------------------
+# pr_comments.* — the optional PR-digest posting gate
+# ---------------------------------------------------------------------------
+
+@test "pr_comments: enabled from config.yml; bot_token_env from config.local.yml admitted" {
+  # enabled is a fine committed team default; bot_token_env must come from a
+  # TRUSTED layer (config.local.yml), because its NAME selects which local secret
+  # is read and sent to GitHub.
+  printf 'pr_comments:\n  enabled: true\n' >"$CFG/config.yml"
+  printf 'pr_comments:\n  bot_token_env: MY_BOT_TOKEN\n' >"$CFG/config.local.yml"
+  run --separate-stderr "$SCRIPT" "$CFG"
+  [ "$status" -eq 0 ]
+  has_line "pr_comments.enabled=true"
+  has_line "pr_comments.bot_token_env=MY_BOT_TOKEN"
+  ! printf '%s\n' "$stderr" | grep -q 'pr_comments'
+}
+
+@test "pr_comments: bot_token_env in the committed config.yml is IGNORED (untrusted layer)" {
+  # A reviewed repo could commit config.yml pointing bot_token_env at a local
+  # secret (e.g. AWS_SECRET_ACCESS_KEY — a valid identifier). It must be ignored,
+  # falling back to the default, with a note.
+  cat >"$CFG/config.yml" <<'EOF'
+pr_comments:
+  enabled: true
+  bot_token_env: AWS_SECRET_ACCESS_KEY
+EOF
+  run --separate-stderr "$SCRIPT" "$CFG"
+  [ "$status" -eq 0 ]
+  has_line "pr_comments.enabled=true"
+  has_line "pr_comments.bot_token_env=RC_PR_BOT_TOKEN"
+  ! printf '%s\n' "$output" | grep -qF 'AWS_SECRET_ACCESS_KEY'
+  printf '%s\n' "$stderr" | grep -q 'pr_comments.bot_token_env'
+}
+
+@test "pr_comments: RC_PR_BOT_TOKEN_ENV env overrides the token var name" {
+  printf 'pr_comments:\n  enabled: true\n' >"$CFG/config.yml"
+  RC_PR_BOT_TOKEN_ENV=CI_BOT_TOKEN run --separate-stderr "$SCRIPT" "$CFG"
+  [ "$status" -eq 0 ]
+  has_line "pr_comments.bot_token_env=CI_BOT_TOKEN"
+}
+
+@test "pr_comments: RC_PR_COMMENTS env overrides enabled" {
+  # config says off; env forces it on (the CI-toggle path).
+  printf 'pr_comments:\n  enabled: false\n' >"$CFG/config.yml"
+  RC_PR_COMMENTS=true run --separate-stderr "$SCRIPT" "$CFG"
+  [ "$status" -eq 0 ]
+  has_line "pr_comments.enabled=true"
+}
+
+@test "pr_comments: a non-bool enabled falls back to the default with a note" {
+  printf 'pr_comments:\n  enabled: yes-please\n' >"$CFG/config.yml"
+  run --separate-stderr "$SCRIPT" "$CFG"
+  [ "$status" -eq 0 ]
+  has_line "pr_comments.enabled=false"
+  printf '%s\n' "$stderr" | grep -q 'pr_comments.enabled'
+}
+
+@test "pr_comments: bot_token_env with shell metacharacters is rejected to default" {
+  # Read via indirect expansion downstream, so a value that could reach command
+  # position must be rejected at the reader. (Set in the trusted local layer.)
+  printf 'pr_comments:\n  bot_token_env: "FOO; id"\n' >"$CFG/config.local.yml"
+  run --separate-stderr "$SCRIPT" "$CFG"
+  [ "$status" -eq 0 ]
+  has_line "pr_comments.bot_token_env=RC_PR_BOT_TOKEN"
+  printf '%s\n' "$stderr" | grep -q 'pr_comments.bot_token_env'
+  ! printf '%s\n' "$output" | grep -qF 'FOO; id'
+}
+
+@test "pr_comments: a bot_token_env starting with a digit is rejected (not a POSIX name)" {
+  printf 'pr_comments:\n  bot_token_env: 1BADNAME\n' >"$CFG/config.local.yml"
+  run --separate-stderr "$SCRIPT" "$CFG"
+  [ "$status" -eq 0 ]
+  has_line "pr_comments.bot_token_env=RC_PR_BOT_TOKEN"
+  printf '%s\n' "$stderr" | grep -q 'pr_comments.bot_token_env'
+}
+
+@test "pr_comments: an explicit empty bot_token_env stays empty (no bot -> user identity)" {
+  # Empty is a valid, deliberate choice: no bot-token var -> always post as the
+  # authenticated user. It must NOT swap in the RC_PR_BOT_TOKEN default.
+  printf 'pr_comments:\n  bot_token_env: ""\n' >"$CFG/config.local.yml"
+  run --separate-stderr "$SCRIPT" "$CFG"
+  [ "$status" -eq 0 ]
+  has_line "pr_comments.bot_token_env="
+  ! printf '%s\n' "$stderr" | grep -q 'pr_comments.bot_token_env'
 }
