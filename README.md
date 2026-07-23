@@ -86,7 +86,12 @@ flowchart TD
 
     N --> O["Step 6: Severity-First Report<br/>badges + dissent + lens map"]
 
-    O --> P7{"Step 7: Capture Gate<br/>(if settings.learn)"}
+    O --> P66{"Step 6.6: Post digest?<br/>(if pr_comments.enabled, default off)"}
+    P66 -->|"human-confirmed"| P66P["Post / update the single<br/>review-digest comment · rc-post.sh"]
+    P66 -->|"off / declined"| P7
+    P66P --> P7
+
+    P7{"Step 7: Capture Gate<br/>(if settings.learn)"}
     P7 -->|"human: tackle / skip / skip-all"| P7D["Distill generalizable skips →<br/>Suppression or Convention"]
     P7D -->|"human confirms exact entry"| P7W["rc-learn.sh writes<br/>learnings.md"]
     P7D -->|"declined"| P7X["Nothing written"]
@@ -106,6 +111,8 @@ flowchart TD
     style K2 fill:#d97706,color:#fff
     style K3 fill:#d97706,color:#fff
     style P7 fill:#d97706,color:#fff
+    style P66 fill:#d97706,color:#fff
+    style P66P fill:#16a34a,color:#fff
     style P7W fill:#16a34a,color:#fff
 ```
 
@@ -372,6 +379,7 @@ review-council/
 │   ├── rc-config.sh           # Config reader (files + env + defaults)
 │   ├── rc-static-scan.sh      # Static-analysis runner (Phase 2)
 │   ├── rc-learn.sh            # learnings.md writer — Step 7 capture (Phase 3)
+│   ├── rc-post.sh             # PR review-digest posting engine — Step 6.6 (v0.10.0)
 │   ├── rc-lib-timeout.sh      # Shared timeout/watchdog helper
 │   └── sync-metadata.sh       # Propagates plugin.json's description to README/CLAUDE.md/marketplace.json
 ├── tests/
@@ -420,6 +428,8 @@ sequenceDiagram
     O->>O: Promote if raised by ≥2 reviewer families OR UPHELD by a different family, drop only if REFUTED, otherwise keep it tagged unverified
 
     Note over O: Severity-First Report — badges, dissent, lens map
+
+    Note over O: Post digest (Step 6.6, if pr_comments.enabled — default off) — human-confirmed<br/>compose review-digest comment, upsert the singleton on the PR via rc-post.sh
 
     Note over O: Capture Gate (Step 7, if settings.learn) — human-confirmed<br/>tackle/skip/skip-all, distill into Suppression/Convention, write via rc-learn.sh
 ```
