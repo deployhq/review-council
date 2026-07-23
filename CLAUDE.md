@@ -95,6 +95,11 @@ Round 1 is **lens-differentiated**: the dedicated Security reviewer always carri
       badges [verified] > [cross-reviewed] > [1 reviewer · unverified] > [unverified] > [tool-only:<rule>]; dissent; lens map
       |
       v
+  Step 6.6: Post digest (optional, gated on pr_comments.enabled — default off)
+      Human-confirmed: triage walk (fix/defer/won't-fix, shared with Step 7) ->
+      compose review-digest comment -> rc-post.sh upserts the singleton on the PR
+      |
+      v
   Step 7: Capture Gate (record-only, gated on settings.learn)
       Human-confirmed: tackle/skip/skip-all -> distill generalizable skips into
       Suppression (by fingerprint) or Convention -> rc-learn.sh writes learnings.md
