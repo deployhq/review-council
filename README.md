@@ -429,6 +429,8 @@ sequenceDiagram
 
     Note over O: Severity-First Report — badges, dissent, lens map
 
+    Note over O: Post digest (Step 6.6, if pr_comments.enabled — default off) — human-confirmed<br/>compose review-digest comment, upsert the singleton on the PR via rc-post.sh
+
     Note over O: Capture Gate (Step 7, if settings.learn) — human-confirmed<br/>tackle/skip/skip-all, distill into Suppression/Convention, write via rc-learn.sh
 ```
 
