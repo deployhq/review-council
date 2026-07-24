@@ -1,0 +1,8 @@
+# Code owners for review-council.
+#
+# Every pull request needs an approving review from at least one of the owners
+# listed below (enforced by branch protection on `main` -> "Require review from
+# Code Owners"). All three own the whole tree, so ANY ONE approval satisfies it;
+# GitHub never counts the PR author's own review, so a PR by one owner is
+# approved by either of the other two.
+*       @thdurante @facundofarias @MartaKar
