@@ -110,7 +110,9 @@ Reconcile the config (0.1) with detection (0.2):
 - **Settings.** Load the `settings.*` values for this run and use them wherever the orchestration rules reference a run knob (`min_reviewers`, `reviewer_timeout_seconds`, `run_budget_seconds`, `auto_retry`, etc.). The reader already folded any `RC_*` env override into each value at the correct precedence, so treat each resolved `settings.*` as the **effective** value of its `RC_*` knob. When a later step *consumes* an `RC_*` env var (e.g. the reviewer timeout wrapper), pass that effective value on the invocation — e.g. `RC_REVIEWER_TIMEOUT=<effective settings.reviewer_timeout_seconds> <cli> …` — rather than relying on the ambient environment carrying across separate tool calls. See `rules/orchestration.md` → "Run Settings".
 - **Absent config / absent `yq` → today's defaults**, byte-identical to pre-config behavior. Disabling reviewers still honors `settings.min_reviewers`: if too few remain to reach it, the existing min-reviewers handling applies (single-reviewer mode or the usual prompt).
 
-Announce: "**Review Council** — [N] reviewers available: [list]. [Skipped: reason for each unavailable **or config-disabled** provider]". When the Google slot is available, name the actual tool — e.g. "Google (Antigravity)" — so it's clear `agy` (not `gemini`) is the one running.
+Announce: "**Review Council** — [N] reviewers available: [list]. [Skipped: reason for each unavailable **or config-disabled** provider]". When the Google slot is available, name the actual tool — e.g. "Google (Antigravity)" — so it's clear `agy` (not `gemini`) is the one running. **Also state the running plugin version** on this line — read it from *this* skill file's own path (`…/review-council/<version>/skills/run`) — so a stale cached copy is obvious at a glance (a long-lived session can keep running an old version until `/reload-plugins`).
+
+**Posting commitment — anchor it HERE, do not leave it for the tail.** If Step 0 resolved `pr_comments.enabled=true`, say so **now**, in your own words, as part of this announcement — e.g. "PR-comment posting is ON for this repo → after the report I will run the human-confirmed digest post (Step 6.6)." Stating the commitment early keeps it alive even if the end of this skill is later truncated by compaction. For this run, treat **Step 6.6 as a required stage of the pipeline**, not an optional afterthought — "required" means you must *reach it and offer*, never that you post without the human gate (Step 6.6 never auto-posts). The report is a checkpoint, not the finish line.
 
 If only Claude-family reviewers (Claude + the dedicated Security reviewer) are available — i.e. no different-family reviewer to cross-verify against — proceed in **single-reviewer mode** and note it in the output. Suggest running `/review-council:setup` to see how to add more reviewers.
 
@@ -691,6 +693,8 @@ The judge ledger from Step 5 is printed **before** this prose report. Then emit 
 [Brief — things reviewers praised. Keep to 2-3 bullet points max.]
 
 ---
+
+**If `pr_comments.enabled=true`, the report is NOT the last step.** Do not stop or hand back to the user here — proceed **immediately** to Step 6.6 and offer to post the digest (the human-confirmed gate you committed to in Step 0). Ending at the report when posting is enabled is the single most common failure of this pipeline; the report is a checkpoint, not the finish line.
 
 ## Step 6.6: Post the Review Digest to the PR (optional)
 
