@@ -14,6 +14,25 @@ SCRIPT="$(cd "$(dirname "$BATS_TEST_FILENAME")/../.." && pwd)/scripts/rc-config.
 setup() {
   CFG="$BATS_TEST_TMPDIR/cfg"
   mkdir -p "$CFG"
+  # The user layer (~/.review-council/config.yml) must never leak in from the
+  # machine running the tests: point it at a per-test path (absent by default).
+  USERCFG="$BATS_TEST_TMPDIR/user/config.yml"
+  export RC_USER_CONFIG="$USERCFG"
+}
+
+# no_line_matching <ERE>: assert no stdout line matches.
+no_line_matching() {
+  if printf '%s\n' "$output" | grep -qE "$1"; then
+    echo "unexpected line matching: $1"
+    printf '%s\n' "$output"
+    return 1
+  fi
+}
+
+# user_cfg <yaml>: write the user-layer file.
+user_cfg() {
+  mkdir -p "$(dirname "$USERCFG")"
+  printf '%s' "$1" >"$USERCFG"
 }
 
 # has_line <key=value>: assert an exact stdout line is present in $output.
@@ -674,4 +693,450 @@ EOF
   [ "$status" -eq 0 ]
   has_line "pr_comments.bot_token_env="
   ! printf '%s\n' "$stderr" | grep -q 'pr_comments.bot_token_env'
+}
+
+# ---------------------------------------------------------------------------
+# Custom reviewer seats (reviewers.custom.*)
+# ---------------------------------------------------------------------------
+
+@test "custom: no custom block anywhere -> not one byte of the section (config invariance)" {
+  run --separate-stderr "$SCRIPT" "$CFG"
+  [ "$status" -eq 0 ]
+  no_line_matching '^# custom reviewers$'
+  no_line_matching '^reviewer\.custom'
+  no_line_matching '^confirm\.'
+}
+
+@test "custom: a local-Ollama seat in the user layer -> full emission, no key, no confirm" {
+  user_cfg 'reviewers:
+  custom:
+    local-qwen:
+      harness: ocr
+      provider: ollama
+      model: qwen3.6:35b-a3b-coding-nvfp4
+'
+  run --separate-stderr "$SCRIPT" "$CFG"
+  [ "$status" -eq 0 ]
+  has_line "# custom reviewers"
+  has_line "reviewer.custom_slots=local-qwen"
+  has_line "reviewer.custom.local-qwen.enabled=true"
+  has_line "reviewer.custom.local-qwen.source=user"
+  has_line "reviewer.custom.local-qwen.harness=ocr"
+  has_line "reviewer.custom.local-qwen.provider=ollama"
+  has_line "reviewer.custom.local-qwen.model=qwen3.6:35b-a3b-coding-nvfp4"
+  has_line "reviewer.custom.local-qwen.role=signal"
+  has_line "reviewer.custom.local-qwen.api_key_env="
+  has_line "reviewer.custom.local-qwen.family=Qwen"
+  has_line "reviewer.custom.local-qwen.distinct=true"
+  has_line "reviewer.custom.local-qwen.opt.effort=low"
+  has_line "reviewer.custom.local-qwen.opt.concurrency="
+  has_line "reviewer.custom.local-qwen.opt.max_tokens_budget=0"
+  has_line "reviewer.custom.local-qwen.opt.timeout_minutes="
+  no_line_matching '^confirm\.'
+}
+
+@test "custom: harness is required; missing/invalid -> seat skipped with a note" {
+  printf 'reviewers:\n  custom:\n    a:\n      model: qwen/x\n    b:\n      harness: codex\n      model: qwen/x\n' >"$CFG/config.local.yml"
+  run --separate-stderr "$SCRIPT" "$CFG"
+  [ "$status" -eq 0 ]
+  no_line_matching '^reviewer\.custom'
+  [[ "$stderr" == *"reviewer.custom.a: no valid harness"* ]] || false
+  [[ "$stderr" == *"reviewer.custom.b: no valid harness"* ]] || false
+}
+
+@test "custom: model is required and slug-guarded (injection rejected, seat skipped)" {
+  printf 'reviewers:\n  custom:\n    a:\n      harness: ocr\n    b:\n      harness: ocr\n      model: "qwen ; id"\n    c:\n      harness: ocr\n      model: "-rule=x"\n' >"$CFG/config.local.yml"
+  run --separate-stderr "$SCRIPT" "$CFG"
+  [ "$status" -eq 0 ]
+  no_line_matching '^reviewer\.custom'
+  [[ "$stderr" == *"invalid value 'qwen ; id'"* ]] || false
+  [[ "$stderr" == *"reviewer.custom.c: no valid model"* ]] || false
+}
+
+@test "custom: provider and role are enums; invalid -> default with a note" {
+  printf 'reviewers:\n  custom:\n    a:\n      harness: ocr\n      model: qwen/x\n      provider: "evil.example"\n      role: judge\n' >"$CFG/config.local.yml"
+  run --separate-stderr "$SCRIPT" "$CFG"
+  [ "$status" -eq 0 ]
+  has_line "reviewer.custom.a.provider=openrouter"
+  has_line "reviewer.custom.a.role=signal"
+  [[ "$stderr" == *"invalid value 'evil.example'"* ]] || false
+  [[ "$stderr" == *"invalid value 'judge'"* ]] || false
+}
+
+@test "custom: seat-name guard runs BEFORE any re-interpolation (yq-injection names dropped)" {
+  cat >"$CFG/config.local.yml" <<'YML'
+reviewers:
+  custom:
+    'x"] | load("/etc/passwd") | .["y':
+      harness: ocr
+      model: qwen/x
+    "has.dot":
+      harness: ocr
+      model: qwen/x
+    ok_name-1:
+      harness: ocr
+      model: qwen/x
+YML
+  run --separate-stderr "$SCRIPT" "$CFG"
+  [ "$status" -eq 0 ]
+  has_line "reviewer.custom_slots=ok_name-1"
+  [[ "$stderr" == *"invalid seat name"* ]] || false
+  no_line_matching 'passwd|root:'
+}
+
+@test "custom: hyphenated seat names resolve (yq does not lex - as subtraction)" {
+  printf 'reviewers:\n  custom:\n    qwen-local:\n      harness: ocr\n      model: qwen/x\n' >"$CFG/config.local.yml"
+  run --separate-stderr "$SCRIPT" "$CFG"
+  [ "$status" -eq 0 ]
+  has_line "reviewer.custom.qwen-local.model=qwen/x"
+}
+
+@test "custom: family is derived from the model; non-distinct for native/unknown vendors" {
+  printf 'reviewers:\n  custom:\n    a:\n      harness: ocr\n      model: anthropic/claude-opus-latest\n    b:\n      harness: ocr\n      model: x-ai/grok-4\n    c:\n      harness: ocr\n      model: "~moonshotai/kimi-latest"\n' >"$CFG/config.local.yml"
+  run --separate-stderr "$SCRIPT" "$CFG"
+  [ "$status" -eq 0 ]
+  has_line "reviewer.custom.a.family=Claude"
+  has_line "reviewer.custom.a.distinct=false"
+  has_line "reviewer.custom.b.family=unknown"
+  has_line "reviewer.custom.b.distinct=false"
+  has_line "reviewer.custom.c.family=Moonshot"
+  has_line "reviewer.custom.c.distinct=true"
+}
+
+@test "custom: api_key_env from the committed config.yml is IGNORED (untrusted) -> default" {
+  printf 'reviewers:\n  custom:\n    a:\n      harness: ocr\n      model: qwen/x\n      api_key_env: AWS_SECRET_ACCESS_KEY\n' >"$CFG/config.yml"
+  run --separate-stderr "$SCRIPT" "$CFG"
+  [ "$status" -eq 0 ]
+  has_line "reviewer.custom.a.api_key_env=OPENROUTER_API_KEY"
+  [[ "$stderr" == *"reviewer.custom.a.api_key_env ignored in the committed config.yml (untrusted)"* ]] || false
+}
+
+@test "custom: api_key_env from a trusted layer is admitted, envname-guarded, empty for ollama" {
+  user_cfg 'reviewers:
+  custom:
+    a:
+      harness: ocr
+      model: qwen/x
+      api_key_env: MY_OR_KEY
+    b:
+      harness: ocr
+      model: qwen/x
+      api_key_env: "FOO;id"
+    c:
+      harness: ocr
+      provider: ollama
+      model: qwen/x
+      api_key_env: MY_OR_KEY
+'
+  run --separate-stderr "$SCRIPT" "$CFG"
+  [ "$status" -eq 0 ]
+  has_line "reviewer.custom.a.api_key_env=MY_OR_KEY"
+  has_line "reviewer.custom.b.api_key_env=OPENROUTER_API_KEY"
+  has_line "reviewer.custom.c.api_key_env="
+  [[ "$stderr" == *"invalid value 'FOO;id'"* ]] || false
+}
+
+@test "custom: precedence local > user > committed, per key; source names the trusted layer" {
+  printf 'reviewers:\n  custom:\n    a:\n      harness: ocr\n      model: qwen/one\n      role: reviewer\n' >"$CFG/config.yml"
+  user_cfg 'reviewers:
+  custom:
+    a:
+      model: qwen/two
+'
+  printf 'reviewers:\n  custom:\n    a:\n      harness_options:\n        effort: high\n' >"$CFG/config.local.yml"
+  run --separate-stderr "$SCRIPT" "$CFG"
+  [ "$status" -eq 0 ]
+  has_line "reviewer.custom.a.model=qwen/two"
+  has_line "reviewer.custom.a.role=reviewer"
+  has_line "reviewer.custom.a.opt.effort=high"
+  has_line "reviewer.custom.a.source=local"
+}
+
+@test "custom: typed harness_options are accepted from the committed config, range-checked" {
+  printf 'reviewers:\n  custom:\n    a:\n      harness: ocr\n      model: qwen/x\n      harness_options:\n        effort: medium\n        concurrency: 4\n        max_tokens_budget: 2000000\n        timeout_minutes: 60\n    b:\n      harness: ocr\n      model: qwen/x\n      harness_options:\n        effort: extreme\n        concurrency: 33\n        max_tokens_budget: -1\n        timeout_minutes: 181\n' >"$CFG/config.yml"
+  run --separate-stderr "$SCRIPT" "$CFG"
+  [ "$status" -eq 0 ]
+  has_line "reviewer.custom.a.opt.effort=medium"
+  has_line "reviewer.custom.a.opt.concurrency=4"
+  has_line "reviewer.custom.a.opt.max_tokens_budget=2000000"
+  has_line "reviewer.custom.a.opt.timeout_minutes=60"
+  has_line "reviewer.custom.b.opt.effort=low"
+  has_line "reviewer.custom.b.opt.concurrency="
+  has_line "reviewer.custom.b.opt.max_tokens_budget=0"
+  has_line "reviewer.custom.b.opt.timeout_minutes="
+}
+
+@test "custom: free-form flags/env from the committed config are IGNORED with a note" {
+  printf 'reviewers:\n  custom:\n    a:\n      harness: ocr\n      model: qwen/x\n      harness_options:\n        flags: ["--max-tools", "80"]\n        env: { OCR_LLM_TIMEOUT: "600" }\n' >"$CFG/config.yml"
+  run --separate-stderr "$SCRIPT" "$CFG"
+  [ "$status" -eq 0 ]
+  no_line_matching '^reviewer\.custom\.a\.(flag|env)\.'
+  [[ "$stderr" == *"harness_options.flags ignored in the committed config.yml (untrusted)"* ]] || false
+  [[ "$stderr" == *"harness_options.env ignored in the committed config.yml (untrusted)"* ]] || false
+}
+
+@test "custom: free-form flags/env from a trusted layer are emitted in order" {
+  user_cfg 'reviewers:
+  custom:
+    a:
+      harness: ocr
+      model: qwen/x
+      harness_options:
+        flags: ["--max-tools", "80", "--exclude=**/gen/*"]
+        env: { OCR_LLM_TIMEOUT: "600" }
+'
+  run --separate-stderr "$SCRIPT" "$CFG"
+  [ "$status" -eq 0 ]
+  has_line "reviewer.custom.a.flag.1=--max-tools"
+  has_line "reviewer.custom.a.flag.2=80"
+  has_line "reviewer.custom.a.flag.3=--exclude=**/gen/*"
+  has_line "reviewer.custom.a.env.OCR_LLM_TIMEOUT=600"
+}
+
+@test "custom: a reserved or invalid flag drops the WHOLE flag list (fail closed)" {
+  user_cfg 'reviewers:
+  custom:
+    a:
+      harness: ocr
+      model: qwen/x
+      harness_options:
+        flags: ["--max-tools", "80", "--rule=/tmp/evil.json"]
+    b:
+      harness: ocr
+      model: qwen/x
+      harness_options:
+        flags: ["--repo", "/"]
+    c:
+      harness: ocr
+      model: qwen/x
+      harness_options:
+        flags: ["$(id)"]
+'
+  run --separate-stderr "$SCRIPT" "$CFG"
+  [ "$status" -eq 0 ]
+  no_line_matching '\.flag\.'
+  [[ "$stderr" == *"'--rule=/tmp/evil.json' is reserved"* ]] || false
+  [[ "$stderr" == *"'--repo' is reserved"* ]] || false
+  [[ "$stderr" == *"reviewer.custom.c.harness_options.flags: invalid token"* ]] || false
+}
+
+@test "custom: reserved or invalid env names are dropped one by one" {
+  user_cfg 'reviewers:
+  custom:
+    a:
+      harness: ocr
+      model: qwen/x
+      api_key_env: MY_KEY
+      harness_options:
+        env: { HOME: "/x", PATH: "/x", MY_KEY: "x", OPENROUTER_API_KEY: "x", "bad-name": "1", OCR_LLM_TIMEOUT: "600" }
+'
+  run --separate-stderr "$SCRIPT" "$CFG"
+  [ "$status" -eq 0 ]
+  has_line "reviewer.custom.a.env.OCR_LLM_TIMEOUT=600"
+  no_line_matching '\.env\.(HOME|PATH|MY_KEY|OPENROUTER_API_KEY|bad-name)='
+}
+
+@test "custom: an OpenRouter seat ONLY in the committed config -> one confirm line" {
+  printf 'reviewers:\n  custom:\n    q:\n      harness: ocr\n      model: qwen/qwen3.8-max-0902\n' >"$CFG/config.yml"
+  run --separate-stderr "$SCRIPT" "$CFG"
+  [ "$status" -eq 0 ]
+  has_line "reviewer.custom.q.source=committed"
+  has_line "confirm.1=Seat 'q' is enabled only by the repo's committed config, and sends code to OpenRouter (model qwen/qwen3.8-max-0902), billed to your OPENROUTER_API_KEY."
+}
+
+@test "custom: no confirm for a committed Ollama seat, a disabled seat, or a seat a trusted layer names" {
+  printf 'reviewers:\n  custom:\n    o:\n      harness: ocr\n      provider: ollama\n      model: qwen/x\n    d:\n      harness: ocr\n      enabled: false\n      model: qwen/x\n    t:\n      harness: ocr\n      model: qwen/x\n' >"$CFG/config.yml"
+  printf 'reviewers:\n  custom:\n    t:\n      enabled: true\n' >"$CFG/config.local.yml"
+  run --separate-stderr "$SCRIPT" "$CFG"
+  [ "$status" -eq 0 ]
+  has_line "reviewer.custom.d.enabled=false"
+  has_line "reviewer.custom.t.source=local"
+  no_line_matching '^confirm\.'
+}
+
+@test "custom: a git-TRACKED config.local.yml is untrusted (source stays committed, key ignored, confirm fires)" {
+  git -C "$BATS_TEST_TMPDIR" init -q repo
+  R="$BATS_TEST_TMPDIR/repo/.review-council"
+  mkdir -p "$R"
+  printf 'reviewers:\n  custom:\n    q:\n      harness: ocr\n      model: qwen/x\n      api_key_env: AWS_SECRET_ACCESS_KEY\n' >"$R/config.local.yml"
+  git -C "$BATS_TEST_TMPDIR/repo" add .review-council/config.local.yml
+  run --separate-stderr "$SCRIPT" "$R"
+  [ "$status" -eq 0 ]
+  has_line "reviewer.custom.q.source=committed"
+  has_line "reviewer.custom.q.api_key_env=OPENROUTER_API_KEY"
+  [[ "$stderr" == *"is tracked by git"* ]] || false
+  has_line "confirm.1=Seat 'q' is enabled only by the repo's committed config, and sends code to OpenRouter (model qwen/x), billed to your OPENROUTER_API_KEY."
+}
+
+@test "pr_comments: bot_token_env in a git-TRACKED config.local.yml is ignored (untrusted)" {
+  git -C "$BATS_TEST_TMPDIR" init -q repo
+  R="$BATS_TEST_TMPDIR/repo/.review-council"
+  mkdir -p "$R"
+  printf 'pr_comments:\n  bot_token_env: AWS_SECRET_ACCESS_KEY\n' >"$R/config.local.yml"
+  git -C "$BATS_TEST_TMPDIR/repo" add .review-council/config.local.yml
+  run --separate-stderr "$SCRIPT" "$R"
+  [ "$status" -eq 0 ]
+  has_line "pr_comments.bot_token_env=RC_PR_BOT_TOKEN"
+  [[ "$stderr" == *"ignored in the git-tracked config.local.yml"* ]] || false
+}
+
+@test "custom: an untracked config.local.yml inside a git repo stays trusted" {
+  git -C "$BATS_TEST_TMPDIR" init -q repo
+  R="$BATS_TEST_TMPDIR/repo/.review-council"
+  mkdir -p "$R"
+  printf 'reviewers:\n  custom:\n    q:\n      harness: ocr\n      model: qwen/x\n      api_key_env: MY_KEY\n' >"$R/config.local.yml"
+  run --separate-stderr "$SCRIPT" "$R"
+  [ "$status" -eq 0 ]
+  has_line "reviewer.custom.q.source=local"
+  has_line "reviewer.custom.q.api_key_env=MY_KEY"
+}
+
+@test "custom: the user layer is read ONLY for reviewers.custom" {
+  user_cfg 'settings:
+  min_reviewers: 9
+pr_comments:
+  bot_token_env: AWS_SECRET_ACCESS_KEY
+'
+  run --separate-stderr "$SCRIPT" "$CFG"
+  [ "$status" -eq 0 ]
+  has_line "settings.min_reviewers=2"
+  has_line "pr_comments.bot_token_env=RC_PR_BOT_TOKEN"
+}
+
+@test "custom: yq absent -> no custom section" {
+  user_cfg 'reviewers:
+  custom:
+    a:
+      harness: ocr
+      model: qwen/x
+'
+  RC_YQ=/nonexistent/yq run --separate-stderr "$SCRIPT" "$CFG"
+  [ "$status" -eq 0 ]
+  no_line_matching '^reviewer\.custom'
+}
+
+@test "custom: a committed config.local.yml under ANOTHER CASING is still untrusted (case-insensitive FS)" {
+  git -C "$BATS_TEST_TMPDIR" init -q repo
+  R="$BATS_TEST_TMPDIR/repo/.review-council"
+  mkdir -p "$R"
+  printf 'reviewers:\n  custom:\n    q:\n      harness: ocr\n      model: qwen/x\n      api_key_env: AWS_SECRET_ACCESS_KEY\n' >"$R/Config.Local.yml"
+  # Only meaningful where the FS folds case (macOS APFS/HFS+ default): there the
+  # reader opens Config.Local.yml as config.local.yml, while a case-sensitive
+  # `git ls-files` would call it untracked -> trusted.
+  [ -f "$R/config.local.yml" ] || skip "case-sensitive filesystem: Config.Local.yml is not config.local.yml here"
+  git -C "$BATS_TEST_TMPDIR/repo" add .review-council/Config.Local.yml
+  run --separate-stderr "$SCRIPT" "$R"
+  [ "$status" -eq 0 ]
+  has_line "reviewer.custom.q.source=committed"
+  has_line "reviewer.custom.q.api_key_env=OPENROUTER_API_KEY"
+  no_line_matching 'AWS_SECRET_ACCESS_KEY'
+  [[ "$stderr" == *"is tracked by git"* ]] || false
+  has_line "confirm.1=Seat 'q' is enabled only by the repo's committed config, and sends code to OpenRouter (model qwen/x), billed to your OPENROUTER_API_KEY."
+}
+
+@test "custom: seats are ordered trusted-first (user before committed), so a committed seat cannot displace a trusted one" {
+  printf 'reviewers:\n  custom:\n    a:\n      harness: ocr\n      provider: ollama\n      model: qwen/x\n' >"$CFG/config.yml"
+  user_cfg 'reviewers:
+  custom:
+    u:
+      harness: ocr
+      model: qwen/y
+'
+  run --separate-stderr "$SCRIPT" "$CFG"
+  [ "$status" -eq 0 ]
+  has_line "reviewer.custom_slots=u,a"
+}
+
+@test "custom: seat order is local, user, then committed; document order within a layer" {
+  printf 'reviewers:\n  custom:\n    c2:\n      harness: ocr\n      provider: ollama\n      model: qwen/x\n    c1:\n      harness: ocr\n      provider: ollama\n      model: qwen/x\n    l:\n      role: reviewer\n' >"$CFG/config.yml"
+  user_cfg 'reviewers:
+  custom:
+    u:
+      harness: ocr
+      model: qwen/y
+'
+  printf 'reviewers:\n  custom:\n    l:\n      harness: ocr\n      model: qwen/z\n' >"$CFG/config.local.yml"
+  run --separate-stderr "$SCRIPT" "$CFG"
+  [ "$status" -eq 0 ]
+  has_line "reviewer.custom_slots=l,u,c2,c1"
+}
+
+@test "custom: needs_confirm is true exactly for a seat that gets a confirm line" {
+  printf 'reviewers:\n  custom:\n    q:\n      harness: ocr\n      model: qwen/x\n    o:\n      harness: ocr\n      provider: ollama\n      model: qwen/x\n    d:\n      harness: ocr\n      enabled: false\n      model: qwen/x\n' >"$CFG/config.yml"
+  user_cfg 'reviewers:
+  custom:
+    u:
+      harness: ocr
+      model: qwen/y
+'
+  run --separate-stderr "$SCRIPT" "$CFG"
+  [ "$status" -eq 0 ]
+  has_line "reviewer.custom.q.needs_confirm=true"
+  has_line "reviewer.custom.o.needs_confirm=false"
+  has_line "reviewer.custom.d.needs_confirm=false"
+  has_line "reviewer.custom.u.needs_confirm=false"
+  has_line "confirm.1=Seat 'q' is enabled only by the repo's committed config, and sends code to OpenRouter (model qwen/x), billed to your OPENROUTER_API_KEY."
+  no_line_matching '^confirm\.2='
+  # confirm.N lines stay last.
+  [[ "$(printf '%s\n' "$output" | tail -n 1)" == confirm.1=* ]] || false
+}
+
+@test "custom: single-dash short clusters / attached values touching -c -f -o -p drop the whole flag list" {
+  user_cfg 'reviewers:
+  custom:
+    a:
+      harness: ocr
+      model: qwen/x
+      harness_options:
+        flags: ["--max-tools", "80", "-o/x"]
+    b:
+      harness: ocr
+      model: qwen/x
+      harness_options:
+        flags: ["-cv"]
+    c:
+      harness: ocr
+      model: qwen/x
+      harness_options:
+        flags: ["-fabc"]
+    d:
+      harness: ocr
+      model: qwen/x
+      harness_options:
+        flags: ["-p1"]
+    e:
+      harness: ocr
+      model: qwen/x
+      harness_options:
+        flags: ["-v"]
+'
+  run --separate-stderr "$SCRIPT" "$CFG"
+  [ "$status" -eq 0 ]
+  no_line_matching '^reviewer\.custom\.[a-d]\.flag\.'
+  has_line "reviewer.custom.e.flag.1=-v"
+  [[ "$stderr" == *"reviewer.custom.a.harness_options.flags: '-o/x' is reserved"* ]] || false
+  [[ "$stderr" == *"'-cv' is reserved"* ]] || false
+  [[ "$stderr" == *"'-fabc' is reserved"* ]] || false
+  [[ "$stderr" == *"'-p1' is reserved"* ]] || false
+}
+
+@test "custom: max_tokens_budget is capped at 9 digits (as strict as rc-ocr.sh)" {
+  printf 'reviewers:\n  custom:\n    a:\n      harness: ocr\n      model: qwen/x\n      harness_options:\n        max_tokens_budget: 1234567890\n    b:\n      harness: ocr\n      model: qwen/x\n      harness_options:\n        max_tokens_budget: 999999999\n' >"$CFG/config.local.yml"
+  run --separate-stderr "$SCRIPT" "$CFG"
+  [ "$status" -eq 0 ]
+  has_line "reviewer.custom.a.opt.max_tokens_budget=0"
+  has_line "reviewer.custom.b.opt.max_tokens_budget=999999999"
+  [[ "$stderr" == *"reviewer.custom.a.harness_options.max_tokens_budget: invalid value '1234567890'"* ]] || false
+}
+
+@test "custom: an inherited GIT_LITERAL_PATHSPECS=1 cannot turn the tracked check off (fails closed)" {
+  git -C "$BATS_TEST_TMPDIR" init -q repo
+  R="$BATS_TEST_TMPDIR/repo/.review-council"
+  mkdir -p "$R"
+  printf 'reviewers:\n  custom:\n    q:\n      harness: ocr\n      model: qwen/x\n      api_key_env: AWS_SECRET_ACCESS_KEY\n' >"$R/config.local.yml"
+  git -C "$BATS_TEST_TMPDIR/repo" add .review-council/config.local.yml
+  GIT_LITERAL_PATHSPECS=1 run --separate-stderr "$SCRIPT" "$R"
+  [ "$status" -eq 0 ]
+  has_line "reviewer.custom.q.source=committed"
+  has_line "reviewer.custom.q.api_key_env=OPENROUTER_API_KEY"
 }

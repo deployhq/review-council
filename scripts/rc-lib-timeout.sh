@@ -24,8 +24,11 @@ KILL_GRACE=3
 # <cap-seconds>. The cap is HARD: TERM at the cap, then KILL after KILL_GRACE,
 # so a TERM-ignoring/wedged child can't outlive the budget. Sets global LAST_RC
 # to the command's exit status (124/143/137 on a timeout kill). Never itself
-# fails, so it's safe to call under `set -e`. Kills the child pid only — no
-# process-group/setsid escalation (out of scope for leaf CLIs like agy/gemini).
+# fails, so it's safe to call under `set -e`. Descendants are signalled too:
+# GNU timeout signals its own process group; the fallback below starts the
+# child as a process-group leader (perl setpgrp) and signals that group, so a
+# subprocess an agentic CLI spawned can't outlive the cap. (Without perl the
+# fallback degrades to signalling the child pid only.)
 #
 # stdin is CLOSED (</dev/null) for the child. run_capped only ever wraps
 # non-interactive tools (the agy/gemini/codex reviewer CLIs and the static
@@ -53,16 +56,41 @@ run_capped() {
     # Watchdog: TERM at the cap, wait the grace, then KILL — matching -k above.
     # </dev/null is explicit here too (a POSIX async `&` already redirects stdin
     # from /dev/null, but state it rather than lean on that subtlety).
-    "$@" >"$_rc_out" 2>&1 </dev/null &
-    pid=$!
+    #
+    # Process group: perl's setpgrp makes the child a group leader (exec keeps
+    # the pid, so pgid == $pid) and the watchdog signals `-$pid`, the whole
+    # group. `exec { $ARGV[0] } @ARGV` never goes through a shell, even for a
+    # one-word argv. POSIX `kill -s SIG -- -PGID` works in bash, dash and
+    # macOS /bin/sh alike (dash rejects `kill -SIG -- -PGID`).
+    if command -v perl >/dev/null 2>&1; then
+      perl -e 'setpgrp(0, 0); exec { $ARGV[0] } @ARGV or exit 127' -- "$@" \
+        >"$_rc_out" 2>&1 </dev/null &
+      pid=$!
+      _rc_tgt="-$pid"
+    else
+      "$@" >"$_rc_out" 2>&1 </dev/null &
+      pid=$!
+      _rc_tgt="$pid"
+    fi
+    # Once the watchdog fires it ignores TERM, so the cancel below can't cut
+    # the TERM -> grace -> KILL escalation short: a leader that dies on TERM
+    # would otherwise leave a TERM-ignoring descendant alive. Each step falls
+    # back to the bare pid (a group not yet formed), and stops once neither
+    # the group nor the pid exists.
     (
       sleep "$_rc_cap"
-      kill -TERM "$pid" 2>/dev/null
+      trap '' TERM
+      kill -s TERM -- "$_rc_tgt" 2>/dev/null ||
+        kill -s TERM -- "$pid" 2>/dev/null || exit 0
       sleep "$KILL_GRACE"
-      kill -KILL "$pid" 2>/dev/null
+      kill -s KILL -- "$_rc_tgt" 2>/dev/null ||
+        kill -s KILL -- "$pid" 2>/dev/null
     ) >/dev/null 2>&1 &
     wd=$!
     wait "$pid" 2>/dev/null || LAST_RC=$?
+    # Cancel an unfired watchdog; a fired one ignores this and `wait` returns
+    # after its KILL step (bounded by KILL_GRACE).
     kill "$wd" 2>/dev/null || true
+    wait "$wd" 2>/dev/null || true
   fi
 }

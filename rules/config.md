@@ -13,16 +13,25 @@ Everything here is optional. With **no config file at all**, the plugin runs on 
 defaults (plus any `RC_*` environment overrides) — byte-identical to its pre-config
 behavior.
 
-## The two files
+## The files, and which ones are trusted
 
-| File | Committed? | Purpose |
-|---|---|---|
-| `.review-council/config.yml` | yes (team defaults) | Shared, checked-in configuration for the repo. |
-| `.review-council/config.local.yml` | **no — gitignored** | Per-machine overrides. Identical schema; wins over `config.yml`. |
+| File | Committed? | Trusted? | Purpose |
+|---|---|---|---|
+| `.review-council/config.yml` | yes (team defaults) | **no** — the reviewed repo writes it | Shared, checked-in configuration for the repo. |
+| `.review-council/config.local.yml` | **no — gitignored** | **yes, only while git does not track it** | Per-machine overrides. Identical schema; wins over `config.yml`. |
+| `~/.review-council/config.yml` | n/a — your home dir | **yes** | The **user layer**. In this release it is read **only** for [`reviewers.custom`](#reviewerscustom-block--custom-reviewer-seats) — every other key in it is ignored. Path override: `RC_USER_CONFIG`. |
 
-Both live in the **target repo's** `.review-council/` directory (the repo being reviewed),
-not the plugin. `config.local.yml` should be added to the repo's `.gitignore` so per-machine
-tweaks never get committed.
+The first two live in the **target repo's** `.review-council/` directory (the repo being
+reviewed), not the plugin. `config.local.yml` should be added to the repo's `.gitignore` so
+per-machine tweaks never get committed.
+
+**Being gitignored is a convention, not a boundary** — a reviewed repo can simply commit a
+`config.local.yml`. So when git **tracks** `config.local.yml`, the reader notes
+`config.local.yml is tracked by git — treated as untrusted` and handles it like the committed
+`config.yml` for the security-sensitive keys (`pr_comments.bot_token_env`, `api_key_env`, a
+custom seat's free-form `harness_options`, and a seat's trust `source`). Its ordinary keys
+still apply as before. Outside a git repo it counts as untracked. Environment variables are
+trusted too (they are yours, not the repo's).
 
 ## Precedence
 
@@ -37,6 +46,10 @@ env  >  config.local.yml  >  config.yml  >  built-in default
 - **Env (`RC_*`) overrides apply to `settings.*` and `static_analysis.*` only** (see their
   respective tables). Reviewers and lenses are controlled by the files (and defaults) only —
   there is no env override for the roster or lenses.
+- **Custom reviewer seats** (`reviewers.custom`) also read the user layer, per key:
+  `config.local.yml` (untracked) > `~/.review-council/config.yml` > `config.yml` (and a
+  tracked `config.local.yml`) > default. See the block's own section for the keys that only
+  trusted layers may set.
 
 ## `reviewers:` block
 
@@ -66,6 +79,172 @@ An empty model means "let the reviewer use its own default model" — nothing is
 council still needs `settings.min_reviewers` participants after disabling; if too few remain
 (also after availability detection), the existing min-reviewers handling applies (single-
 reviewer mode or a prompt).
+
+## `reviewers.custom:` block — custom reviewer seats
+
+Adds **one** extra Round-1 reviewer running a model **you** choose (Qwen, Kimi, GLM, DeepSeek,
+a local Ollama model, …) through a borrowed agentic CLI — in this release, Alibaba's
+OpenCodeReview (`ocr`). **Off by default and opt-in:** no seat exists until you name a
+`harness` and a `model`, and no model is ever defaulted. With no `custom:` block in any layer,
+the reader emits nothing for it and the run is byte-identical to a plugin without the feature.
+
+A seat is a **finder only**: it can add findings, never verify (or refute) anyone else's. Its
+behaviour in the council is set by `role` and by the model's **family** (derived from the
+slug — see below). Full transport details: `rules/providers.md` → Custom seat (`ocr`).
+
+### Example — a local Ollama seat (user layer, nothing leaves the machine)
+
+```yaml
+# ~/.review-council/config.yml — trusted; applies to every repo you review
+reviewers:
+  custom:
+    qwen-local:
+      harness: ocr
+      provider: ollama
+      model: qwen3.6:35b-a3b-coding-nvfp4
+      role: signal                  # findings go to a separate "Extra signals" section
+      harness_options:
+        effort: low
+        timeout_minutes: 45         # the seat's own deadline; see Budget below
+        env: { OCR_LLM_TIMEOUT: "600" }   # trusted layers only
+```
+
+### Example — an OpenRouter seat with its own key variable
+
+```yaml
+# ~/.review-council/config.yml, or an UNTRACKED .review-council/config.local.yml
+reviewers:
+  custom:
+    kimi:
+      harness: ocr
+      provider: openrouter
+      model: moonshotai/kimi-k2.7-code
+      role: reviewer                # merged into the main list; may count toward min_reviewers
+      api_key_env: OPENROUTER_REVIEW_KEY   # the NAME of the env var — never the key itself
+      harness_options:
+        effort: medium
+        concurrency: 4
+        max_tokens_budget: 2000000
+        flags: ["--max-tools", "80"]       # trusted layers only
+```
+
+The key **value** is read from your environment at run time and never appears in config, on a
+command line, or in the `ocr` config file the council writes.
+
+### Keys
+
+| Key (`reviewers.custom.<slot>.…`) | Default | Validation / notes |
+|---|---|---|
+| *(slot name)* | — | `^[A-Za-z0-9_-]{1,32}$`, checked **before** it is ever used in a query; an invalid name drops the seat with a note. |
+| `enabled` | `true` | bool |
+| `harness` | *(none — required)* | enum: `ocr`. Missing/invalid → seat dropped with a note. |
+| `provider` | `openrouter` | per harness — `ocr`: `openrouter` \| `ollama`. Invalid → seat dropped. |
+| `model` | *(empty → seat off)* | required; the `modelslug` charset (`^[A-Za-z0-9~@][A-Za-z0-9._:~@/-]{0,127}$`, no leading `-`). Decides the family. |
+| `role` | `signal` | `signal` \| `reviewer` — see [Role](#role). |
+| `api_key_env` | `OPENROUTER_API_KEY` (OpenRouter); empty (Ollama) | **Trusted layers only.** A POSIX identifier (`envname`), re-checked by the dispatch script. Ignored for Ollama. |
+| `harness_options.effort` | `low` | `low` \| `medium` \| `high` — `ocr`'s review rounds (1/2/3). |
+| `harness_options.concurrency` | *(ocr's own)* | integer 1–32 |
+| `harness_options.max_tokens_budget` | `0` (= ocr's default) | positive integer, at most 9 digits; `ocr` stops and publishes partial results when it is spent. |
+| `harness_options.timeout_minutes` | *(derived from the run budget)* | integer 1–180 — see [Budget](#budget-for-a-seat). |
+| `harness_options.flags` | *(none)* | **Trusted layers only.** A YAML list of extra `ocr review` argv tokens. Each token: letters, digits, `._:/@=,+%-` and the glob characters `*`/`?`, ≤ 256 chars; it reaches `ocr` as one quoted argv element, never through a command line. |
+| `harness_options.env` | *(none)* | **Trusted layers only.** A map `NAME: value` added to `ocr`'s environment. `NAME` is a POSIX identifier; values may not contain control characters. |
+
+**Typed vs free-form options.** The four typed `harness_options` are validated and accepted
+from **any** layer, including the committed `config.yml`. `flags` and `env` can shape `ocr`'s
+argv and environment freely, so they are honoured **only** from trusted layers; in the
+committed `config.yml` (or a tracked `config.local.yml`) they are ignored with a stderr note.
+
+**Reserved — never settable, from any layer.** Flags that would undo the seat's isolation or
+its output contract are dropped with a note: `--rule --repo --from --to --commit -c --tools
+--provider --model -o --output --format -f --audience --resume --preview -p` (also their
+`--flag=value` forms, and any single-dash cluster or attached value touching `-c -f -o -p`, e.g.
+`-o/x` or `-cv`). Reserved env names: `HOME`, `PATH`, `TMPDIR`, `OCR_NO_UPDATE`, and the
+provider key variable.
+
+**Don't put secrets in `harness_options.env`** — the effective config (including these lines)
+is echoed at the start of every run.
+
+### Trust: where a seat comes from
+
+Per key, `config.local.yml` (untracked) > `~/.review-council/config.yml` > the committed
+`config.yml` (and a tracked `config.local.yml`) > default. The reader reports each seat's
+`source`: `local` or `user` when a trusted layer names the seat, `committed` when **only** the
+repo's own config does. Note that a committed `config.yml` can still fill a typed key that no
+trusted layer sets — but never `api_key_env`, `flags` or `env`.
+
+**The confirm gate.** A legitimate-but-risky choice that comes **only** from the committed
+config makes the reader emit `confirm.<n>=<plain-language reason>`. The orchestrator asks you
+**once** at Step 0 and skips the seat for this run on "no" or no answer. In this release the
+trigger is a seat defined only in the committed `config.yml` that sends code off the machine
+(`provider: openrouter`): a repo you review cannot make the council send its code to OpenRouter
+on your key without your say-so. Values that are never legitimate from committed config
+(`api_key_env`, `flags`, `env`) are ignored with a note — no question asked.
+
+### Role
+
+`role` is the only knob for how a seat behaves in the council:
+
+| | `signal` (default) | `reviewer` |
+|---|---|---|
+| Seat-only findings land in | a separate **"Extra signals (<slot> via ocr)"** report section | the main severity lists |
+| Counts toward `settings.min_reviewers` | never | only if the family is **distinct** (as re-checked after the run) **and** its coverage ends **complete** — otherwise it is demoted to `signal` for that run (with a note) |
+
+Either role: never a refutation verifier; no lens; no severity cap (`ocr` `critical` →
+critical, `high` → important, anything else → suggestion); never lifts solo-Claude mode for
+the native reviewers' findings.
+
+### Family
+
+Computed by the reader from the model slug — never configured. Strip leading `~`, lowercase,
+then match a prefix at a boundary (end, `/`, `-`, `.`, `:` or a digit):
+
+| Prefix | Family | Distinct? |
+|---|---|---|
+| `qwen` | `Qwen` | yes |
+| `moonshotai/kimi` | `Moonshot` | yes |
+| `z-ai/glm` | `Zhipu` | yes |
+| `deepseek` | `DeepSeek` | yes |
+| `anthropic/claude` | `Claude` | no — same as native Claude |
+| `openai/gpt` | `OpenAI` | no — same as Codex |
+| `google/gemini` | `Google` | no — same as the Google slot |
+| anything else (`x-ai/grok-4`, `openrouter/fusion`, `@preset/x`, …) | `unknown` | no |
+
+A **distinct** seat's findings go through the refutation pass like any single-family finding
+and can corroborate another family's. A **non-distinct** seat is allowed (you may run a Claude
+or GPT model through `ocr`), but its findings skip refutation, stay `[unverified]`, and
+**never** count as cross-family corroboration. The family is re-derived from the model `ocr`
+reports it actually ran; a mismatch makes it `unknown` for that run, with a note.
+
+### Budget for a seat
+
+`ocr` is usually the run's long pole, so its deadline comes from `settings.run_budget_seconds`,
+not `reviewer_timeout_seconds`: ⅓ of the budget is reserved for refutation and the judge, and
+`deadline_min = max(1, floor((run_budget_seconds − reserve) / 60))`, clamped to 180 — 6 minutes
+at the 600 s default, so **expect partial coverage** unless you raise the budget.
+`harness_options.timeout_minutes` replaces the derived value. `ocr` multiplies its deadline by
+its rounds (`effort` medium ×2, high ×3). The seat runs on **its own clock**: its elapsed
+time never counts toward the run's budget check, so a long `timeout_minutes` never skips the
+refutation pass for the other reviewers' findings — the run simply lasts as long as the seat.
+To give only this seat more time, set its `timeout_minutes`; there is no need to raise
+`run_budget_seconds`.
+
+### Other rules
+
+- **One seat per run.** Every valid seat is emitted; the orchestrator runs the **first
+  available** one in `reviewer.custom_slots` order and notes the rest. The reader lists **trusted seats
+  first** — untracked `config.local.yml`, then the user file, then the tracked local file and
+  committed `config.yml` (document order within each) — so a reviewed repo's seat can never
+  displace one you configured.
+- **Availability:** `ocr` and `jq` installed; for OpenRouter, the variable `api_key_env` names
+  is set and non-empty; and the target has a diff (a plan/document review skips the seat).
+- **Egress:** OpenRouter seats send review context to OpenRouter and the model's host, with
+  `data_collection: deny` hard-coded on every request (never read from any config). Ollama
+  seats talk to `127.0.0.1:11434` only. Endpoints are council literals — there is no URL key.
+
+Reader output (the `# custom reviewers` section): `reviewer.custom_slots=<a,b>`, then per
+seat `reviewer.custom.<s>.enabled|source|needs_confirm|harness|provider|model|role|api_key_env|family|distinct`,
+`reviewer.custom.<s>.opt.<option>`, `reviewer.custom.<s>.flag.<n>`,
+`reviewer.custom.<s>.env.<NAME>`, plus any `confirm.<n>=` lines.
 
 ## `lenses:` block
 
@@ -170,8 +349,8 @@ report-only behavior.
 pr_comments:
   enabled: false            # master switch. Env override: RC_PR_COMMENTS
   bot_token_env: RC_PR_BOT_TOKEN  # NAME of an env var holding a bot token (optional).
-                                  # TRUSTED layers only — config.local.yml or the
-                                  # RC_PR_BOT_TOKEN_ENV env override, NOT config.yml.
+                                  # TRUSTED layers only — an untracked config.local.yml or
+                                  # the RC_PR_BOT_TOKEN_ENV env override, NOT config.yml.
 ```
 
 - `enabled` (bool, default `false`) — when true, after the report Review Council offers to
@@ -189,10 +368,10 @@ pr_comments:
   reader-side discipline as `reviewers.*.model`; see "Security Invariants" in `CLAUDE.md`).
   An explicit empty value is honored (means "no bot token → post as the `gh` user"). Because
   the **name** selects which local env var is read and sent to GitHub as a bearer token,
-  `bot_token_env` is honored **only from trusted layers** — `config.local.yml` (gitignored,
-  operator-owned) or the `RC_PR_BOT_TOKEN_ENV` env override — and is **ignored (with a note)
-  if set in the committed `config.yml`**, which is attacker-controlled when reviewing an
-  untrusted repo. Otherwise a reviewed repo could point it at a local secret
+  `bot_token_env` is honored **only from trusted layers** — an **untracked** `config.local.yml`
+  (operator-owned) or the `RC_PR_BOT_TOKEN_ENV` env override — and is **ignored (with a note)
+  if set in the committed `config.yml` or in a `config.local.yml` that git tracks**, both of
+  which are attacker-controlled when reviewing an untrusted repo. Otherwise a reviewed repo could point it at a local secret
   (e.g. `AWS_SECRET_ACCESS_KEY` — a perfectly valid identifier). The destination PR is always
   taken from local git, never from config.
 
@@ -286,6 +465,9 @@ review, it degrades to the next layer down:
 - **Unrecognized `static_analysis:` sub-keys** (e.g. a per-tool `enabled:` block, or any
   key other than the four documented ones) are ignored like any other unknown key — they
   do not error, and the four real keys still resolve normally.
+- **A custom seat** with an invalid name, harness, provider or model (or an empty model) is
+  dropped with a stderr note and not emitted; an invalid option falls back to its default; a
+  trusted-only key set in an untrusted layer is ignored with a note.
 
 The reader prints the **effective config** as `key=value` lines to **stdout** and all
 diagnostics to **stderr**, and always exits `0`.
@@ -351,6 +533,13 @@ uncomment only what you want to change.
 #   codex:      { enabled: true,  model: "" }
 #   google:     { enabled: true,  model: "" }
 #   perplexity: { enabled: true,  model: sonar }
+#   custom:                      # opt-in extra seat, OFF unless harness + model are set (rules/config.md → reviewers.custom)
+#     qwen:                      # slot name: A-Z a-z 0-9 _ -  (max 32)
+#       harness: ocr             # required
+#       provider: openrouter     # openrouter | ollama
+#       model: qwen/qwen3.8-max-0902   # required; no default model
+#       role: signal             # signal | reviewer
+#       # api_key_env and harness_options.flags/env: trusted layers only (~/.review-council/config.yml, untracked config.local.yml)
 
 # lenses:                        # review perspectives
 #   # `providers` is ALWAYS a list; OMIT it for `auto` (diff-aware selection).
