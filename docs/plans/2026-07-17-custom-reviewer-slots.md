@@ -76,7 +76,7 @@ codex exec \
 **Verified — the `ocr` harness (Phase 1).** Sources: spikes #1–#2 on deployhq/review-council#21 (five runs, one diff, 43 changed files); `ocr review --help` on the installed v1.12.13; the run-5 JSON (§12.7); and a read of the ocr source at commit `fabbdb2` — cited below as *verified against ocr v1.12.13 source*.
 
 - **It is a harness, not a model.** One configured model runs every stage (file grouping, one sub-agent per group, 1–3 review rounds, line re-anchoring, an LLM fact-check). Pointed at Claude or GPT it adds no family.
-- **Per-run provider and model:** `--provider <configured-name>` and `--model <slug>` override the config for one run (`--help`). But there is **no `--config` flag and no `OCR_CONFIG`/`OCR_HOME`** — every config path derives from `$HOME` (source). So per-run config means a **temp `HOME`** holding a council-written `.opencodereview/config.json`, with **no `api_key` in it**: the key is read from the provider's env fallback, e.g. `OPENROUTER_API_KEY` (`resolver.go:443-453`).
+- **Per-run provider and model:** `--provider <configured-name>` and `--model <slug>` override the config for one run (`--help`). But there is **no `--config` flag and no `OCR_CONFIG`/`OCR_HOME`** — every config path derives from `$HOME` (source). So per-run config means a **temp `HOME`** holding a council-written `.opencodereview/config.json`, with **no real `api_key` in it** (OpenRouter; an Ollama custom provider needs a placeholder — §12.2): the key is read from the provider's env fallback, e.g. `OPENROUTER_API_KEY` (`resolver.go:443-453`).
 - **Host-agent env leaks in.** With no complete config, ocr silently picks up `ANTHROPIC_BASE_URL`, `ANTHROPIC_AUTH_TOKEN` and `ANTHROPIC_MODEL` — which a Claude Code session sets. They must be unset for the run (source).
 - **OpenRouter data policy is enforceable through ocr.** Spike #1 sent `provider: {data_collection: "deny"}` via `providers.openrouter.extra_body`, and proved it is applied: a control with an impossible `only` filter returned 404.
 - **Rules are layered, not replaced.** `--rule <file>` is a layer **on top of** the reviewed repo's `.opencodereview/rule.json`. Rule text is first-match (`--rule` → repo → global → built-in), and the first layer with any `include`/`exclude` is used whole. A council file with a dummy exclude therefore displaces the repo file entirely; `ocr rules check` then reports `Source: Custom (--rule)` (source, and tested). Test files are excluded by default and come back only via an `include` in the rule file.
@@ -456,7 +456,7 @@ Everything below rests on §3 — *verified against ocr v1.12.13 source*, `--hel
 
 **1. Isolate.** Create a temp dir `$T` and use it as `HOME` — ocr has no `--config` flag and no `OCR_CONFIG`/`OCR_HOME`. Write into it:
 
-- `$T/.opencodereview/config.json` — **council-owned**: the provider stanza with its council-literal endpoint, the configured model, and for OpenRouter `providers.openrouter.extra_body = {"provider":{"data_collection":"deny"}}`. **No `api_key`**: ocr reads the key from the provider's env fallback (`OPENROUTER_API_KEY`, `resolver.go:443-453`).
+- `$T/.opencodereview/config.json` — **council-owned**: the provider stanza with its council-literal endpoint, the configured model, and for OpenRouter `providers.openrouter.extra_body = {"provider":{"data_collection":"deny"}}`. **No real `api_key`**: OpenRouter is an ocr preset, so ocr reads the key from its env fallback (`OPENROUTER_API_KEY`, `resolver.go:443-453`). Ollama is a `custom_providers` entry, and the env fallback applies only to presets — without an `api_key` ocr refuses to load it (`provider "ollama" has no api_key …`, verified), so the council writes the non-secret placeholder `"ollama"`.
 - a council-owned rule file `$R`, byte-for-byte: `{"rules":[{"path":"**","rule":"","merge_system_rule":true}],"exclude":["__none__"]}`. The dummy `exclude` is **required**: the first rule layer with any include/exclude is used whole, which is what displaces the repo's `.opencodereview/rule.json`.
 
 The user's own `~/.opencodereview/` is never read or written. Sessions land in `$T` and are deleted with it.
@@ -477,8 +477,9 @@ run_capped "$hard_cap_s" "$T/run.log" \
       --rule "$R" --provider "$provider" --model "$model" \
       --effort "$effort" --timeout "$deadline_min" \
       [--concurrency N] [--max-tokens-budget N] [the seat's trusted flags]
-# OpenRouter only: the key (value of the var api_key_env names; envname re-checked first) is piped in
-# and exported inside the child as OPENROUTER_API_KEY — never in argv.
+# OpenRouter only: the key (value of the var api_key_env names; envname re-checked first) is handed to
+# the child on fd 3 — run_capped closes stdin, so a stdin pipe would never arrive — read, exported as
+# OPENROUTER_API_KEY, fd closed, then exec ocr. Never in argv, never on disk.
 ```
 
 **Env allowlist (draft 5):** `env -i` replaces draft 4's `unset ANTHROPIC_*` — nothing from the host reaches `ocr` but the listed names, so a Claude Code host's `ANTHROPIC_*` variables cannot leak in. `$base`/`$head` come from the council's own target resolution in **local git, never from config** — the same invariant as the PR-digest target: a PR's `baseRefOid`/`headRefOid` (fetching `pull/<n>/head` when not checked out), the range base taken as their merge-base; the script rejects a leading `-` and re-resolves each with `git rev-parse --verify` to a SHA. Worktree mode passes no range flags. **`--effort` is configurable** (`harness_options.effort`, default `low`); §12.3 multiplies the deadline by its rounds. JSON goes to `-o`, because `run_capped` merges stdout and stderr into its log.
