@@ -535,7 +535,7 @@ ocr · qwen (qwen/qwen3.8-max-0902): reviewed 14/23 selected files · 9 failed: 
       · 20 of 43 changed files excluded before review · 1 comment dropped (path not reviewed) · 0 warnings
 ```
 
-A file the seat did not review is not a file the council calls clean. For fuller coverage, raise `settings.run_budget_seconds` (the seat gets ⅔ of it, up to 180 minutes) or set `timeout_minutes` — and raise the budget with it, since the seat's run time also feeds the refutation pass's budget check.
+A file the seat did not review is not a file the council calls clean. For fuller coverage, raise `settings.run_budget_seconds` (the seat gets ⅔ of it, up to 180 minutes) or set the seat's `timeout_minutes` to give only that seat more time. The seat runs on its own clock: a slow seat makes the run longer, but never skips the double-check (refutation) of the other reviewers' findings.
 
 **Choosing a model (non-normative).** From our spikes on one 43-file diff:
 

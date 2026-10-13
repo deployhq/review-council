@@ -221,10 +221,11 @@ not `reviewer_timeout_seconds`: ⅓ of the budget is reserved for refutation and
 `deadline_min = max(1, floor((run_budget_seconds − reserve) / 60))`, clamped to 180 — 6 minutes
 at the 600 s default, so **expect partial coverage** unless you raise the budget.
 `harness_options.timeout_minutes` replaces the derived value. `ocr` multiplies its deadline by
-its rounds (`effort` medium ×2, high ×3), and the seat's measured elapsed feeds the run's
-long-pole budget check like any reviewer's — so a `timeout_minutes` or `effort` that outruns
-`run_budget_seconds` will skip the refutation pass for **every** finding. Raise
-`run_budget_seconds` with it.
+its rounds (`effort` medium ×2, high ×3). The seat runs on **its own clock**: its elapsed
+time never counts toward the run's budget check, so a long `timeout_minutes` never skips the
+refutation pass for the other reviewers' findings — the run simply lasts as long as the seat.
+To give only this seat more time, set its `timeout_minutes`; there is no need to raise
+`run_budget_seconds`.
 
 ### Other rules
 
