@@ -1,0 +1,39 @@
+{
+  "files": [
+    {
+      "path": "a.sh",
+      "status": "modified",
+      "insertions": 1,
+      "deletions": 0,
+      "will_review": true
+    },
+    {
+      "path": "a_test.go",
+      "status": "added",
+      "insertions": 1,
+      "deletions": 0,
+      "will_review": false,
+      "exclude_reason": "default_path"
+    },
+    {
+      "path": "b.md",
+      "status": "added",
+      "insertions": 1,
+      "deletions": 0,
+      "will_review": false,
+      "exclude_reason": "unsupported_ext"
+    },
+    {
+      "path": "main.go",
+      "status": "added",
+      "insertions": 1,
+      "deletions": 0,
+      "will_review": true
+    }
+  ],
+  "total_insertions": 4,
+  "total_deletions": 0,
+  "total_files": 4,
+  "reviewable_count": 2,
+  "excluded_count": 2
+}

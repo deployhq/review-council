@@ -1,0 +1,130 @@
+{
+  "_note": "REAL ocr v1.12.13 output (exit 1) for a 2-file diff with the provider pointed at an unreachable endpoint; run_id, repository identity, item ids, fingerprints, config hashes and session_id dropped.",
+  "status": "failed",
+  "llm": {
+    "provider": "ollama",
+    "model": "qwen-test"
+  },
+  "message": "Review failed: 0 finding(s); 2 of 2 selected item(s) failed.",
+  "summary": {
+    "files_reviewed": 2,
+    "comments": 0,
+    "total_tokens": 0,
+    "input_tokens": 0,
+    "output_tokens": 0,
+    "elapsed": "11s"
+  },
+  "tool_calls": {
+    "total": 0,
+    "by_tool": {},
+    "failure": 0,
+    "failure_by_tool": {},
+    "failure_details": []
+  },
+  "comments": null,
+  "groups": [
+    {
+      "label": "small change set",
+      "files": [
+        "a.sh",
+        "main.go"
+      ]
+    }
+  ],
+  "manifest": {
+    "schema_version": "ocr.run-manifest/v1",
+    "operation": "review",
+    "terminal_state": "failed",
+    "input": {
+      "mode": "range"
+    },
+    "execution": {
+      "ocr_version": "v1.12.13",
+      "provider": "ollama",
+      "model": "qwen-test",
+      "configured_concurrency": 8
+    },
+    "coverage": {
+      "selected": [
+        {
+          "path": "main.go"
+        },
+        {
+          "path": "a.sh"
+        }
+      ],
+      "completed": [],
+      "reused": [],
+      "failed": [
+        {
+          "path": "main.go",
+          "classification": "timeout",
+          "reason": "LLM request timed out; configure OCR_LLM_TIMEOUT or provider timeout_sec"
+        },
+        {
+          "path": "a.sh",
+          "classification": "timeout",
+          "reason": "LLM request timed out; configure OCR_LLM_TIMEOUT or provider timeout_sec"
+        }
+      ],
+      "waived": []
+    },
+    "elapsed_ms": 11402
+  },
+  "retry_report": {
+    "schema_version": "ocr.llm-retry-report/v1",
+    "total_requests": 1,
+    "retried_requests": 1,
+    "total_retries": 4,
+    "recovered_requests": 0,
+    "failed_requests": 1,
+    "cancelled_requests": 0,
+    "requests": [
+      {
+        "provider": "ollama",
+        "model": "qwen-test",
+        "file_path": "a.sh,main.go",
+        "task_type": "main_task",
+        "request_no": 1,
+        "outcome": "failed",
+        "attempts": [
+          {
+            "attempt": 1,
+            "outcome": "error",
+            "error_class": "network",
+            "failure_phase": "transport",
+            "duration_to_headers_ms": 1
+          },
+          {
+            "attempt": 2,
+            "outcome": "error",
+            "error_class": "network",
+            "failure_phase": "transport",
+            "observed_backoff_ms": 440
+          },
+          {
+            "attempt": 3,
+            "outcome": "error",
+            "error_class": "network",
+            "failure_phase": "transport",
+            "observed_backoff_ms": 779
+          },
+          {
+            "attempt": 4,
+            "outcome": "error",
+            "error_class": "network",
+            "failure_phase": "transport",
+            "observed_backoff_ms": 1786
+          },
+          {
+            "attempt": 5,
+            "outcome": "error",
+            "error_class": "network",
+            "failure_phase": "transport",
+            "observed_backoff_ms": 3285
+          }
+        ]
+      }
+    ]
+  }
+}
