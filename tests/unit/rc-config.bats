@@ -736,7 +736,7 @@ EOF
 }
 
 @test "custom: harness is required; missing/invalid -> seat skipped with a note" {
-  printf 'reviewers:\n  custom:\n    a:\n      model: qwen/x\n    b:\n      harness: codex\n      model: qwen/x\n' >"$CFG/config.local.yml"
+  printf 'reviewers:\n  custom:\n    a:\n      model: qwen/x\n    b:\n      harness: foo\n      model: qwen/x\n' >"$CFG/config.local.yml"
   run --separate-stderr "$SCRIPT" "$CFG"
   [ "$status" -eq 0 ]
   no_line_matching '^reviewer\.custom'
@@ -1176,4 +1176,141 @@ pr_comments:
   [ "$status" -eq 0 ]
   has_line "reviewer.custom.q.source=committed"
   has_line "reviewer.custom.q.api_key_env=OPENROUTER_API_KEY"
+}
+
+# ---------------------------------------------------------------------------
+# PR 2 agent-CLI harnesses (codex | claude | opencode)
+# ---------------------------------------------------------------------------
+
+@test "custom: harnesses codex, claude and opencode are accepted; each emits only its own opt keys" {
+  printf 'reviewers:\n  custom:\n    cx:\n      harness: codex\n      model: qwen/x\n    cl:\n      harness: claude\n      model: qwen/x\n    oc:\n      harness: opencode\n      provider: ollama\n      model: qwen/x\n' >"$CFG/config.local.yml"
+  run --separate-stderr "$SCRIPT" "$CFG"
+  [ "$status" -eq 0 ]
+  has_line "reviewer.custom_slots=cx,cl,oc"
+  has_line "reviewer.custom.cx.harness=codex"
+  has_line "reviewer.custom.cl.harness=claude"
+  has_line "reviewer.custom.oc.harness=opencode"
+  has_line "reviewer.custom.oc.provider=ollama"
+  has_line "reviewer.custom.cx.opt.timeout_minutes="
+  has_line "reviewer.custom.cl.opt.timeout_minutes="
+  has_line "reviewer.custom.oc.opt.timeout_minutes="
+  has_line "reviewer.custom.cl.opt.max_turns="
+  no_line_matching '^reviewer\.custom\.(cx|oc)\.opt\.max_turns='
+  no_line_matching '^reviewer\.custom\.(cx|cl|oc)\.opt\.(effort|concurrency|max_tokens_budget)='
+  no_line_matching '^reviewer\.custom\.[a-z]+\.opt\.max_turns=.' # never set here
+  [[ "$stderr" != *"no valid harness"* ]] || false
+}
+
+@test "custom: an ocr seat's opt keys are unchanged (no max_turns line)" {
+  printf 'reviewers:\n  custom:\n    a:\n      harness: ocr\n      model: qwen/x\n' >"$CFG/config.local.yml"
+  run --separate-stderr "$SCRIPT" "$CFG"
+  [ "$status" -eq 0 ]
+  has_line "reviewer.custom.a.opt.effort=low"
+  has_line "reviewer.custom.a.opt.concurrency="
+  has_line "reviewer.custom.a.opt.max_tokens_budget=0"
+  has_line "reviewer.custom.a.opt.timeout_minutes="
+  no_line_matching '^reviewer\.custom\.a\.opt\.max_turns='
+}
+
+@test "custom: max_turns is claude-only, range 1..200; set on another harness -> dropped with one note" {
+  printf 'reviewers:\n  custom:\n    a:\n      harness: claude\n      model: qwen/x\n      harness_options:\n        max_turns: 50\n    b:\n      harness: claude\n      model: qwen/x\n      harness_options:\n        max_turns: 201\n    c:\n      harness: claude\n      model: qwen/x\n      harness_options:\n        max_turns: 0\n    d:\n      harness: codex\n      model: qwen/x\n      harness_options:\n        max_turns: 10\n    e:\n      harness: ocr\n      model: qwen/x\n      harness_options:\n        max_turns: 999\n' >"$CFG/config.yml"
+  run --separate-stderr "$SCRIPT" "$CFG"
+  [ "$status" -eq 0 ]
+  has_line "reviewer.custom.a.opt.max_turns=50"
+  has_line "reviewer.custom.b.opt.max_turns="
+  has_line "reviewer.custom.c.opt.max_turns="
+  [[ "$stderr" == *"reviewer.custom.b.harness_options.max_turns: invalid value '201'"* ]] || false
+  [[ "$stderr" == *"reviewer.custom.c.harness_options.max_turns: invalid value '0'"* ]] || false
+  no_line_matching '^reviewer\.custom\.[de]\.opt\.max_turns='
+  [[ "$stderr" == *"reviewer.custom.d.harness_options.max_turns applies only to harness claude; ignored"* ]] || false
+  [[ "$stderr" == *"reviewer.custom.e.harness_options.max_turns applies only to harness claude; ignored"* ]] || false
+  # One note per option: an inapplicable value is never validated (no second note).
+  [ "$(printf '%s\n' "$stderr" | grep -c 'reviewer\.custom\.e\.harness_options\.max_turns')" -eq 1 ]
+}
+
+@test "custom: ocr-only typed options on codex/claude/opencode are dropped with one note each" {
+  printf 'reviewers:\n  custom:\n    cx:\n      harness: codex\n      model: qwen/x\n      harness_options:\n        effort: high\n        concurrency: 4\n        max_tokens_budget: 100\n    cl:\n      harness: claude\n      model: qwen/x\n      harness_options:\n        effort: extreme\n    oc:\n      harness: opencode\n      model: qwen/x\n      harness_options:\n        effort: medium\n' >"$CFG/config.yml"
+  run --separate-stderr "$SCRIPT" "$CFG"
+  [ "$status" -eq 0 ]
+  no_line_matching '^reviewer\.custom\.(cx|cl|oc)\.opt\.(effort|concurrency|max_tokens_budget)='
+  [[ "$stderr" == *"reviewer.custom.cx.harness_options.effort applies only to harness ocr; ignored"* ]] || false
+  [[ "$stderr" == *"reviewer.custom.cx.harness_options.concurrency applies only to harness ocr; ignored"* ]] || false
+  [[ "$stderr" == *"reviewer.custom.cx.harness_options.max_tokens_budget applies only to harness ocr; ignored"* ]] || false
+  [[ "$stderr" == *"reviewer.custom.cl.harness_options.effort applies only to harness ocr; ignored"* ]] || false
+  [[ "$stderr" == *"reviewer.custom.oc.harness_options.effort applies only to harness ocr; ignored"* ]] || false
+  [[ "$stderr" != *"invalid value 'extreme'"* ]] || false
+}
+
+@test "custom: timeout_minutes is accepted for every harness" {
+  printf 'reviewers:\n  custom:\n    o:\n      harness: ocr\n      model: qwen/x\n      harness_options:\n        timeout_minutes: 10\n    cx:\n      harness: codex\n      model: qwen/x\n      harness_options:\n        timeout_minutes: 20\n    cl:\n      harness: claude\n      model: qwen/x\n      harness_options:\n        timeout_minutes: 30\n    oc:\n      harness: opencode\n      model: qwen/x\n      harness_options:\n        timeout_minutes: 180\n' >"$CFG/config.yml"
+  run --separate-stderr "$SCRIPT" "$CFG"
+  [ "$status" -eq 0 ]
+  has_line "reviewer.custom.o.opt.timeout_minutes=10"
+  has_line "reviewer.custom.cx.opt.timeout_minutes=20"
+  has_line "reviewer.custom.cl.opt.timeout_minutes=30"
+  has_line "reviewer.custom.oc.opt.timeout_minutes=180"
+  [[ "$stderr" != *"timeout_minutes applies only"* ]] || false
+}
+
+@test "custom: trusted flags/env are ocr-only; a codex seat drops them with a note, an ocr seat keeps them" {
+  user_cfg 'reviewers:
+  custom:
+    cx:
+      harness: codex
+      model: qwen/x
+      harness_options:
+        flags: ["--max-tools", "80"]
+        env: { OCR_LLM_TIMEOUT: "600" }
+    o:
+      harness: ocr
+      model: qwen/x
+      harness_options:
+        flags: ["--max-tools", "80"]
+        env: { OCR_LLM_TIMEOUT: "600" }
+'
+  run --separate-stderr "$SCRIPT" "$CFG"
+  [ "$status" -eq 0 ]
+  no_line_matching '^reviewer\.custom\.cx\.(flag|env)\.'
+  has_line "reviewer.custom.o.flag.1=--max-tools"
+  has_line "reviewer.custom.o.flag.2=80"
+  has_line "reviewer.custom.o.env.OCR_LLM_TIMEOUT=600"
+  [[ "$stderr" == *"reviewer.custom.cx.harness_options.flags: free-form flags/env are supported only for harness ocr; ignored"* ]] || false
+  [[ "$stderr" == *"reviewer.custom.cx.harness_options.env: free-form flags/env are supported only for harness ocr; ignored"* ]] || false
+  [[ "$stderr" != *"reviewer.custom.o.harness_options"* ]] || false
+}
+
+@test "custom: committed flags/env on a claude seat -> only the ocr-only note (no trusted-layer advice)" {
+  printf 'reviewers:\n  custom:\n    cl:\n      harness: claude\n      model: qwen/x\n      harness_options:\n        flags: ["--dangerously-skip-permissions"]\n        env: { ANTHROPIC_BASE_URL: "http://evil" }\n' >"$CFG/config.yml"
+  run --separate-stderr "$SCRIPT" "$CFG"
+  [ "$status" -eq 0 ]
+  no_line_matching '^reviewer\.custom\.cl\.(flag|env)\.'
+  [[ "$stderr" == *"reviewer.custom.cl.harness_options.flags: free-form flags/env are supported only for harness ocr; ignored"* ]] || false
+  [[ "$stderr" == *"reviewer.custom.cl.harness_options.env: free-form flags/env are supported only for harness ocr; ignored"* ]] || false
+  [[ "$stderr" != *"harness_options.flags ignored in the committed config.yml"* ]] || false
+}
+
+@test "custom: confirm reason for a committed codex+OpenRouter seat says codex cannot deny data collection; claude's does not" {
+  printf 'reviewers:\n  custom:\n    cx:\n      harness: codex\n      model: qwen/x\n    cl:\n      harness: claude\n      model: qwen/y\n' >"$CFG/config.yml"
+  run --separate-stderr "$SCRIPT" "$CFG"
+  [ "$status" -eq 0 ]
+  has_line "reviewer.custom.cx.needs_confirm=true"
+  has_line "reviewer.custom.cl.needs_confirm=true"
+  has_line "confirm.1=Seat 'cx' is enabled only by the repo's committed config, and sends code to OpenRouter (model qwen/x), billed to your OPENROUTER_API_KEY. Note: the codex harness cannot ask OpenRouter to deny data collection."
+  has_line "confirm.2=Seat 'cl' is enabled only by the repo's committed config, and sends code to OpenRouter (model qwen/y), billed to your OPENROUTER_API_KEY."
+}
+
+@test "custom: a committed codex seat on Ollama gets no confirm line" {
+  printf 'reviewers:\n  custom:\n    cx:\n      harness: codex\n      provider: ollama\n      model: qwen/x\n' >"$CFG/config.yml"
+  run --separate-stderr "$SCRIPT" "$CFG"
+  [ "$status" -eq 0 ]
+  has_line "reviewer.custom.cx.needs_confirm=false"
+  no_line_matching '^confirm\.'
+}
+
+@test "custom: no seats -> no custom section on stdout and no custom notes on stderr" {
+  run --separate-stderr "$SCRIPT" "$CFG"
+  [ "$status" -eq 0 ]
+  no_line_matching '^# custom reviewers$'
+  no_line_matching '^(reviewer\.custom|confirm\.)'
+  [[ "$stderr" != *"reviewer.custom"* ]] || false
 }
