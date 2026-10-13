@@ -82,15 +82,15 @@ reviewer mode or a prompt).
 
 ## `reviewers.custom:` block — custom reviewer seats
 
-Adds **one** extra Round-1 reviewer running a model **you** choose (Qwen, Kimi, GLM, DeepSeek,
-a local Ollama model, …) through a borrowed agentic CLI — in this release, Alibaba's
-OpenCodeReview (`ocr`). **Off by default and opt-in:** no seat exists until you name a
+Adds extra Round-1 reviewers, each running a model **you** choose (Qwen, Kimi, GLM, DeepSeek,
+a local Ollama model, …) through a borrowed agentic CLI — the **harness**: Alibaba's
+OpenCodeReview (`ocr`), `codex`, Claude Code (`claude`) or `opencode`. **Off by default and opt-in:** no seat exists until you name a
 `harness` and a `model`, and no model is ever defaulted. With no `custom:` block in any layer,
 the reader emits nothing for it and the run is byte-identical to a plugin without the feature.
 
 A seat is a **finder only**: it can add findings, never verify (or refute) anyone else's. Its
 behaviour in the council is set by `role` and by the model's **family** (derived from the
-slug — see below). Full transport details: `rules/providers.md` → Custom seat (`ocr`).
+slug — see below). Full transport details: `rules/providers.md` → Custom seats.
 
 ### Example — a local Ollama seat (user layer, nothing leaves the machine)
 
@@ -137,19 +137,26 @@ command line, or in the `ocr` config file the council writes.
 |---|---|---|
 | *(slot name)* | — | `^[A-Za-z0-9_-]{1,32}$`, checked **before** it is ever used in a query; an invalid name drops the seat with a note. |
 | `enabled` | `true` | bool |
-| `harness` | *(none — required)* | enum: `ocr`. Missing/invalid → seat dropped with a note. |
-| `provider` | `openrouter` | per harness — `ocr`: `openrouter` \| `ollama`. Invalid → seat dropped. |
+| `harness` | *(none — required)* | enum: `ocr` \| `codex` \| `claude` \| `opencode`. Missing/invalid → seat dropped with a note. See [Which harness](#which-harness). |
+| `provider` | `openrouter` | `openrouter` \| `ollama`, for every harness. Invalid → seat dropped. |
 | `model` | *(empty → seat off)* | required; the `modelslug` charset (`^[A-Za-z0-9~@][A-Za-z0-9._:~@/-]{0,127}$`, no leading `-`). Decides the family. |
 | `role` | `signal` | `signal` \| `reviewer` — see [Role](#role). |
 | `api_key_env` | `OPENROUTER_API_KEY` (OpenRouter); empty (Ollama) | **Trusted layers only.** A POSIX identifier (`envname`), re-checked by the dispatch script. Ignored for Ollama. |
-| `harness_options.effort` | `low` | `low` \| `medium` \| `high` — `ocr`'s review rounds (1/2/3). |
-| `harness_options.concurrency` | *(ocr's own)* | integer 1–32 |
-| `harness_options.max_tokens_budget` | `0` (= ocr's default) | positive integer, at most 9 digits; `ocr` stops and publishes partial results when it is spent. |
-| `harness_options.timeout_minutes` | *(derived from the run budget)* | integer 1–180 — see [Budget](#budget-for-a-seat). |
-| `harness_options.flags` | *(none)* | **Trusted layers only.** A YAML list of extra `ocr review` argv tokens. Each token: letters, digits, `._:/@=,+%-` and the glob characters `*`/`?`, ≤ 256 chars; it reaches `ocr` as one quoted argv element, never through a command line. |
-| `harness_options.env` | *(none)* | **Trusted layers only.** A map `NAME: value` added to `ocr`'s environment. `NAME` is a POSIX identifier; values may not contain control characters. |
+| `harness_options.effort` | `low` | **`ocr` only.** `low` \| `medium` \| `high` — `ocr`'s review rounds (1/2/3). |
+| `harness_options.concurrency` | *(ocr's own)* | **`ocr` only.** integer 1–32 |
+| `harness_options.max_tokens_budget` | `0` (= ocr's default) | **`ocr` only.** positive integer, at most 9 digits; `ocr` stops and publishes partial results when it is spent. |
+| `harness_options.timeout_minutes` | `ocr`: derived from the run budget; others: `settings.reviewer_timeout_seconds` | integer 1–180, every harness — see [Budget](#budget-for-a-seat). |
+| `harness_options.max_turns` | `settings.claude_max_turns` | **`claude` only.** integer 1–200 — Claude Code's `--max-turns`. |
+| `harness_options.flags` | *(none)* | **`ocr` only, trusted layers only.** A YAML list of extra `ocr review` argv tokens. Each token: letters, digits, `._:/@=,+%-` and the glob characters `*`/`?`, ≤ 256 chars; it reaches `ocr` as one quoted argv element, never through a command line. |
+| `harness_options.env` | *(none)* | **`ocr` only, trusted layers only.** A map `NAME: value` added to `ocr`'s environment. `NAME` is a POSIX identifier; values may not contain control characters. |
 
-**Typed vs free-form options.** The four typed `harness_options` are validated and accepted
+**Options per harness.** An option set on a harness it does not apply to is dropped with a
+note. `codex`, `claude` and `opencode` take **no** free-form `flags`/`env` from any layer: each has
+isolation-critical flags (`--sandbox`, `--tools`, `--pure`, …) and environment variables
+(`CODEX_HOME`, `ANTHROPIC_BASE_URL`, `OPENCODE_DISABLE_PROJECT_CONFIG`, …) that must never be
+overridable.
+
+**Typed vs free-form options.** The typed `harness_options` are validated and accepted
 from **any** layer, including the committed `config.yml`. `flags` and `env` can shape `ocr`'s
 argv and environment freely, so they are honoured **only** from trusted layers; in the
 committed `config.yml` (or a tracked `config.local.yml`) they are ignored with a stderr note.
@@ -217,6 +224,10 @@ reports it actually ran; a mismatch makes it `unknown` for that run, with a note
 
 ### Budget for a seat
 
+**`codex`, `claude`, `opencode`:** the cap is `harness_options.timeout_minutes`, else
+`settings.reviewer_timeout_seconds` (10 minutes by default) — the same limit as a native
+reviewer. Like every seat, they run on their own clock. **`ocr`:**
+
 `ocr` is usually the run's long pole, so its deadline comes from `settings.run_budget_seconds`,
 not `reviewer_timeout_seconds`: ⅓ of the budget is reserved for refutation and the judge, and
 `deadline_min = max(1, floor((run_budget_seconds − reserve) / 60))`, clamped to 180 — 6 minutes
@@ -230,21 +241,35 @@ To give only this seat more time, set its `timeout_minutes`; there is no need to
 
 ### Other rules
 
-- **One seat per run.** Every valid seat is emitted; the orchestrator runs the **first
-  available** one in `reviewer.custom_slots` order and notes the rest. The reader lists **trusted seats
-  first** — untracked `config.local.yml`, then the user file, then the tracked local file and
-  committed `config.yml` (document order within each) — so a reviewed repo's seat can never
-  displace one you configured.
-- **Availability:** `ocr` and `jq` installed; for OpenRouter, the variable `api_key_env` names
-  is set and non-empty; and the target has a diff (a plan/document review skips the seat).
+- **Several seats per run.** Every available seat runs, in `reviewer.custom_slots` order. The
+  reader lists **trusted seats first** — untracked `config.local.yml`, then the user file, then
+  the tracked local file and committed `config.yml` (document order within each). **Families,
+  not seats, count:** two seats on one vendor are one family for `min_reviewers` and for
+  cross-family corroboration.
+- **Availability:** the harness binary installed (`ocr` also needs `jq`); for OpenRouter, the
+  variable `api_key_env` names is set and non-empty. An `ocr` seat also needs a target with a
+  diff (a plan/document review skips it); the other harnesses review any target.
 - **Egress:** OpenRouter seats send review context to OpenRouter and the model's host, with
-  `data_collection: deny` hard-coded on every request (never read from any config). Ollama
-  seats talk to `127.0.0.1:11434` only. Endpoints are council literals — there is no URL key.
+  `data_collection: deny` hard-coded on every request (never read from any config) — **except
+  `codex`**, which has no way to send it: for a `codex` seat, set a data policy on the
+  OpenRouter key itself. Ollama seats talk to `127.0.0.1:11434` only. Endpoints are council
+  literals — there is no URL key.
+
+### Which harness
+
+| `harness` | Read-only boundary | Takes the council prompt / lens | Best for |
+|---|---|---|---|
+| `codex` | **OS kernel** sandbox (`--sandbox read-only`) | yes | The default general-purpose choice; the strongest boundary. No `data_collection: deny` on OpenRouter. |
+| `claude` | tool list (`--tools=Read,Grep,Glob`) | yes | Any model behind an Anthropic-compatible endpoint (OpenRouter, Ollama); real turn limit (`max_turns`). |
+| `opencode` | council-written deny-by-default config + two guards | yes | Pinned to the tested release (`1.19.0`); any other version is skipped. |
+| `ocr` | fixed four-tool set | no (own review pipeline, no lens) | Whole-diff review with a coverage manifest; slow. |
+
+Details and the evidence behind each boundary: `rules/providers.md` → Custom seats.
 
 Reader output (the `# custom reviewers` section): `reviewer.custom_slots=<a,b>`, then per
 seat `reviewer.custom.<s>.enabled|source|needs_confirm|harness|provider|model|role|api_key_env|family|distinct`,
-`reviewer.custom.<s>.opt.<option>`, `reviewer.custom.<s>.flag.<n>`,
-`reviewer.custom.<s>.env.<NAME>`, plus any `confirm.<n>=` lines.
+`reviewer.custom.<s>.opt.<option>`, and — `ocr` seats only — `reviewer.custom.<s>.flag.<n>`,
+`reviewer.custom.<s>.env.<NAME>`; plus any `confirm.<n>=` lines.
 
 ## `lenses:` block
 
