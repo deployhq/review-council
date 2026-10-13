@@ -51,6 +51,20 @@ test -n "$PERPLEXITY_API_KEY" && echo "set" || echo "not set"
 - If set: "Perplexity (API) ...... available"
 - If not set: "Perplexity ............ not configured — set `PERPLEXITY_API_KEY` env var"
 
+### Custom reviewer seat harness (`ocr` + `jq`) — optional, detect and PRINT-ONLY
+
+An opt-in custom reviewer seat (`reviewers.custom` in `rules/config.md`) runs a model you choose — e.g. Qwen on OpenRouter, or a local Ollama model — through Alibaba OpenCodeReview (`ocr`). It needs `ocr` and `jq`. **Detect and print only — `setup` never installs either, not even with consent.**
+
+```bash
+command -v ocr >/dev/null 2>&1 && ocr --version
+command -v jq  >/dev/null 2>&1 && jq --version
+```
+- Both found: "Custom seat (ocr) ...... available (ocr <version>, jq <version>) — configure a seat in ~/.review-council/config.yml"
+- `ocr` missing: "Custom seat (ocr) ...... not found — install: `npm i -g @alibaba-group/open-code-review`"
+- `jq` missing: "Custom seat (ocr) ...... jq not found — install: `brew install jq`"
+
+Present this row as optional — a seat does nothing until one is configured (no seat and no model is ever on by default). An OpenRouter seat also needs its key in the env var named by the seat's `api_key_env` (default `OPENROUTER_API_KEY`); never print a key's value.
+
 ### GitHub CLI (for PR reviews)
 ```bash
 command -v gh 2>/dev/null && gh auth status 2>&1 | head -3
@@ -154,6 +168,7 @@ Prerequisites:
 
 Optional:
   - Config files (yq) ......... [available (mikefarah v4 detected) | installed just now (mikefarah v4) | wrong yq — need mikefarah/yq v4 | not installed (using defaults + RC_* env)]
+  - Custom seat (ocr + jq) .... [available (ocr vX.Y.Z) | not found — install: `npm i -g @alibaba-group/open-code-review` | jq not found — install: `brew install jq`]  (opt-in; off until a seat is configured)
 
 Note: Claude is always available; the dedicated Security reviewer runs by default, but pinning lenses.security.providers in .review-council/config.yml replaces it with the named providers (see rules/config.md) — so it is available by default, not unconditionally. Both are the same model family (Claude), so council mode and the refutation pass still need at least one reviewer from a DIFFERENT family (Codex, Google, or Perplexity) to cross-verify against.
 
@@ -215,6 +230,13 @@ If the user accepts, write **`.review-council/config.yml`** with the **full-refe
 #   codex:      { enabled: true,  model: "" }
 #   google:     { enabled: true,  model: "" }
 #   perplexity: { enabled: true,  model: sonar }
+#   custom:                      # opt-in extra seat, OFF unless harness + model are set (rules/config.md → reviewers.custom)
+#     qwen:                      # slot name: A-Z a-z 0-9 _ -  (max 32)
+#       harness: ocr             # required
+#       provider: openrouter     # openrouter | ollama
+#       model: qwen/qwen3.8-max-0902   # required; no default model
+#       role: signal             # signal | reviewer
+#       # api_key_env and harness_options.flags/env: trusted layers only (~/.review-council/config.yml, untracked config.local.yml)
 
 # lenses:                        # review perspectives
 #   # `providers` is ALWAYS a list; OMIT it for `auto` (diff-aware selection).

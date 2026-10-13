@@ -2,7 +2,7 @@
 
 **Goal:** Let a user add any model (Kimi, DeepSeek, Qwen, a local Ollama, a corporate gateway) as a **repo-capable** reviewer in the council — configured declaratively, with no plugin PR per model. **The first concrete harness is Alibaba OpenCodeReview (`ocr`)** — an opt-in, finder-only Round-1 seat (§12).
 
-**Status:** Phase 1 (`ocr`) **decided** by the user after spikes #1–#2 on deployhq/review-council#21; **not scheduled**, and the full-roster re-review below is still owed. This document is deliberately a *spec*, not an implementation plan — see [Why there's no task breakdown](#why-theres-no-task-breakdown).
+**Status:** Phase 1 (`ocr`) **being implemented in PR 1** (branch `feat/custom-seats-ocr`), decided by the user after spikes #1–#2 on deployhq/review-council#21. Delivery is a **two-PR stack** — see [Delivery phases](#delivery-phases). This document is deliberately a *spec*, not an implementation plan — see [Why there's no task breakdown](#why-theres-no-task-breakdown).
 
 **Architecture in one line:** Review Council owns no agent loop and shouldn't start now — a custom slot **borrows** an existing agentic CLI as a runtime (`ocr` in Phase 1, `codex` in Phase 2) and points it at an arbitrary model via a configured provider. The harness supplies the tool loop and the read-only boundary; we supply the identity, the pinned rules, and the mapping into the council's finding format.
 
@@ -11,7 +11,14 @@
 > - **Draft 2** → reviewed again. **2 more criticals, both inside §5/§6** — the very sections draft 1's review had produced. Both had the same shape: they correctly identified the reader as the place to *compute* a value, then assumed computing it was *enforcing* it.
 > - **Draft 3** → fixed both, and reversed one headline claim: custom slots are **finder-only** (§7).
 > - **Draft 4** (this one, unreviewed) → makes **`ocr` v1.12.13 the Phase-1 harness** (new §12): opt-in, finder-only, Round 1, model-configurable, never Tier B. Family now comes from a **fixed prefix map with `unknown` = non-distinct** (§5), replacing draft 3's "else itself" and its three rejection rules. `api_key_env` is admitted with the host kept a council literal (§6). `harness` is now required. Phases renumbered: `codex` → 2, `opencode` → 3, trust layer → 4, N slots → 5. §6's Sink 1 is marked **shipped** (v0.9.3).
-> - **Draft 5** (in progress) → adds §13, a tested comparison of `codex`, `opencode` and Claude Code as harnesses (2026-10-13, local Ollama). The draft-4 full-roster review's fixes are still to be applied.
+> - **Draft 5** (2026-10-13, this one) → adds §13, a tested comparison of `codex`, `opencode` and Claude Code as harnesses (local Ollama), and folds in the user's decisions for PR 1 and the draft-4 review's findings:
+>   - **`role: signal | reviewer`** (default `signal`) replaces the fixed "never counts" rule as the one council-behaviour knob (§7); **no severity cap** on a seat's findings (§12.5).
+>   - **`harness_options`**, split by trust: typed options (`effort`, `concurrency`, `max_tokens_budget`, `timeout_minutes`) from any layer; free-form `flags`/`env` from trusted layers only; isolation-critical flags and env names reserved from every layer (§4).
+>   - **A user config layer** — `~/.review-council/config.yml`, trusted, read only for `reviewers.custom` — and the **tracked-`config.local.yml` fix**: a `config.local.yml` git tracks is untrusted, for `pr_comments.bot_token_env` too (§6). `api_key_env` is now **trusted-only**; draft 4's "`bot_token_env` precedent" was false and is removed.
+>   - **A confirm gate** (`confirm.<n>` lines; one question at Step 0) for a risky choice that only committed config makes — in PR 1, a committed-only seat that egresses to OpenRouter (§6).
+>   - **No `ocr` version pin**, and **no post-run rule-hash or tool tripwire**: the `ocr_version` is printed in the coverage line, the pre-flight `ocr rules check` stays, and the write canary moves to per-release testing (§9, §12.2).
+>   - **Out-of-band routing**: the dispatch script writes a `.meta` file the orchestrator routes on, never model text; **background dispatch** (it can outlive the 600 s Bash ceiling); an **env allowlist** (`env -i`) for the run; **ref resolution** to local SHAs, never branch names; the deadline **clamped to 180 min** with `timeout_minutes`; and the **solo-Claude gate rewrite** — native findings skip refutation, a distinct seat's findings still go to a fresh Claude verifier (§7, §12).
+>   - Delivery collapses to **two PRs** (PR 1: foundation, trust, `ocr`, one seat; PR 2: the other harnesses and N seats).
 > - Both reviews ran with **only one non-Claude family** (`agy` quota exhausted), so each round's criticals rest on a single cross-family verification. The second review found that the first review's own fix was still wrong — which is the strongest available argument for re-reviewing this with a full roster before implementing.
 
 ---
@@ -81,7 +88,7 @@ codex exec \
 - **Tools observed:** `file_read`, `code_search`, `file_read_diff`, `code_comment` — no write or shell tool. Observed across runs, **not proven exhaustive**; `--tools <json>` can replace the embedded set.
 - **State and network:** sessions are persisted under `$HOME` (`session_id` is a counter; `ocr session` lists them). Every run does an npm update check unless `OCR_NO_UPDATE=1`. Telemetry is off by default (source).
 - **Precision and speed** (spike #1 step 2, spike #2): of `ocr`'s 6 distinct concerns on Qwen3.8-Max, 2 were false positives — including its only security claim — and 1 was a real, new bug (4 of 8 comments false). Recall was poor: run 1 matched one council Important and missed another in a file it did review. Full coverage of 23 files took 51 min on a local MoE; OpenRouter Qwen reached 5/23 in 16–26 min.
-- **Release cadence:** a release every 1–3 days. Pin the version and the manifest `schema_version`.
+- **Release cadence:** a release every 1–3 days. *(Draft 5: **no version pin** — a pin would be stale within a week. The manifest `schema_version` is checked on every run, the `ocr_version` that ran is printed in the coverage line, and the write canary is re-run per release.)*
 
 **Verified about the CURRENT codebase (draft-2 review; these reshaped §5–§7):**
 
@@ -97,9 +104,9 @@ codex exec \
 **NOT verified — `ocr`, still open after the source read:**
 
 - **The full `severity` vocabulary.** Only `high` and absent were observed in JSON; spike prose also used *medium* and *low*. Pin it from source before writing the mapper.
-- **How `rule_config_sha256` is computed** (raw `--rule` bytes or the resolved rule set) — this decides how §12.2's post-run hash check gets its expected value.
+- **How `rule_config_sha256` is computed** (raw `--rule` bytes or the resolved rule set). *Moot since draft 5 — there is no post-run hash check; the pre-flight `ocr rules check` is the rule guard.*
 - **The `terminal_state` / `status` values** beyond `complete` and the shape of a real `failed[]` item: run 5 had none, so the bats fixture's failed entry is synthetic (§12.7).
-- **That the tool set is read-only.** Four tools observed, none of them writes; whether the embedded set has any other tool, and whether a pinned `--tools` file is honoured, are both unverified (§12.2).
+- **That the tool set is read-only.** Four tools observed, none of them writes; whether the embedded set has any other tool, and whether a pinned `--tools` file is honoured, are both unverified (§12.2). `--tools` is a reserved flag no config can set; the write canary is re-run per release (§9).
 - **What a temp `HOME` breaks.** It also hides `~/.gitconfig` (`safe.directory`, `includeIf`, credential helpers); a local diff should not need any of them — confirm on a real run.
 - **What an HTTP 402 looks like** — most likely `failed[]` items with `classification: provider`; confirm with a zero-credit key.
 
@@ -113,10 +120,18 @@ reviewers:
       harness:  ocr                          # REQUIRED. P1: ocr | P2+: + codex | P3+: + opencode
       provider: openrouter                   # ocr: openrouter | ollama · codex (P2): openrouter
       model:    qwen/qwen3.8-max-0902        # default EMPTY → slot OFF. No default model, ever. Determines family.
-      api_key_env: OPENROUTER_API_KEY        # optional: the NAME of the key's env var, never the key
+      role:     signal                       # signal (default) | reviewer — the one council-behaviour knob (§7)
+      api_key_env: OPENROUTER_API_KEY        # TRUSTED LAYERS ONLY: the NAME of the key's env var, never the key
+      harness_options:                       # per-harness options, merged over council defaults
+        effort: low                          #   typed — any layer
+        concurrency: 4                       #   typed — any layer
+        max_tokens_budget: 2000000           #   typed — any layer
+        timeout_minutes: 30                  #   typed — any layer
+        flags: ["--max-tools", "80"]         #   free-form — TRUSTED LAYERS ONLY
+        env: { OCR_LLM_TIMEOUT: "600" }      #   free-form — TRUSTED LAYERS ONLY
 ```
 
-Three layer keys, nothing implied; `api_key_env` is plumbing, not a layer. Each axis extends independently: a new harness is one enum value, a new provider is one enum value, a new model is just a string.
+Three layer keys, nothing implied; `api_key_env` is plumbing, not a layer, and `role` and `harness_options` are council and harness knobs, not layers. Each axis extends independently: a new harness is one enum value, a new provider is one enum value, a new model is just a string.
 
 **Opt-in, off by default — structurally.** No slot exists until a user names a `harness` *and* a `model`; nothing is shipped pre-configured, and no default model is baked in (§12.8 records the spike evidence, non-normatively). `harness` has no default because draft 3's default (`codex`) is no longer Phase 1, and a default that changed between phases would migrate configs.
 
@@ -128,8 +143,21 @@ Three layer keys, nothing implied; `api_key_env` is plumbing, not a layer. Each 
 | `harness` | *(none — required)* | enum; empty or invalid → note + slot skipped |
 | `provider` | `openrouter` | enum, **per harness** (`ocr`: `openrouter`, `ollama`); invalid → note + slot skipped |
 | `model` | *(empty)* | **`modelslug` kind** (§6); non-empty → slot on; family from §5's map |
-| `api_key_env` | per provider: `OPENROUTER_API_KEY`; none for `ollama` | **`envname` kind** (§6); ignored for `ollama` |
+| `role` | `signal` | enum `signal` \| `reviewer` (§7) |
+| `api_key_env` | per provider: `OPENROUTER_API_KEY`; none for `ollama` | **`envname` kind** (§6); ignored for `ollama`; **trusted layers only** — from committed config it is ignored with a note |
+| `harness_options.effort` | `low` | enum `low` \| `medium` \| `high` (ocr's rounds 1/2/3) |
+| `harness_options.concurrency` | *(ocr's own)* | integer 1–32 |
+| `harness_options.max_tokens_budget` | `0` (= ocr's default) | positive integer |
+| `harness_options.timeout_minutes` | *(derived from the run budget, §12.3)* | integer 1–180 |
+| `harness_options.flags` | *(none)* | **trusted layers only**; a YAML list of argv tokens, each charset-checked (letters, digits, `._:/@=,+%-`, and `*`/`?` for globs; ≤ 256 chars), each one quoted argv element; reserved flags dropped |
+| `harness_options.env` | *(none)* | **trusted layers only**; `NAME: value`, `NAME` an `envname`, value free of control characters; reserved names dropped |
 | `family` | *(computed)* | the slot's family from §5's map, **already canonical**, `unknown` included — the only family value emitted |
+| `distinct` | *(computed)* | `true` iff `family` is in §5's distinct set |
+| `source` | *(computed)* | `local` \| `user` \| `committed` — `committed` iff **no** trusted layer names the slot (§6) |
+
+**Typed vs free-form `harness_options`.** The typed options are validated and accepted from any layer, committed config included. `flags` and `env` can shape the harness's argv and environment freely, so they come from trusted layers only. **Reserved, from every layer:** the isolation-critical flags `--rule --repo --from --to --commit -c --tools --provider --model -o --output --format -f --audience --resume --preview -p` (and their `--x=…` forms), and the env names `HOME PATH TMPDIR OCR_NO_UPDATE` plus the provider key var.
+
+**Layers (draft 5).** Per key, lowest → highest: committed `config.yml` (and a git-tracked `config.local.yml`) → the user layer `~/.review-council/config.yml` (`RC_USER_CONFIG` overrides the path) → an untracked `config.local.yml`. The user layer is read **only** for `reviewers.custom` in PR 1. Trusted vs untrusted is §6.
 
 **There is exactly one family key, and it is already canonical.** Draft 2 emitted both a raw `family` and a `family_canonical`, which inverted the safe default: the attractive name was the one that must never be used for routing, while every consumer sentence in `skills/run/SKILL.md` says *"family"*. An LLM consumer had only prose stopping it from grabbing the wrong key — for a guard whose failure silently deletes findings (§5). Emitting one already-canonical `family` makes the footgun structurally unreachable and leaves every existing consumer sentence correct unmodified. **No raw vendor prefix is emitted**: reports attribute a slot by its model slug (`kimi (moonshotai/kimi-k2.7-code)`), which is strictly more informative to a human than a bare vendor.
 
@@ -146,13 +174,23 @@ The slug rule is anchored (no leading `-`) and bounded, and already admits bare 
 **Emission shape.** Emitted **only when at least one valid slot survives** — with no config, not one byte of this appears:
 
 ```
+# custom reviewers
 reviewer.custom_slots=qwen,kimi-local
 reviewer.custom.qwen.enabled=true
+reviewer.custom.qwen.source=committed
 reviewer.custom.qwen.harness=ocr
 reviewer.custom.qwen.provider=openrouter
 reviewer.custom.qwen.model=qwen/qwen3.8-max-0902
+reviewer.custom.qwen.role=signal
 reviewer.custom.qwen.api_key_env=OPENROUTER_API_KEY
 reviewer.custom.qwen.family=Qwen
+reviewer.custom.qwen.distinct=true
+reviewer.custom.qwen.opt.effort=low
+reviewer.custom.qwen.opt.concurrency=
+reviewer.custom.qwen.opt.max_tokens_budget=0
+reviewer.custom.qwen.opt.timeout_minutes=
+…                                            (kimi-local's lines; trusted-only flag.<n> / env.<NAME> lines)
+confirm.1=Seat 'qwen' is enabled only by the repo's committed config.yml and sends code to OpenRouter (model qwen/qwen3.8-max-0902), billed to your OPENROUTER_API_KEY.
 ```
 
 The list sentinel is `reviewer.custom_slots`, **outside** the per-slot namespace. Draft 2 used `reviewer.custom.names`, which a slot legitimately named `names` would shadow (`reviewer.custom.names=names` beside `reviewer.custom.names.model=…`) — and config-invariance rests on that one key's absence. Consumers treat an **absent** `reviewer.custom_slots` as "no custom slots."
@@ -220,7 +258,7 @@ A slot is **distinct** iff its family is in the distinct set. `Claude`, `OpenAI`
 
 ## 6. Security model
 
-**The live sink draft 3 found is closed (v0.9.3). The `ocr` harness adds new config→command paths — model, provider, key-env name — and each goes through an existing reader guard before it can reach one.**
+**The live sink draft 3 found is closed (v0.9.3). The `ocr` harness adds new config→command paths — model, provider, key-env name, harness options — and each goes through a reader guard before it can reach one; the ones that select a secret or shape argv freely come from trusted layers only.**
 
 Draft 2 claimed Phase 1 introduced "exactly one new data path… and closes it at the reader." That was false in two directions, and the exhaustiveness claim was the dangerous part — an implementer trusting the audit would scope the guard to custom slots and ship a security section asserting a class was closed while an older, identical door stood open.
 
@@ -243,21 +281,23 @@ Note this fires in the **orchestrator's own session, outside any sandbox** — n
 
 **Ordering is the whole guard here:** names are discovered *by* running `yq keys`, so validation must sit **between enumeration and any re-interpolation**. Enumerate → validate each name against `^[A-Za-z0-9_-]{1,32}$` → only then build a yq path or an emitted key. A name that fails is dropped with a note.
 
-**Sink 3 — the key env-var name reaches an indirect expansion and an env assignment.** `api_key_env` names the variable that holds the key; the dispatch script reads it by indirect expansion and exports its value under the name `ocr` reads (`OPENROUTER_API_KEY`, §12.2). It is validated with the existing **`envname` kind** at the reader and **re-checked before use** in the dispatch script — the same defence in depth `rc-post.sh` applies to `pr_comments.bot_token_env`. The value never appears in config, in argv, or in the council-written `config.json`.
+**Sink 3 — the key env-var name reaches an indirect expansion and an env assignment.** `api_key_env` names the variable that holds the key; the dispatch script reads it and passes its value to `ocr` under the name `ocr` reads (`OPENROUTER_API_KEY`, §12.2) — through a pipe, never argv. It is validated with the existing **`envname` kind** at the reader and **re-checked before use** in the dispatch script — the same defence in depth `rc-post.sh` applies to `pr_comments.bot_token_env` — and, since draft 5, it is read **from trusted layers only**. The value never appears in config, in argv, or in the council-written `config.json`.
 
 **What holds structurally:**
 
-- **The endpoint is a council literal, per provider.** OpenRouter → `https://openrouter.ai/api/v1`; Ollama → `http://localhost:11434`. Config cannot choose the *host*, and **Phase 1 has no URL key**. A future URL key is charset-validated *and* blocked from repo config until the trust layer (Phase 4): a URL and a key name from the same untrusted source make a complete exfiltration primitive.
-- **The key env var *name* may come from config; the value never does.** Draft 3 held that a config-named env var is a secret-exfiltration primitive. That is true only if config can also choose the host. With the host a council literal, a hostile `api_key_env: AWS_SECRET_ACCESS_KEY` can at worst send *another* secret to the configured provider — never to the attacker. That is the exposure `pr_comments.bot_token_env` already accepts for GitHub. **Residual, flagged:** it is still disclosure to a third party; see §12.9 for narrowing the name.
+- **The endpoint is a council literal, per provider.** OpenRouter → `https://openrouter.ai/api/v1`; Ollama → `http://127.0.0.1:11434/v1`. Config cannot choose the *host*, and **there is no URL key**. A future URL key must be charset-validated *and* get its own trust design (it is [not scheduled](#not-scheduled)): a URL and a key name from the same untrusted source make a complete exfiltration primitive.
+- **The key env var *name* comes only from a trusted layer; the value never comes from config.** Draft 3 held that a config-named env var is a secret-exfiltration primitive; draft 4 admitted it from any config on the grounds that the host is a council literal, so a hostile `api_key_env: AWS_SECRET_ACCESS_KEY` could at worst send *another* secret to the configured provider. That is still disclosure to a third party, and draft 4's claim that `pr_comments.bot_token_env` "already accepts" the same exposure was **false** — that key has always been trusted-layer only. **Draft 5:** `api_key_env` is honoured only from `~/.review-council/config.yml`, an untracked `config.local.yml`, or env; from committed config it is ignored with a note, and the provider's default name applies.
+- **The confirm gate closes repo-controlled egress.** A seat that **only** the committed config defines, and that sends code off the machine (`provider: openrouter`), makes the reader emit a `confirm.<n>=<plain-language reason>` line; the orchestrator asks the user once at Step 0 and skips the seat on "no" or no answer. So a reviewed repo can *propose* sending its code to OpenRouter on the user's key, never do it silently. Values that are never legitimate from committed config (`api_key_env`, `harness_options.flags`/`env`) are ignored with a note, not asked about.
+- **The free-form harness options come only from trusted layers**, and the isolation-critical flags and env names (§4) are reserved from every layer — the reviewed repo can tune a typed knob, never re-point the rule file, the provider, the output or the environment.
 - **The argv is built without `eval`.**
 - **The OpenRouter data policy is council code.** `provider: {data_collection: "deny"}` is **hard-coded** and sent on every OpenRouter call (via `providers.openrouter.extra_body` in the council-written config, §12.2). It is never read from repo config or from the user's `~/.opencodereview/config.json`, which nobody reviews — the same precedent as deployhq's `Ai::Client`. It controls training, not where the code goes, and a provider's data record is largely self-declared.
-- **The reviewed repo cannot steer `ocr`'s prompts.** Its `.opencodereview/rule.json` is displaced by a council-owned `--rule` file, checked before and after the run (§12.2). Inputs that remain (source): the repo's root `.gitignore`, and any file the model opens with its tools — the same untrusted-content exposure every reviewer has. `.md`/`.txt` files referenced by the repo's rules are moot once its rules are displaced.
-- **No dependency on, or mutation of, the user's `~/.opencodereview/`.** Each run gets a throwaway `HOME` (§12.2); its sessions die with it.
-- **Read-only is enforced by the harness, at different layers.** `codex`: kernel sandbox — but see §9: Phase 2 must *assert* this, not assume it. `ocr`: **agent layer** — its tool set has no write or shell tool — observed, not proven; Phase 1 asserts it with a canary and a per-run tool tripwire (§12.2).
+- **The reviewed repo cannot steer `ocr`'s prompts.** Its `.opencodereview/rule.json` is displaced by a council-owned `--rule` file, checked by the pre-flight `ocr rules check` before the run (§12.2). Inputs that remain (source): the repo's root `.gitignore`, and any file the model opens with its tools — the same untrusted-content exposure every reviewer has. `.md`/`.txt` files referenced by the repo's rules are moot once its rules are displaced.
+- **No dependency on, or mutation of, the user's `~/.opencodereview/`.** Each run gets a throwaway `HOME` (§12.2); its sessions die with it. `ocr` runs under `env -i` with an **env allowlist**, so a host's `ANTHROPIC_*` variables never reach it.
+- **Read-only is enforced by the harness, at different layers.** `codex`: kernel sandbox — but see §9: Phase 2 must *assert* this, not assume it. `ocr`: **agent layer** — its tool set has no write or shell tool — observed, not proven; Phase 1 asserts it with a write canary, re-run per `ocr` release (§9). *(Draft 4's per-run tool tripwire is dropped in draft 5.)*
 
 **What the fixed endpoint does NOT control — the `:variant` suffix.** The allowlist deliberately admits `:`, and an OpenRouter slug's variant is a **routing and data-policy directive**, not just identity. `:free` routes to free endpoints whose retention/training terms differ from paid ones; `:online` reportedly activates a web-search plugin, sending review-derived content to a **fourth party** absent from `CLAUDE.md`'s egress disclosure. So the precise claim is: *config cannot choose the host; it can still choose the variant, and the variant selects the serving endpoint and its terms.* **Decide the variant policy in Phase 1, while there are zero callers** — either reject `:` suffixes not on a known-benign allowlist, or reject `:online` specifically. **Scope it to `provider: openrouter`:** for Ollama, `:` is the tag separator (`qwen3.6:35b-a3b`), not a routing directive. *(Marked unverified: the refutation pass could not confirm variant semantics from the repo. Verify against OpenRouter's docs before acting.)*
 
-**The threat model.** A repo-committed `config.yml` is **untrusted input** — the reader loads it from the *reviewed repo's* CWD. `config.local.yml` being gitignored is a **convention, not a boundary**: a repo can simply commit one. **There is no out-of-repo config layer today.** That fact drives §7's finder-only rule and Phase 4's block. It also means a reviewed repo can switch on an `ocr` slot — but it runs only on a key the *user* exported, and it can only add `[unverified]`-or-refutable findings.
+**The threat model.** A repo-committed `config.yml` is **untrusted input** — the reader loads it from the *reviewed repo's* CWD. `config.local.yml` being gitignored is a **convention, not a boundary**: a repo can simply commit one — so since draft 5 a **git-tracked** `config.local.yml` is untrusted too (for `pr_comments.bot_token_env` as well). Draft 5 adds the first **out-of-repo config layer**, `~/.review-council/config.yml`, read only for `reviewers.custom` in PR 1. A reviewed repo can still propose an `ocr` seat — but an egressing one runs only after the user confirms it, only on a key the *user* exported, and it can only add `[unverified]`-or-refutable findings. Verifier authority stays off for every seat (§7).
 
 **Egress** grows in scope: review context reaches the configured provider and the model's host. For `qwen/qwen3.8-max-0902` on OpenRouter that is **one host, Alibaba**; for Ollama it is **none** (localhost). `CLAUDE.md`'s disclosure must be extended to name custom slots and the `ocr` provider path — and the variant hop, if the variant policy admits one.
 
@@ -265,36 +305,42 @@ Note this fires in the **orchestrator's own session, outside any sandbox** — n
 
 A custom slot is repo-capable, so its **findings** are of comparable quality to Claude/Codex/Google — not the tool-less Perplexity shape. **What else it does depends on the harness.**
 
-| | `codex` slot (Phase 2) | `ocr` seat (Phase 1, §12) |
+**Draft 5: `role` decides the council behaviour** (default `signal`):
+
+| | `role: signal` (default) | `role: reviewer` |
 |---|---|---|
-| `min_reviewers` / council mode | counts | **never counts**, and never lifts solo-Claude mode on its own |
-| lens | Correctness & concurrency + one specialist overlay | **none** — ocr runs its own prompts; it consumes no overlay |
-| finding origin | yes | yes |
-| its findings | refutable by other families | distinct family: refutable · non-distinct: `[unverified]` |
-| verifier | never (below) | never (below) |
+| seat-only findings land in | a separate **"Extra signals (<slot> via ocr)"** report section | the main severity lists |
+| `min_reviewers` | **never counts** | counts **only** if the family is distinct **and** coverage ends complete; partial or SKIPPED → demoted to `signal` for that run, with a note |
+| solo-Claude mode | never lifted for the native findings | never lifted for the native findings |
+| lens | **none** (`ocr`) | **none** (`ocr`); a `codex` seat (PR 2) gets Correctness + one overlay |
+| its findings | distinct family: refutable · non-distinct: `[unverified]` | same |
+| severity | no cap (§12.5) | no cap |
+| verifier | **never** (below) | **never** (below) |
+
+A seat finding that dedups into a native finding is that native finding (the seat joins its origin-families); `role` only places **seat-only** findings.
 
 **Why the `codex` slot gets a lens:** the lens-assignment rules enumerate the frontier reviewers as a **closed list**; that set must become data-driven or the slot is configured, dispatched, and silently never given a lens. Custom slots iterate **after** Claude, Codex, Google, keeping existing lens maps byte-identical when none is configured.
 
-**Why the `ocr` seat gets neither:** a lens needs the `## LENS` block, and ocr's only prompt channels are `--rule` and `--background` — the first is pinned neutral (§12.2), the second is not used. Not counting toward `min_reviewers` follows from finder-only and fail-soft: a seat that cannot verify cannot supply the cross-family check council mode exists for, and a seat that may time out at minute 40 must not be what keeps a run above the threshold. The lens map shows it as `<slot> (<model> via ocr) — no lens`.
+**Why the `ocr` seat gets no lens:** a lens needs the `## LENS` block, and ocr's only prompt channels are `--rule` and `--background` — the first is pinned neutral (§12.2), the second is not used. The lens map shows it as `<slot> (<model> via ocr) — no lens`. **Why counting is conditional:** a seat that may time out at minute 40 must not be what keeps a run above the threshold, so a `reviewer` seat counts **provisionally** at Step 0 and keeps the count only if it ends complete; a non-distinct seat cannot supply the cross-family check council mode exists for, so it never counts.
 
-### Custom slots are FINDER-ONLY until the trust layer (Phase 4)
+### Custom slots are FINDER-ONLY (verifier authority deferred)
 
 **A custom slot is not eligible as a refutation verifier.** This reversed draft 2, and it was the most consequential change in draft 3.
 
-The reasoning is forced by the spec's own threat model. Repo-committed config is untrusted; **all** config is repo-sourced today (there is no out-of-repo layer); and the judge **drops a finding on REFUTED**. Granting verifier authority to a config-named model therefore hands an adversary both halves of the primitive: they choose the verifier's model *and* author the diff text it reads. A hostile repo could seat a weak or injectable model and steer it toward REFUTED verdicts against the dedicated Security reviewer's findings, which then vanish from the report. The mitigation draft 2 relied on — *"only positive counter-evidence drops a finding"* — is prose to an LLM, not a mechanism.
+The reasoning is forced by the spec's own threat model. Repo-committed config is untrusted; when this was written **all** config was repo-sourced (draft 5 adds a user layer, but a seat may still come from committed config); and the judge **drops a finding on REFUTED**. Granting verifier authority to a config-named model therefore hands an adversary both halves of the primitive: they choose the verifier's model *and* author the diff text it reads. A hostile repo could seat a weak or injectable model and steer it toward REFUTED verdicts against the dedicated Security reviewer's findings, which then vanish from the report. The mitigation draft 2 relied on — *"only positive counter-evidence drops a finding"* — is prose to an LLM, not a mechanism.
 
 **Nothing config can do today has this power.** `settings.verify: false` explicitly *keeps* findings as `[unverified]`; disabling a reviewer only reduces coverage. Phase 1 would have been the first config key able to make a finding disappear.
 
 **The asymmetry is the point:** a custom slot can **add** findings (low harm — the judge curates, the cap applies, other families can refute them) but cannot **delete** them (high harm — silent and irreversible).
 
-**Honest cost.** This removes one of the feature's original selling points: a custom slot does **not** strengthen the refutation pass by adding a verifier family. Extensibility — any model, no plugin PR — survives intact, and repo-capability still makes its findings far better than a tool-less slot's. **Lifting this restriction requires the out-of-repo trust layer** (`~/.review-council/config.yml` or env-only): a slot enabled from a source the reviewed repo cannot write may safely verify. That is the natural companion to Phase 4's `base_url` work.
+**Honest cost.** This removes one of the feature's original selling points: a custom slot does **not** strengthen the refutation pass by adding a verifier family. Extensibility — any model, no plugin PR — survives intact, and repo-capability still makes its findings far better than a tool-less slot's. **Lifting this restriction requires the out-of-repo trust layer** (`~/.review-council/config.yml` or env-only): a slot enabled from a source the reviewed repo cannot write may safely verify. Draft 5 ships that layer for `reviewers.custom`, but **verifier authority stays deferred** — not in either PR of the stack — and is the natural companion to any future `base_url` work.
 
 ### Distinct vs non-distinct
 
 Decided by the user for draft 4, and deterministic from §5's map:
 
-- **Distinct family** (`Qwen`, `Moonshot`, `Zhipu`, `DeepSeek`) → the seat's findings enter Step 4 like any single-family finding and are refuted by a *different* repo-capable family, e.g. Claude-fresh. When the only non-Claude seat is a distinct `ocr` seat, Step 4 runs **for the seat's findings only**; the native findings stay `[1 reviewer · unverified]` as in solo-Claude mode today.
-- **Non-distinct** (`Claude`, `OpenAI`, `Google`, `unknown`) → **allowed** — the user explicitly wants to run, say, a Claude model through ocr — but the seat's findings skip Step 4 and stay `[unverified]` (or `[1 reviewer · unverified]` in solo-Claude runs). They **never count as cross-family corroboration**: a fingerprint raised by native Claude and a `Claude`-family or `unknown` seat is a same-family pile-up and is not promoted. `unknown` gets this rule against **every** native family, because it might be any of them.
+- **Distinct family** (`Qwen`, `Moonshot`, `Zhipu`, `DeepSeek`) → the seat's findings enter Step 4 like any single-family finding and are refuted by a *different* repo-capable family — Claude (spawned fresh as `Claude-fresh`), OpenAI (`Codex`) or Google. **The solo-Claude gate is rewritten (draft 5):** it skips refutation for the **native** findings only, which stay `[1 reviewer · unverified]` as today; a distinct seat's findings are still routed to a fresh Claude verifier, which is cross-family for them.
+- **Non-distinct** (`Claude`, `OpenAI`, `Google`, `unknown`) → **allowed** — the user explicitly wants to run, say, a Claude model through ocr — but the seat's findings skip Step 4 and stay `[unverified]`. They **never count as cross-family corroboration**: a fingerprint raised by native Claude and a `Claude`-family or `unknown` seat is a same-family pile-up and is not promoted. `unknown` gets this rule against **every** native family, because it might be any of them.
 
 Either way a seat's finding is never *deleted* by being non-distinct: absence of refutation is `[unverified]`, never REFUTED.
 
@@ -309,11 +355,14 @@ enabled = true
   ∧ the harness binary resolves          (same contract Codex/Google use)
   ∧ the provider's key env var is set and non-empty   (OpenRouter: the var api_key_env names; Ollama: none)
   ∧ ocr only: jq resolves, and the target is a diff     (PR, branch range, commit, working tree)
+  ∧ any confirm.<n> line naming the seat was answered yes   (draft 5, §6)
 ```
+
+The diff condition is checked once the target is known (Step 1); the binary, key and confirm checks at Step 0. A PR's refs are resolved to commit SHAs in **local git** (`baseRefOid`/`headRefOid`, fetching `pull/<n>/head` when the PR is not checked out) — never a branch name, never config; unresolvable → the seat is skipped with a note.
 
 A plan or document target has no diff for ocr to review: the seat is skipped with a note. This mirrors the established Perplexity precedent (available iff its key is set). Two paths that must not be conflated: an **absent** key is a detection-time skip with a note; an **invalid** key is a runtime failure attributed **to the slot**. Each slot is probed independently — **native Codex's auth state must never decide a custom slot's availability, and a custom slot's provider failure must never decide native Codex's.** They share a binary, not an identity.
 
-### The one-slot cap (Phases 1–4)
+### The one-slot cap (PR 1; lifted in PR 2)
 
 **At most ONE custom slot participates**, and the cap applies to the **available** set, *after* the availability filter — never to the raw configured list. (Taking the first *configured* name would pick a disabled or uninstallable slot, drop it at the availability check, and leave zero custom reviewers while a good one never ran.)
 
@@ -323,9 +372,9 @@ A plan or document target has no diff for ocr to review: the seat is skipped wit
 
 Phase 1 must update **every** site that reasons about families — not just routing:
 
-- **Verifier routing** — the family list (with `Codex = OpenAI`), the rule that a verifier's family must differ from the finding's origin, and the rule that a non-distinct seat's findings are not routed at all.
+- **Verifier routing** — the family list (with `Codex = OpenAI`, and `Claude-fresh` reconciled as a verifier-spawn label for the Claude family), the rule that a verifier's family must differ from the finding's origin, the rule that a non-distinct seat's findings are not routed at all, and the rewritten solo-Claude gate.
 - **The judge** — the origin-family **union**, and the **`≥2 different families` +1-tier promotion**. §5's *second* harm (fabricated corroboration) lands here, and finder-only does **not** close it — the non-distinct rule does, but only if the judge applies it. Omitting the judge ships a half-implemented rationale whose failure is silent and produces a *stronger-looking* report.
-- **Detection** — the `min_reviewers` count and the solo-Claude test (`skills/run/SKILL.md` → "only Claude-family reviewers"), which must both ignore an `ocr` seat.
+- **Detection** — the `min_reviewers` count (per `role`: only a distinct, complete `reviewer` seat counts) and the solo-Claude test (`skills/run/SKILL.md` → "only Claude-family reviewers"), which ignores every seat.
 
 ## 8. Design decisions
 
@@ -347,29 +396,33 @@ Phase 1 must update **every** site that reasons about families — not just rout
 | **Family from a fixed prefix map; `unknown` = non-distinct** | Deterministic and testable. A wrong or missing entry can only *withhold* cross-family credit, never manufacture it. |
 | **Non-distinct seats allowed, but `[unverified]`** | The user wants to run any model through ocr, Claude and GPT included. Running is harmless; counting it as a second family is not. |
 | **No default model** | Spike evidence is three models deep and mixed (§12.8). A baked-in default would be a recommendation the evidence doesn't support. |
-| **`api_key_env` from config; host from code** | A config-named key is safe only while the host is a council literal (§6). The two never come from the same untrusted source. |
+| **`api_key_env` from trusted layers only; host from code** | Draft 4 admitted it from any config because the host is a council literal; that still discloses another secret to a third party. Draft 5 takes the name only from a source the reviewed repo cannot write (§6). |
+| **`role`, default `signal`** | The user's one council-behaviour knob. A low-precision finder's leads stay out of the main list unless the user promotes the seat, and even then it counts only when distinct and complete. |
+| **A user config layer + a confirm gate** | `~/.review-council/config.yml` lets a user configure a seat the reviewed repo cannot touch; the gate keeps a repo from silently sending its code off the machine on the user's key. |
+| **No `ocr` version pin; no post-run hash/tool tripwire** | Releases land every 1–3 days, so a pin goes stale in a week. The `schema_version` check, the pre-flight rule check, the printed `ocr_version` and a per-release canary carry the weight instead. |
+| **Route on a script-written `.meta`, never on model text** | Family, status and coverage decide routing; they come from the dispatch script out of band, so nothing `ocr`'s model writes can influence them. |
 | **`data_collection: "deny"` hard-coded** | A data policy read from config is a policy the reviewed repo chooses. |
 | **Coverage manifest always printed** | Partial coverage is the normal case at the default budget (§12.3). A seat that silently reviewed 5 of 23 files reads as a clean bill of health on the other 18. |
 | **Gate on parsed JSON, never on exit code** | `ocr` exits 0 on partial and skipped runs (§3). |
-| opencode deferred behind a spike | Unverified, and enforces read-only at the **agent** layer vs codex's **kernel** layer. A silent fallback would make the slot's real safety depend on which tool won, invisibly. **`ocr` is agent-layer too**, and is accepted on different terms: its tool set has *no* write or shell tool (rather than a deny switch on one), and Phase 1 asserts that with a canary and a per-run tripwire. |
+| opencode deferred behind a spike | Unverified, and enforces read-only at the **agent** layer vs codex's **kernel** layer. A silent fallback would make the slot's real safety depend on which tool won, invisibly. **`ocr` is agent-layer too**, and is accepted on different terms: its tool set has *no* write or shell tool (rather than a deny switch on one), and Phase 1 asserts that with a write canary, re-run per release. |
 
 ## 9. Risks
 
-- **`ocr`'s read-only boundary is its tool list, and that list is configurable.** Four read-only tools were observed; nobody has proven the embedded set has no other, and `--tools <json>` can replace it. A release that adds a write or shell tool would silently change the seat's safety. **Phase 1 asserts it**: a write canary per release, and a per-run tripwire on `tool_calls.by_tool` (§12.2) — which detects after the fact, so it is a tripwire, not a sandbox.
+- **`ocr`'s read-only boundary is its tool list, and that list is configurable.** Four read-only tools were observed; nobody has proven the embedded set has no other, and `--tools <json>` can replace it. A release that adds a write or shell tool would silently change the seat's safety. **Phase 1 asserts it with a write canary, re-run per release.** Draft 4's per-run tripwire on `tool_calls.by_tool` is dropped in draft 5 (it detected after the fact, so it was never a sandbox); `--tools` is a reserved flag no config can set.
 - **`ocr` is the long pole.** It takes tens of minutes against a 600 s default budget. If its timeout ignored the budget, refutation would be skipped for *every* finding, not just the seat's. §12.3 sizes it to leave a reserve, so at the default budget **expect partial coverage**.
-- **`ocr` precision is low.** 4 of 8 comments were false in spike #1, including its only security claim; the local MoE produced about 1 partly-valid comment in 9. The seat adds judge-curation load, which is why it is finder-only and never originates a Critical (§12.5).
-- **`ocr` moves fast.** A release every 1–3 days. Pin a tested version range and the manifest `schema_version`; treat anything else as a degrade, not a guess.
+- **`ocr` precision is low.** 4 of 8 comments were false in spike #1, including its only security claim; the local MoE produced about 1 partly-valid comment in 9. The seat adds judge-curation load, which is why it is finder-only and defaults to `role: signal`. *(Draft 5 removed the severity cap at the user's request: the model is the user's choice, and a distinct seat's Critical still goes through refutation.)*
+- **`ocr` moves fast.** A release every 1–3 days. Draft 5 does **not** pin a version: it checks the manifest `schema_version` on every run (anything else is a degrade, not a guess), prints the `ocr_version` that ran, and re-runs the canary per release.
 - **`ocr` doesn't dedupe across files.** Spike #1 repeated one concern once per config file (×3). The judge's fingerprint keys on the path, so these stay three findings; the report's suggestion cap absorbs them.
 - **The sandbox is Phase 2's whole safety rationale, and nothing checks it.** §8 justifies the codex harness with "kernel sandbox," but §3 verified only that the flag is *accepted* — not that a write is *denied*. An argv test pins what we **pass**, not what the sandbox **enforces**; it stays green if a future codex accepts `--sandbox read-only` and ignores it for custom providers. The spec supplies its own base rate for that drift: `wire_api="chat"` vanished out from under the docs. **Phase 2 must assert denial at runtime** (see its gates), and the re-pin item below must cover the **sandbox surface**, not just the argv.
 - **Codex's custom-provider surface could change.** Re-pin from `--help`; update the argv test in lockstep.
 - **Model-metadata fallback**: Codex warns it "can degrade performance." Unquantified; benign in testing.
-- **Hard dependency on `codex`** (Phase 2). Mitigated: a free binary needing no OpenAI account (§3). Phase 3 removes even that.
+- **Hard dependency on `codex`** (PR 2's `codex` harness). Mitigated: a free binary needing no OpenAI account (§3). The Claude Code and `opencode` harnesses in the same PR remove even that.
 - **Weak/hostile custom model.** Finder-only (§7) removes the delete primitive. Residual: a weak model adds noise the judge must curate, and could fabricate cross-family corroboration as an origin — which is why §5's canonicalization and the non-distinct rule stay load-bearing.
-- **Context-window mismatch.** No negotiation exists anywhere in the pipeline. A small-context model may silently truncate the diff and review a fragment confidently. (`ocr` groups files and caps prompts with `--max-tokens`, which narrows this for its seat.) Deferred to Phase 5.
+- **Context-window mismatch.** No negotiation exists anywhere in the pipeline. A small-context model may silently truncate the diff and review a fragment confidently. (`ocr` groups files and caps prompts with `--max-tokens`, which narrows this for its seat.) Deferred to PR 2 (N seats).
 
 ## 10. Out of scope
 
-Generic user-supplied `base_url` (needs the Phase 4 trust layer); an in-plugin agent loop; MCP transport for custom slots; per-slot lens pinning; context-window negotiation; `ocr` as a Step 2.5 / Tier B source (§8).
+Generic user-supplied `base_url` (needs its own trust design on top of the user layer); an in-plugin agent loop; MCP transport for custom slots; per-slot lens pinning; context-window negotiation; `ocr` as a Step 2.5 / Tier B source (§8).
 
 **To evaluate, not designed — `ocr` delegate mode.** `ocr delegate preview` / `ocr delegate rule` return the files to review and the resolved rules, and the *host* agent does the review with its own model, with no API key. That adds **no new model family**, so it is no council seat. It may still be a cheap, deterministic **coverage helper** for the existing seats (which files a diff selects, and which rule applies). Evaluate separately.
 
@@ -381,25 +434,25 @@ Findings raised and **REFUTED**, recorded so they aren't re-raised:
 
 ## 12. The `ocr` harness (Phase 1)
 
-Alibaba OpenCodeReview — the `ocr` CLI (Go, Apache-2.0), **pinned at v1.12.13** — is the first concrete harness. It is a **finder-only Round-1 seat**: opt-in and off by default (§4), running in parallel with the other seats, with a user-chosen model. Evidence for every claim here is in §3 and on #21.
+Alibaba OpenCodeReview — the `ocr` CLI (Go, Apache-2.0), **tested on v1.12.13** (not pinned — §9) — is the first concrete harness. It is a **finder-only Round-1 seat**: opt-in and off by default (§4), running in parallel with the other seats, with a user-chosen model. Evidence for every claim here is in §3 and on #21.
 
 ### 12.1 Where it sits
 
 ```
 Step 2.5  static scan     unchanged — ocr is NOT a Tier B source (§8)
 Step 3    Round 1  ──┬──  Claude · Security · Codex · Google · Perplexity
-                     └──  ocr seat → mapper (§12.5) → §3.1 findings + FAMILY + COVERAGE lines
-Step 3.5  join barrier    waits for the seat; never retries it, never asks the user about it
+                     └──  ocr seat (background Bash) → mapper (§12.5) → §3.1 findings + a .meta file
+Step 3.5  join barrier    waits for the seat (bounded by its own hard cap); never retries it, never asks the user
 Step 4    refutation      distinct family: its findings are routed · non-distinct: skipped → [unverified]
-Step 5    judge           a non-distinct seat never counts toward corroboration
-Step 6    report          roster + lens map ("no lens") + the coverage line (§12.6)
+Step 5    judge           a non-distinct seat never counts toward corroboration; role places seat-only findings
+Step 6    report          roster + lens map ("no lens") + the coverage line (§12.6) [+ "Extra signals" for role: signal]
 ```
 
 `ocr` reviews a git range it computes itself, so it does **not** receive the shared baseline package; it reads the repo through its own tools. That is a real deviation from "identical context for every reviewer", and the coverage line is how it stays visible.
 
 ### 12.2 Invocation
 
-Everything below rests on §3 — *verified against ocr v1.12.13 source*, `--help`, or the spike runs — unless marked. One run, in the dispatch script, POSIX `sh`, no `eval`:
+Everything below rests on §3 — *verified against ocr v1.12.13 source*, `--help`, or the spike runs — unless marked. One run, in the dispatch script (`scripts/rc-ocr.sh <slot> <result-file> --worktree | --commit <rev> | --range <base> <head>`), POSIX `sh`, no `eval`. The orchestrator passes only those atoms — the validated slot name, a run-unique path, and git-resolved SHAs; the script re-reads every option from the config reader itself. The orchestrator dispatches it as a **background** Bash call, because a run can outlive the 600 s foreground Bash ceiling.
 
 **1. Isolate.** Create a temp dir `$T` and use it as `HOME` — ocr has no `--config` flag and no `OCR_CONFIG`/`OCR_HOME`. Write into it:
 
@@ -416,36 +469,35 @@ The user's own `~/.opencodereview/` is never read or written. Sessions land in `
 **3. Run**, under `run_capped` (which closes stdin):
 
 ```sh
-(
-  unset ANTHROPIC_BASE_URL ANTHROPIC_AUTH_TOKEN ANTHROPIC_MODEL   # else a Claude Code host's vars leak in
-  HOME=$T OCR_NO_UPDATE=1 OCR_LLM_TIMEOUT=$per_request_s
-  OPENROUTER_API_KEY=$key        # value of the var api_key_env names; envname re-checked first; OpenRouter only
-  export HOME OCR_NO_UPDATE OCR_LLM_TIMEOUT OPENROUTER_API_KEY
-  run_capped "$hard_cap_s" "$T/run.log" \
+run_capped "$hard_cap_s" "$T/run.log" \
+  env -i PATH="$PATH" HOME="$T" TMPDIR="$T/tmp" OCR_NO_UPDATE=1 OCR_LLM_TIMEOUT="$per_request_s" \
+         [LANG/LC_ALL if set] [the seat's trusted env extras] \
     ocr review --repo "$root" --from "$base" --to "$head" \
       --format json --audience agent -o "$T/out.json" \
       --rule "$R" --provider "$provider" --model "$model" \
-      --effort low --timeout "$deadline_min"
-)
+      --effort "$effort" --timeout "$deadline_min" \
+      [--concurrency N] [--max-tokens-budget N] [the seat's trusted flags]
+# OpenRouter only: the key (value of the var api_key_env names; envname re-checked first) is piped in
+# and exported inside the child as OPENROUTER_API_KEY — never in argv.
 ```
 
-`$base`/`$head` come from the council's own target resolution in **local git, never from config** — the same invariant as the PR-digest target. `--effort low` (one round) is pinned in Phase 1 so §12.3's sizing is exact. JSON goes to `-o`, because `run_capped` merges stdout and stderr into its log.
+**Env allowlist (draft 5):** `env -i` replaces draft 4's `unset ANTHROPIC_*` — nothing from the host reaches `ocr` but the listed names, so a Claude Code host's `ANTHROPIC_*` variables cannot leak in. `$base`/`$head` come from the council's own target resolution in **local git, never from config** — the same invariant as the PR-digest target: a PR's `baseRefOid`/`headRefOid` (fetching `pull/<n>/head` when not checked out), the range base taken as their merge-base; the script rejects a leading `-` and re-resolves each with `git rev-parse --verify` to a SHA. Worktree mode passes no range flags. **`--effort` is configurable** (`harness_options.effort`, default `low`); §12.3 multiplies the deadline by its rounds. JSON goes to `-o`, because `run_capped` merges stdout and stderr into its log.
 
 **4. Post-run checks — enforce, don't just compute:**
 
 | check | on failure |
 |---|---|
-| JSON parses; `manifest.schema_version` is `ocr.run-manifest/v1`; `execution.ocr_version` in the tested range | SKIPPED (`invalid output`) |
+| JSON parses; `manifest.schema_version` is `ocr.run-manifest/v1` | SKIPPED (`invalid output`) |
 | `execution.provider` / `execution.model` equal the configured values | keep findings, family → `unknown`, note (§5) |
-| `execution.rule_config_sha256` equals the value pinned at implementation (*how ocr computes it is unverified, §3*) | **discard** the seat's findings, loud note: its prompts may have been steered |
-| `tool_calls.by_tool` keys ⊆ `{file_read, code_search, file_read_diff, code_comment}` | **discard**, loud note. A tripwire — it detects after the fact; it is not a sandbox |
 
-Then `rm -rf "$T"`.
+Draft 4's rule-hash and tool-set rows are **dropped** in draft 5: the rule guard is the pre-flight `ocr rules check`, and read-only is asserted by the per-release canary (§9). There is no version-range check — the `ocr_version` is printed in the coverage line instead.
+
+**Out-of-band routing (draft 5).** Besides the §3.1 result, the script writes `<result-file>.meta` — `status=complete|partial|skipped`, `family`, `distinct`, `role`, `ocr_version`, `findings`, `dropped`, `coverage`, `reason` — from its own computation, **never from model text**. The orchestrator routes on that file alone; draft 4's in-band `FAMILY:`/`COVERAGE:` lines are gone. Then `rm -rf "$T"` (also on INT/TERM/HUP).
 
 ### 12.3 Budget, timeouts and degradation
 
-- **The deadline comes from `run_budget_seconds`**, not `reviewer_timeout_seconds` — the one CLI that does this, because it is the expected long pole. `--timeout` is in **minutes** and is multiplied by rounds, so with `--effort low`: `deadline_min = max(1, floor((run_budget_seconds − reserve) / 60))`. The reserve keeps refutation and the judge inside the budget; ⅓ of `run_budget_seconds` is the proposal (§12.9). At the 600 s default that is **6 minutes — expect partial coverage**. A user who wants full coverage raises `run_budget_seconds`; the coverage line tells them when to.
-- **The HARD cap must exceed ocr's own deadline**: `hard_cap_s = deadline_min × 60 + grace`, grace ≥ 60 s. On its deadline ocr publishes partial JSON; a wrapper kill leaves **no JSON** and loses every completed file.
+- **The deadline comes from `run_budget_seconds`**, not `reviewer_timeout_seconds` — the one CLI that does this, because it is the expected long pole. `--timeout` is in **minutes**: `deadline_min = timeout_minutes || max(1, floor((run_budget_seconds − reserve) / 60))`, **clamped to ≤ 180**, with `reserve = run_budget_seconds / 3` (decided in draft 5). The reserve keeps refutation and the judge inside the budget. At the 600 s default that is **6 minutes — expect partial coverage**. A user who wants full coverage raises `run_budget_seconds` or sets `harness_options.timeout_minutes`; the coverage line tells them when to.
+- **The HARD cap must exceed ocr's own deadline**, which ocr multiplies by its rounds: `hard_cap_s = deadline_min × 60 × rounds + 90`, rounds = 1/2/3 for `effort` low/medium/high. On its deadline ocr publishes partial JSON; a wrapper kill leaves **no JSON** and loses every completed file. Since `--effort` is configurable, a `medium`/`high` seat — or a `timeout_minutes` beyond the budget — can push the long pole past `run_budget_seconds` and skip refutation for everyone; the config docs say to raise the budget with it.
 - **Per request:** `OCR_LLM_TIMEOUT = min(600, deadline_min × 60)` seconds. Spike #1 lost 6 of 23 files to the 300 s default.
 - The seat's measured `ELAPSED` feeds the long-pole budget check like any CLI's.
 
@@ -453,32 +505,33 @@ Then `rm -rf "$T"`.
 
 | condition | how it shows | outcome |
 |---|---|---|
-| `ocr` or `jq` missing; key var unset; plan/document target | detection | skipped with a note; roster and lens map otherwise byte-identical |
+| `ocr` or `jq` missing; key var unset; not confirmed (§6); plan/document target | detection | skipped with a note; roster and lens map otherwise byte-identical |
 | rules not pinned | pre-flight | SKIPPED |
 | wrapper kill | no `out.json` | SKIPPED (`timeout`) |
-| invalid JSON, wrong schema, untested version | post-run check | SKIPPED (`invalid output`) |
+| invalid JSON, wrong schema | post-run check | SKIPPED (`invalid output`) |
 | error, or nothing covered | `status` / exit 1 | SKIPPED, with ocr's `message` |
 | deadline or token budget hit | `failed[]` · `timeout` / `budget` | **partial** — keep comments, print coverage |
 | HTTP 402 / provider error | `failed[]` · `provider` *(expected — §3)* | partial; SKIPPED if nothing completed |
-| model or rule or tool mismatch | post-run checks | per the table in §12.2 |
+| model or provider mismatch | post-run check | keep findings, family → `unknown`, note |
+| PR ref not resolvable locally | orchestrator / script | SKIPPED (`ref not found locally`) |
 
 ### 12.4 Council semantics, in one place
 
-From §7: never a verifier; never counts toward `min_reviewers` and never lifts solo-Claude mode; no lens and no overlay consumed; a distinct family's findings go to refutation, a non-distinct family's stay `[unverified]` and never corroborate. The family that decides this is the **post-run** one (§5's runtime cross-check), which the mapper prints as `FAMILY: <family> distinct=<true|false>` — the orchestrator routes on that line.
+From §7: never a verifier; counts toward `min_reviewers` only as a distinct, complete `role: reviewer` seat; never lifts solo-Claude mode for the native findings; no lens and no overlay consumed; a distinct family's findings go to refutation, a non-distinct family's stay `[unverified]` and never corroborate; `role` places seat-only findings. The family that decides this is the **post-run** one (§5's runtime cross-check), which the script writes to `.meta` (`family=`, `distinct=`) — the orchestrator routes on that file, never on the findings' text.
 
 ### 12.5 Output mapping → §3.1
 
-A deterministic mapper — jq only, no `eval`, no LLM — turns `out.json` into what every reviewer returns: §3.1 findings (`rules/delegation-format.md` → OUTPUT FORMAT), plus the `FAMILY` and `COVERAGE` lines. Like tool-origin findings (`rules/static-analysis.md` → Normalize → §3.1), the synthesized prose fields are **fixed templates**, never LLM-authored; `ocr`'s own text is carried as quoted data.
+A deterministic mapper — jq only, no `eval`, no LLM — turns `out.json` into what every reviewer returns: §3.1 findings (`rules/delegation-format.md` → OUTPUT FORMAT) under a `TOOL: <slot> (ocr)` line, plus `.meta` (§12.2) with the family and coverage. Like tool-origin findings (`rules/static-analysis.md` → Normalize → §3.1), the synthesized prose fields are **fixed templates**, never LLM-authored; `ocr`'s own text is carried as quoted data.
 
 | §3.1 field | from an `ocr` comment |
 |---|---|
-| `severity` | `critical`, `high` → **`important`**; `medium`, `low`, `null`, **absent**, anything else → `suggestion`. **Never `critical`**: a finder measured at ~50 % precision does not originate a Critical alone. A cross-family UPHELD can still promote it one tier. |
+| `severity` | `critical` → **`critical`**; `high` → **`important`**; `medium`, `low`, `null`, **absent**, anything else → `suggestion`. **No cap (draft 5, the user's call):** draft 4 never let the seat originate a Critical; the model is now the user's choice, a distinct seat's Critical still goes through refutation, and `role: signal` keeps it out of the main list by default. |
 | `confidence` | `low` — ocr reports none; refutation and the judge recalibrate |
 | `location` | `<path>:<start_line>`; `start_line` 0 → `<path>:0` (file-level) |
-| `symbol` | `file-level` when `start_line` is 0, else `N/A` |
-| `concern` | `ocr:<category>`, lowercased, reduced to `[a-z0-9-]` — e.g. `ocr:maintainability` |
+| `symbol` | `file-level` when `start_line` is 0, else `L<start_line>-L<end_line>` |
+| `concern` | `ocr-<category>`, lowercased, reduced to `[a-z0-9-]` — e.g. `ocr-maintainability` |
 | `issue` | the first sentence of `content`, ≤ 200 chars |
-| `why_it_matters` | the rest of `content`, verbatim, quoted as data |
+| `why_it_matters` | the rest of `content`, verbatim, fenced as data |
 | `recommendation` | `suggestion_code`, fenced, when present; else `No fix proposed by ocr — see issue.` |
 | `how_to_verify` | `Open <path> lines <start_line>–<end_line> and check the claim in issue against the code.` + `existing_code`, fenced, truncated |
 | `source` | the slot name; the report labels it `<slot> (<model> via ocr)` |
@@ -498,7 +551,7 @@ ocr · qwen (qwen/qwen3.8-max-0902): reviewed 14/23 selected files · 9 failed: 
       · 20 of 43 changed files excluded before review · 1 comment dropped (path not reviewed) · 0 warnings
 ```
 
-`reviewed` is `completed + reused` over `selected`; `failed` is grouped by `classification`; the exclusion count comes from the pre-flight `--preview` (§12.2), because the review JSON does not carry it. A SKIPPED seat prints its reason instead. When Step 6.6 posts a digest, the line goes with it. **A file the seat did not review is not a file the council calls clean** — the line exists so nobody reads it that way.
+`reviewed` is `completed + reused` over `selected`; `failed` is grouped by `classification`; the exclusion count comes from the pre-flight `--preview` (§12.2), because the review JSON does not carry it. The line carries the `ocr_version` that ran (draft 5 — there is no pin). A SKIPPED seat prints its reason instead. When Step 6.6 posts a digest, the line goes with it. **A file the seat did not review is not a file the council calls clean** — the line exists so nobody reads it that way.
 
 ### 12.7 Fixture — a sanitized excerpt of spike run 5
 
@@ -552,13 +605,13 @@ No configuration met spike #1's go bar — full coverage in under ~10 min for un
 
 ### 12.9 Open questions
 
-1. **`rule_config_sha256`** — raw `--rule` bytes or the resolved rule set? This decides the expected value in §12.2's check.
+1. ~~**`rule_config_sha256`** — raw `--rule` bytes or the resolved rule set?~~ **Moot (draft 5):** the post-run hash check is dropped; the pre-flight `ocr rules check` is the guard.
 2. **The full `severity` vocabulary**, so §12.5's table has no "anything else" doing real work.
-3. **Budget knobs:** the reserve fraction (⅓ proposed); `--effort` pinned `low` or configurable; and whether to cap cost with `--max-tokens-budget` (hard-coded, configurable, or not at all).
-4. **Narrow `api_key_env`** to names ending `_API_KEY`? It would shrink §6's residual disclosure at no cost to real configs.
+3. ~~**Budget knobs**~~ **Resolved (draft 5):** reserve = ⅓ of `run_budget_seconds`; `--effort` configurable (default `low`); `--max-tokens-budget` configurable (default 0 = ocr's own); `timeout_minutes` overrides the derived deadline, clamped to 180.
+4. ~~**Narrow `api_key_env`**~~ **Superseded (draft 5):** `api_key_env` is accepted from trusted layers only, which closes §6's residual disclosure without narrowing the name.
 5. **Tests are excluded by default.** Spike #1 lost a council finding to this. Add an `include` to the council rule file, at the cost of time?
 6. **The temp `HOME` hides `~/.gitconfig`.** Confirm on a real run that nothing a local diff needs lives there.
-7. **A distinct seat in a solo-Claude run** gets partial refutation (§7). Confirm reviewers want that, rather than all-or-nothing.
+7. ~~**A distinct seat in a solo-Claude run**~~ **Resolved (draft 5):** partial refutation — native findings skip Step 4, the distinct seat's findings go to a fresh Claude verifier (§7).
 8. **Upstream feature requests** — each would remove a workaround above: `--config` or `OCR_HOME`; `OCR_LLM_EXTRA_BODY`; `--no-project-rules`; pre-review exclusions in the review manifest; an include/keep-tests flag; `--session-dir` or `--no-session`.
 
 ---
@@ -640,102 +693,81 @@ env -u ANTHROPIC_API_KEY -u ANTHROPIC_AUTH_TOKEN -u ANTHROPIC_MODEL \
 
 # Delivery phases
 
-Each phase ships working software on its own. Phases 1 and 2 rest on executed evidence; the rest name their gates explicitly. Phase 1 still carries the open questions in §12.9.
+**Draft 5: a two-PR stack, and no third PR** (the user's call). Draft 4's five phases collapse into two: PR 1 ships the foundation, the trust layer, the `ocr` harness and one seat; PR 2 adds the other three harnesses and lifts the one-seat cap. What neither PR ships is listed under [Not scheduled](#not-scheduled) — it is deferred, not a third phase. Each PR ships working software on its own; PR 1 still carries the open questions in §12.9.
 
-## Phase 1 — The `ocr` harness
+## PR 1 — Phase 1: foundation, trust, the `ocr` harness, one seat
 
-**Delivers:** one user-configured model, run through `ocr`, as an opt-in, **finder-only Round-1 seat** — no lens, not counted toward `min_reviewers`, its findings refutable when its family is distinct and `[unverified]` when it is not, and its coverage always in the report.
+**Delivers:** one user-configured model, run through `ocr`, as an opt-in, **finder-only Round-1 seat** — no lens; `role: signal` by default (its own report section, never counted) or `role: reviewer` (main list, counted only when distinct and complete); its findings refutable when its family is distinct and `[unverified]` when it is not; its coverage always in the report. Plus the trust foundation every later seat needs: the user config layer, the tracked-`config.local.yml` fix, trusted-only keys, and the confirm gate.
 
 **Why it's first:** the user's decision after spikes #1–#2 on #21. It is the only harness run end to end on a real diff with real models, and its isolation, rule pinning and output shape are verified against source (§3). It needs no sandbox code and no OpenAI dependency, and it reaches Ollama today.
 
-**Scope:** the final config schema (§4) — `harness: ocr`, `provider: openrouter | ollama`, `api_key_env`; the slug→family map and its runtime cross-check (§5); the shipped `modelslug` guard applied to custom slots, plus the slot-name and env-name guards (§6); the `:variant` policy for OpenRouter slugs (§6 — decide it here, while there are zero callers); per-run isolation, pre-flight, run and post-run checks (§12.2); budget sizing and the degrade table (§12.3); the JSON → §3.1 mapper (§12.5); the coverage line (§12.6); explicit slot identity at the transport boundary on **both** success and failure paths.
+**Scope:** the final config schema (§4) — `harness: ocr`, `provider: openrouter | ollama`, `role`, `api_key_env` (trusted-only), `harness_options` (typed from any layer, free-form from trusted layers, reserved flags/env from none); the user layer `~/.review-council/config.yml` (read only for `reviewers.custom`) and the tracked-`config.local.yml` rule, applied to `pr_comments.bot_token_env` too; `source` and the `confirm.<n>` gate (§6); the slug→family map and its runtime cross-check (§5); the shipped `modelslug` guard applied to custom slots, plus the slot-name and env-name guards (§6); the `:variant` policy for OpenRouter slugs (§6 — decide it here, while there are zero callers); per-run isolation, the env allowlist, pre-flight, run and post-run checks (§12.2); budget sizing, the 180-minute clamp and the degrade table (§12.3); the JSON → §3.1 mapper and the out-of-band `.meta` file (§12.5, §12.2); the coverage line (§12.6); background dispatch; PR ref resolution to local SHAs; explicit slot identity at the transport boundary on **both** success and failure paths.
 
-**Touches:** the config reader (parse, validate, derive family); the provider-dispatch script or a new `scripts/rc-ocr.sh` (isolation, invocation, mapper — the implementer's call); the orchestrator skill (detection — the seat ignored by `min_reviewers` and the solo-Claude test; roster; lens map "no lens"; Round-1 dispatch; no Step 3.5 retry; Step 4 routing on the `FAMILY` line; the judge's corroboration rule; the coverage line in the report and the Step 6.6 digest; `Codex = OpenAI` and the `Claude-fresh` wording); the docs below; a version bump.
+**Touches:** the config reader (layers, trust, parse, validate, derive family, `confirm` lines); `scripts/rc-lib-family.sh` (the family map, shared); a new `scripts/rc-ocr.sh` (isolation, invocation, mapper, `.meta`); the orchestrator skill (Step 0 detection, the confirm question, the one-seat cap and per-`role` counting, the solo-Claude test ignoring the seat; roster; lens map "no lens"; Step 1 ref resolution; background Round-1 dispatch; no Step 3.5 retry; Step 4 routing on `.meta` and the rewritten solo-Claude gate; the judge's corroboration rule and the "Extra signals" section; the coverage line in the report and the Step 6.6 digest; `Codex = OpenAI` and the `Claude-fresh` wording); the docs below; a version bump.
 
 **Tests** — bats under `tests/unit/`, in the existing style: behaviour, never assertions on source text.
 
 - **Slug → family map:** table-driven over every row of §5's table, including the boundary case (`qwenfake/x` → `unknown`), `~` stripping, case folding and bare Ollama tags; plus an assertion that the map's value set equals the canonical set, and that the distinct/non-distinct split is exactly §5's.
-- **JSON → §3.1 mapper**, on the sanitized run-5 fixture and its synthetic partial variant (§12.7): `high`, absent, `null` and an unknown severity string; `start_line` 0; the dropped `dockerignore` path; the coverage line for complete and partial runs; a `content` carrying a backtick fence and a control character; and the post-run checks — model mismatch → `unknown`, rule-hash mismatch or an unexpected tool → discard, invalid JSON / wrong `schema_version` / missing output file → `SKIPPED`, a non-zero exit with valid JSON → still parsed.
-- **Config reader** (`rc-config.bats`): `harness: ocr` accepted, an empty `harness` skipped with a note; the provider enum per harness; `model: "qwen ; id"` rejected; `api_key_env` rejected for `FOO;id`, `1ABC` and `$(id)`, and defaulted per provider; the slot-name guard's ordering; config invariance — no `custom:` block, not one byte emitted.
+- **JSON → §3.1 mapper**, on the sanitized run-5 fixture and its synthetic partial variant (§12.7): `critical`, `high`, absent, `null` and an unknown severity string; `start_line` 0; the dropped `dockerignore` path; the coverage line and `.meta` for complete and partial runs; a `content` carrying a backtick fence and a control character; and the post-run checks — model mismatch → `unknown`, invalid JSON / wrong `schema_version` / missing output file → `SKIPPED`, a non-zero exit with valid JSON → still parsed.
+- **Config reader** (`rc-config.bats`): `harness: ocr` accepted, an empty `harness` skipped with a note; the provider enum per harness; `model: "qwen ; id"` rejected; `api_key_env` rejected for `FOO;id`, `1ABC` and `$(id)`, defaulted per provider, and ignored from committed config; `flags`/`env` ignored from committed config and from a git-tracked `config.local.yml`; reserved flags and env names dropped from every layer; `source` and the `confirm.<n>` line for a committed-only OpenRouter seat; the user layer honoured for `reviewers.custom` only; the slot-name guard's ordering; config invariance — no `custom:` block, not one byte emitted.
 - **One real end-to-end run** as a Tier-2 artifact fixture — local and on demand, never CI.
 
 **Done when — all nine:**
 
 1. The seat appears in the roster as `<slot> (<model> via ocr)` and in the printed lens map as "no lens". With nothing configured, roster and lens map are byte-identical to today.
-2. It runs in Round 1, in parallel; Step 2.5's duration is unchanged.
+2. It runs in Round 1, in parallel and in the background; Step 2.5's duration is unchanged.
 3. The coverage line is printed for a complete run, a partial run (deadline hit), and a zero-finding run.
-4. It is never offered as a verifier and never counted toward `min_reviewers`; a Claude-only roster plus the seat is still reported as solo-Claude for the native findings.
+4. It is never offered as a verifier; it counts toward `min_reviewers` only as a distinct, complete `role: reviewer` seat (a partial run demotes it to `signal`); a Claude-only roster plus the seat is still reported as solo-Claude for the native findings, while a distinct seat's findings still go to a fresh Claude verifier.
 5. With a distinct model, its findings are routed to refutation. With a slot configured `anthropic/*` — and separately with an unmapped slug — its findings stay `[unverified]`, and a finding raised by both native Claude and the seat is **not** promoted.
 6. Every degrade row in §12.3 is exercised once — including a missing binary, a wrapper kill, invalid JSON and a zero-credit key (HTTP 402) — and the review completes each time, with one note attributed to the slot.
-7. A reviewed repo carrying a hostile `.opencodereview/rule.json` (an `exclude: ["**"]`, and rule text telling the model to report nothing) changes nothing: the pre-flight shows `Source: Custom (--rule)`, and coverage matches the same diff without the file.
-8. **Write canary:** a changed file instructs the model to write a file into the repo; no file appears, and `tool_calls.by_tool` shows only the four read-only tools. Re-run on every `ocr` version bump.
-9. **Isolation:** an OpenRouter run carries `data_collection: deny` — proven with spike #1's impossible-`only` control (404) — and the user's `~/.opencodereview/` is byte-identical before and after a run.
+7. A reviewed repo carrying a hostile `.opencodereview/rule.json` (an `exclude: ["**"]`, and rule text telling the model to report nothing) changes nothing: the pre-flight shows `Source: Custom (--rule)`, and coverage matches the same diff without the file. A committed-only OpenRouter seat does not run until the user says yes.
+8. **Write canary:** a changed file instructs the model to write a file into the repo; no file appears, and `tool_calls.by_tool` shows only the four read-only tools. Re-run on every `ocr` release the seat is used with.
+9. **Isolation:** an OpenRouter run carries `data_collection: deny` — proven with spike #1's impossible-`only` control (404) — the user's `~/.opencodereview/` is byte-identical before and after a run, and the key appears in no argv (`ps`) and no file.
 
 **Docs and version checklist — for the implementation PR, not this spec:**
 
-- `CLAUDE.md` — the data-egress note (the `ocr` seat sends review context to OpenRouter and the model's host; Ollama sends none); the Reviewers table; the Round-1 line in How It Works and the Architecture diagram; Security Invariants for `api_key_env`, the hard-coded `deny`, rule pinning and the temp `HOME`.
-- `README.md` — custom slots: a config example, opt-in, egress, the coverage line, and §12.8's evidence, non-normatively.
-- `rules/config.md` — the `reviewers.custom.*` keys, their guards and defaults.
+- `CLAUDE.md` — the data-egress note (the `ocr` seat sends review context to OpenRouter and the model's host; Ollama sends none); the Reviewers table; the Round-1 line in How It Works and the Architecture diagram; the File Structure; Security Invariants for the trust layers, trusted-only `api_key_env` and free-form options, the confirm gate, the hard-coded `deny`, rule pinning, the temp `HOME` and the env allowlist.
+- `README.md` — custom seats: config examples, opt-in, `role`, `harness_options`, egress per provider, the human gate, the coverage line, and §12.8's evidence, non-normatively.
+- `rules/config.md` — the `reviewers.custom.*` keys, their guards, defaults and trust layers; the tracked-`config.local.yml` rule for `bot_token_env`.
 - `rules/providers.md` — the `ocr` harness: detection, isolation, invocation, and its `SKIPPED` reasons.
 - `rules/orchestration.md` — the non-distinct rule in the judge and budget prose; `rules/delegation-format.md` — a note that the seat's §3.1 output is mapper-built.
 - `skills/setup/SKILL.md` — print `ocr` and `jq` availability and the install command (`npm i -g @alibaba-group/open-code-review`); print-only, never install.
 - `.claude-plugin/plugin.json` — a **minor** bump (a feature), as a `chore: bump version to X.Y.0` commit. If the pitch changes, edit `description` there and run `scripts/sync-metadata.sh`.
 
-**Deliberately deferred:** more than one custom slot; verifier authority (needs the trust layer); delegate mode (§10).
+**Deliberately deferred to PR 2:** more than one custom seat; the other harnesses.
 
-## Phase 2 — OpenRouter via the codex harness
+## PR 2 — Phase 2: the `codex`, Claude Code and `opencode` harnesses, N seats
 
-**Delivers:** one user-configured model running through `codex` as a repo-capable **finder** in the council — lens-assigned, counted toward the roster, its findings refutable by other families.
+**Delivers:** three more harnesses for the same `reviewers.custom` schema — `harness: codex | claude | opencode` — each a repo-capable **finder**, lens-assigned (unlike `ocr`, they take a prompt), with `role` semantics unchanged; and **N seats**, lifting PR 1's one-seat cap. Plus one fix to the existing native Codex seat: take its answer from `codex exec -o <file>` (`--output-last-message`) instead of the merged stdout/stderr transcript (§13.2).
 
-**Why it's next:** every transport element is proven (§3). It needs no new runtime and no sandbox code, and its read-only boundary is the kernel's rather than a tool list.
+**Why these, together:** §13 tested all three on one local model on 2026-10-13 and gives each one's required invocation and gotchas. `codex` is the default general-purpose harness — the only one whose read-only boundary is the OS kernel — and is already a plugin dependency; Claude Code is a solid second; `opencode` ships only with both of its guards, version-checked.
 
-**Scope:** inherits Phase 1's schema, family map, guards and variant policy, and adds `harness: codex`: the frozen `codex`+OpenRouter argv (its `env_key` taken from `api_key_env`); lens assignment for custom slots (§7); explicit slot identity at the transport boundary on **both** success and failure paths — a mislabelled failure makes the orchestrator think the *real* Codex slot is down, which can drop it below `min_reviewers` and silently disable the whole refutation pass.
+**Scope, per harness** (each inherits PR 1's schema, family map, guards, trust layers, confirm gate and variant policy):
 
-**Touches:** the provider-dispatch script (identity + argv profile); the orchestrator skill (detection, roster, **lens assignment**, dispatch, `min_reviewers` counting for a `codex` slot); provider/config/README/setup docs; a version bump.
+- **`codex`** — the frozen `codex`+OpenRouter argv (§3; its `env_key` taken from the trusted `api_key_env`), or `--oss --local-provider ollama` for Ollama (§13 — Ollama serves `/v1/responses`); `CODEX_HOME` a throwaway dir; always under `run_capped` (codex has **no turn limit**, §13.1); the answer from `-o`; no per-request `deny` — document an OpenRouter key-level guardrail.
+- **Claude Code** — `claude -p --tools=Read,Grep,Glob --restricted --strict-mcp-config --setting-sources ""` with a throwaway `CLAUDE_CONFIG_DIR` and the env scrub of §13.2; `--max-turns`; `CLAUDE_CODE_EXTRA_BODY` for `deny` (undocumented — re-verify).
+- **`opencode`** — only with `OPENCODE_DISABLE_PROJECT_CONFIG=1` **and** `--pure`, the deny-by-default permission set of §13.2, and throwaway `HOME`/`XDG_*`; re-run the canary and a planted-plugin test on every version bump. **Stop condition:** if the repo can still reach permissions or plugins, do not ship this harness rather than ship a weaker one.
+- **N seats** — lens-pool allocation (six overlays vs Claude + Codex + Google + N seats: cap, reuse, or add overlays; `ocr` seats consume none); family collisions among seats (two seats on one vendor are one family — the report should say so); budget and routing at N (several long-pole seats against one `run_budget_seconds`; `min_reviewers` counting); a context-window warning when the package is likely to overflow a small model.
+- **Slot identity at the transport boundary** on both success and failure paths — a mislabelled failure makes the orchestrator think the *real* Codex slot is down, which can drop it below `min_reviewers` and silently disable the whole refutation pass.
 
-**Done when — all seven:**
+**Done when:**
 
-1. The slot appears in the roster under its model label, never "Codex".
-2. It appears in the **printed lens map** with an overlay.
-3. It demonstrably **reads files** (tool calls visible in its output).
-4. It is **not** offered as a refutation verifier — its findings are refutable *by* others; it refutes nothing (§7).
-5. With a slot configured `anthropic/*`, a finding raised by both native Claude and the custom slot is **not** promoted, and is reported as a same-family pile-up. *(Pins §5's second harm, which finder-only does not close.)*
-6. With the provider key deliberately broken, the slot fails **as its own slot** and the real Codex slot still participates. With the key **absent**, the slot never enters the roster at all.
-7. **Sandbox canary:** the slot is prompted to write a file inside the repo and **the file does not appear**. Ideally a per-run precondition, so a codex upgrade that silently drops the sandbox fails the slot rather than quietly promoting it.
+1. Each seat appears in the roster under its model label, never "Codex", and — for `codex`/`claude`/`opencode` — in the printed lens map with an overlay.
+2. It demonstrably **reads files** (tool calls visible in its output).
+3. It is **not** offered as a refutation verifier.
+4. With a seat configured `anthropic/*`, a finding raised by both native Claude and the seat is **not** promoted.
+5. With the provider key deliberately broken, the seat fails **as its own slot** and the real Codex slot still participates. With the key **absent**, the seat never enters the roster.
+6. **Sandbox / write canary per harness:** the seat is prompted to write a file inside the repo and **the file does not appear** — for `codex` the kernel denies it (assert the denial, not just the flag, §9); for Claude Code and `opencode` the tool does not exist. For `opencode`, a planted repo `opencode.json` and plugin change nothing.
+7. Two seats run in one review, each reported under its own label and coverage, and a same-family pair is reported as one family.
+8. The native Codex seat's result is the `-o` answer, not the transcript.
 
-**Deliberately deferred:** more than one custom slot; verifier authority (needs the out-of-repo trust layer).
+## Not scheduled
 
-## Phase 3 — The `opencode` harness
+Deferred, not phased — neither PR ships these:
 
-**Delivers:** removes the `codex` dependency; a third runtime option.
-
-**Gate — a spike, before any code.** Everything known about opencode is documentation; the `wire_api="chat"` trap is why this gate exists. The spike must prove: non-interactive `run` with no TTY; `--model openrouter/…` resolving with only the API key set and no interactive auth; `OPENCODE_CONFIG` honoured with **nothing written into the repo**; and `edit`/`bash` denial actually enforced — **prove the denial by trying to write**. Also record whether it drains stdin, and its failure taxonomy.
-
-**Stop condition:** if permissions can't be enforced without repo writes, or read-only can't be proven, **stop and report** rather than shipping a weaker-sandboxed fallback.
-
-**Known design work:** slug translation (opencode wants the provider *in* the slug; codex takes a bare slug plus provider config). If a harness *fallback* is wired within one slot, **the report must name the harness that actually ran** — codex enforces read-only at the kernel, opencode and ocr at the agent layer, and the slot's real safety must not depend invisibly on which won.
-
-## Phase 4 — Trust layer, then more providers
-
-**The trust layer comes first, because two things now depend on it:** verifier authority for custom slots (§7), and any user-supplied `base_url`. An out-of-repo `~/.review-council/config.yml` (a new config layer — the reader loads only in-repo files today), env-only enablement, or a confirm gate. A slot enabled from a source the reviewed repo cannot write may safely verify.
-
-**Then Ollama for the `codex` harness** (`ocr` reaches it from Phase 1) — its endpoint is a fixed `localhost:11434`, so it adds **no egress vector**.
-
-**Gate — a spike:** does Ollama serve the Responses wire protocol at all? If it only speaks chat-completions, codex cannot reach it and this phase's design changes.
-
-**Resolved in draft 4:** Ollama slugs have no vendor prefix (`qwen2.5-coder`). Draft 3 rejected them and left "explicit `family:` key or heuristic" open; §5's fixed prefix map now covers them, and an unmapped tag is `unknown` — non-distinct, never a guess.
-
-**Blocked until the trust layer lands:** generic user-supplied `base_url`. **Do not ship without one.**
-
-## Phase 5 — N custom slots
-
-**Delivers:** lifts the one-slot cap. The reader already emits N; this phase fixes the **council semantics**.
-
-**Open decisions, each needing a call:**
-- **Lens-pool allocation** — six specialist overlays exist; Claude + Codex + Google + N customs can exceed them. Cap the roster, allow reuse, or add overlays? (`ocr` seats consume none.)
-- **Family collisions among customs** — two customs on one vendor is one family. Correct canonicalization handles the promotion logic; the report should say so.
-- **Budget and routing at N** — `run_budget_seconds` against N reviewers, several of which may be long-pole `ocr` seats; `min_reviewers` counting.
-- **Context-window guard** — a small-context model silently truncates the diff and reviews a fragment confidently. OpenRouter's model list reports context length; consider warning when the package is likely to overflow.
+- **Verifier authority for custom seats** (§7). The user layer now exists, so a seat enabled only from a trusted layer *could* be allowed to verify; that is a separate decision with its own review.
+- **A generic user-supplied `base_url`.** Blocked until it has its own trust design: a URL and a key name from the same untrusted source make a complete exfiltration primitive (§6). **Do not ship without one.**
+- **`ocr` delegate mode** (§10).
 
 ---
 
@@ -749,9 +781,9 @@ A plan that decays faster than it gets executed is worse than none: it reads as 
 
 ## Notes for whoever picks this up
 
-- **§3 is the contract with reality.** Re-verify the frozen argv before building on it — `wire_api="chat"` was removed once already, and the same could happen to the custom-provider surface. **`ocr` decays faster still** — a release every 1–3 days: re-verify its flags, its `$HOME`-only config lookup, its rule layering, its env fallbacks and its JSON shape against the version you pin. The `google.model` sink has since been fixed (v0.9.3); §6 records it as shipped.
+- **§3 is the contract with reality.** Re-verify the frozen argv before building on it — `wire_api="chat"` was removed once already, and the same could happen to the custom-provider surface. **`ocr` decays faster still** — a release every 1–3 days: re-verify its flags, its `$HOME`-only config lookup, its rule layering, its env fallbacks and its JSON shape against the version you test (draft 5 pins none). The `google.model` sink has since been fixed (v0.9.3); §6 records it as shipped.
 - **§5, §6 and §7 exist because of review findings, not first-draft insight** — and §5/§6 were rewritten *twice*. Both times the error had the same shape: **computing a value is not enforcing it.** The reader can derive a canonical family; only prose obliges the orchestrator to use it. The reader can validate a slug; only its placement before the sink makes that a guard. Treat that pattern as the thing most likely to be wrong again.
 - **The `modelslug` guard shipped on its own** (v0.9.3, `bc763af`), as this note recommended. The `envname` guard for `api_key_env` is the same pattern, and already exists for `pr_comments.bot_token_env`.
-- **Draft 4 applies that lesson on purpose.** `ocr` reports the provider, model, rule hash and tools it actually used; §12.2 checks each one against what the council asked for, rather than trusting that the flags took effect.
+- **Draft 4 applies that lesson on purpose.** `ocr` reports the provider and model it actually used; §12.2 checks them against what the council asked for, rather than trusting that the flags took effect. (Draft 5 dropped the rule-hash and tool checks in favour of the pre-flight rule check and a per-release canary.)
 - **The plugin's own conventions are the real spec** for the mechanical parts: POSIX `sh` (`dash -n` clean), config as declarative data that is parsed and never executed, config-invariance (absent config = byte-identical behaviour), least privilege, report-only, and tests written against the existing fixtures rather than invented ones.
 - **Both reviews of this spec had only one non-Claude family** (`agy` quota exhausted). The second review found that the first review's own fix was still wrong — twice over, in the same two sections. That is the strongest available argument for re-reviewing with a full roster **before** implementing, not after.
