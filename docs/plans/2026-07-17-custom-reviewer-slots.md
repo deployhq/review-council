@@ -452,7 +452,7 @@ Step 6    report          roster + lens map ("no lens") + the coverage line (§1
 
 ### 12.2 Invocation
 
-Everything below rests on §3 — *verified against ocr v1.12.13 source*, `--help`, or the spike runs — unless marked. One run, in the dispatch script (`scripts/rc-ocr.sh <slot> <result-file> --worktree | --commit <rev> | --range <base> <head>`), POSIX `sh`, no `eval`. The orchestrator passes only those atoms — the validated slot name, a run-unique path, and git-resolved SHAs; the script re-reads every option from the config reader itself. The orchestrator dispatches it as a **background** Bash call, because a run can outlive the 600 s foreground Bash ceiling.
+Everything below rests on §3 — *verified against ocr v1.12.13 source*, `--help`, or the spike runs — unless marked. One run, in the dispatch script (`scripts/rc-ocr.sh <slot> <result-file> [--confirmed] --staged | --worktree | --commit <rev> | --range <base> <head>`; `--confirmed` only after the operator's yes for a `needs_confirm=true` seat, `--staged` reviews only the index — both added after the council review, 2026-10-13), POSIX `sh`, no `eval`. The orchestrator passes only those atoms — the validated slot name, a run-unique path, and git-resolved SHAs; the script re-reads every option from the config reader itself. The orchestrator dispatches it as a **background** Bash call, because a run can outlive the 600 s foreground Bash ceiling.
 
 **1. Isolate.** Create a temp dir `$T` and use it as `HOME` — ocr has no `--config` flag and no `OCR_CONFIG`/`OCR_HOME`. Write into it:
 
