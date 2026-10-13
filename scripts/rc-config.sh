@@ -96,10 +96,17 @@ over_ok="$(layer_ok "$over_file")"
 # repo can simply commit a config.local.yml — so a tracked one is treated as
 # untrusted for the security-sensitive keys (resolve_over, custom seats). Its
 # ordinary keys still apply, exactly as before. No git / not a repo -> untracked.
+#
+# The tracked check is CASE-INSENSITIVE (`:(icase)` pathspec magic): on a
+# case-folding FS (macOS default) a committed `Config.Local.yml` is the file we
+# just opened as config.local.yml, yet a case-sensitive ls-files would call it
+# untracked -> trusted. Fail closed: tracked under ANY casing -> untrusted.
+# GIT_LITERAL_PATHSPECS is pinned off: inherited as 1 it would disable the
+# magic, match nothing, and fail OPEN.
 over_trusted=0
 if [ "$over_ok" -eq 1 ]; then
   over_trusted=1
-  if git -C "$(dirname "$over_file")" ls-files --error-unmatch -- "$(basename "$over_file")" >/dev/null 2>&1; then
+  if GIT_LITERAL_PATHSPECS=0 git -C "$(dirname "$over_file")" ls-files --error-unmatch -- ":(icase)$(basename "$over_file")" >/dev/null 2>&1; then
     over_trusted=0
     echo "rc-config: $over_file is tracked by git — treated as untrusted (like config.yml) for security-sensitive keys" >&2
   fi
@@ -210,12 +217,15 @@ valid_enum() {
   return 1
 }
 
-# valid_kind <val> <kind>: bool|posint|uint|posint_le:<max>|enum:<a,b,..>|str|modelslug|envname
+# valid_kind <val> <kind>: bool|posint|uint|uint9|posint_le:<max>|enum:<a,b,..>|str|modelslug|envname
 valid_kind() {
   case "$2" in
     bool) valid_bool "$1" ;;
     posint) valid_posint "$1" ;;
     uint) valid_uint "$1" ;;
+    # ≤ 9 digits: the cap scripts/rc-ocr.sh's is_uint enforces (max_tokens_budget),
+    # so a value the reader emits is never one the runner rejects.
+    uint9) valid_uint "$1" && [ "${#1}" -le 9 ] ;;
     posint_le:*) valid_posint "$1" && [ "${#1}" -le 6 ] && [ "$1" -le "${2#posint_le:}" ] ;;
     enum:*) valid_enum "$1" "${2#enum:}" ;;
     str) valid_str "$1" ;;
@@ -624,13 +634,21 @@ valid_flagtoken() {
 }
 
 # Flags that would undo the seat's isolation or its output contract. Never
-# settable, from any layer. Matched on the part before any `=`.
+# settable, from any layer. Mirrors scripts/rc-ocr.sh's reserved_flag EXACTLY,
+# so the reader is never laxer than the runner: the long forms bare or with
+# `=value`, and ANY single-dash token touching -c -f -o -p (a shorthand cluster
+# such as -cv, or an attached value such as -o/x or -p1).
 reserved_flag() {
-  _rf_name="${1%%=*}"
-  for _rf_r in --rule --repo --from --to --commit -c --tools --provider --model \
-    -o --output --format -f --audience --resume --preview -p; do
-    [ "$_rf_name" = "$_rf_r" ] && return 0
-  done
+  case "$1" in
+    --rule | --rule=* | --repo | --repo=* | --from | --from=* | --to | --to=* | \
+      --commit | --commit=* | --tools | --tools=* | --provider | --provider=* | \
+      --model | --model=* | --output | --output=* | --format | --format=* | \
+      --audience | --audience=* | --resume | --resume=* | --preview | --preview=*)
+      return 0
+      ;;
+    --*) return 1 ;;
+    -*[cfop]*) return 0 ;;
+  esac
   return 1
 }
 
@@ -712,10 +730,14 @@ cs_note_untrusted() {
   done
 }
 
-# Enumerate: union of every layer's valid names, first appearance wins order.
+# Enumerate: union of every layer's valid names, TRUSTED layers first (over,
+# user, then overu, base), document order within a layer; a name takes the
+# position of its first appearance in that order. The order matters: the
+# orchestrator's one-seat cap takes the first available entry of
+# reviewer.custom_slots, so a committed seat must never displace a trusted one.
 CS_ALL=""
 if [ "$yq_present" -eq 1 ]; then
-  for _cs_layer in base overu user over; do
+  for _cs_layer in over user overu base; do
     cs_layer_on "$_cs_layer" || continue
     for _cs_n in $(cs_names "$_cs_layer"); do
       case ",$CS_ALL," in
@@ -773,14 +795,25 @@ for _cs in $CS_ALL; do
   # Typed harness options: safe from any layer.
   _effort="$(cs_resolve "$_cs" .harness_options.effort low enum:low,medium,high 0)"
   _conc="$(cs_resolve "$_cs" .harness_options.concurrency "" posint_le:32 0)"
-  _mtb="$(cs_resolve "$_cs" .harness_options.max_tokens_budget 0 uint 0)"
+  _mtb="$(cs_resolve "$_cs" .harness_options.max_tokens_budget 0 uint9 0)"
   _tmin="$(cs_resolve "$_cs" .harness_options.timeout_minutes "" posint_le:180 0)"
+
+  # The human gate: a seat that only the reviewed repo's config switches on,
+  # and that sends code off this machine on the operator's key. Emitted per
+  # seat (needs_confirm) for the script-side confirm lock, and as a confirm.<n>
+  # line for the orchestrator's one question.
+  if [ "$_enabled" = true ] && [ "$_source" = committed ] && [ "$_provider" != ollama ]; then
+    _needs_confirm=true
+  else
+    _needs_confirm=false
+  fi
 
   _slot_lines=""
   _slot_line() { _slot_lines="$_slot_lines$1
 "; }
   _slot_line "reviewer.custom.$_cs.enabled=$_enabled"
   _slot_line "reviewer.custom.$_cs.source=$_source"
+  _slot_line "reviewer.custom.$_cs.needs_confirm=$_needs_confirm"
   _slot_line "reviewer.custom.$_cs.harness=$_harness"
   _slot_line "reviewer.custom.$_cs.provider=$_provider"
   _slot_line "reviewer.custom.$_cs.model=$_model"
@@ -863,9 +896,7 @@ for _cs in $CS_ALL; do
   CS_OUT="$CS_OUT$_slot_lines"
   CS_SLOTS="${CS_SLOTS:+$CS_SLOTS,}$_cs"
 
-  # The human gate: a seat that only the reviewed repo's config switches on,
-  # and that sends code off this machine on the operator's key.
-  if [ "$_enabled" = true ] && [ "$_source" = committed ] && [ "$_provider" != ollama ]; then
+  if [ "$_needs_confirm" = true ]; then
     CS_CONFIRM=$((CS_CONFIRM + 1))
     CS_CONF_OUT="${CS_CONF_OUT}confirm.$CS_CONFIRM=Seat '$_cs' is enabled only by the repo's committed config, and sends code to OpenRouter (model $_model), billed to your $_keyenv.
 "
