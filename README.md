@@ -506,7 +506,7 @@ reviewers:
         env: { OCR_LLM_TIMEOUT: "600" } # extra ocr env — trusted files only
 ```
 
-Install the harness with `npm i -g @alibaba-group/open-code-review` (plus `jq`). One seat runs per review; the first available one in config order wins. Full schema, guards and defaults: [`rules/config.md`](rules/config.md) → `reviewers.custom`.
+Install the harness with `npm i -g @alibaba-group/open-code-review` (plus `jq`). One seat runs per review; the first available one wins, and seats from your own files (user file, untracked `config.local.yml`) always come before a repo's committed seats. Full schema, guards and defaults: [`rules/config.md`](rules/config.md) → `reviewers.custom`.
 
 **`role`** decides how the council treats the seat:
 

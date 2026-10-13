@@ -144,7 +144,7 @@ command line, or in the `ocr` config file the council writes.
 | `api_key_env` | `OPENROUTER_API_KEY` (OpenRouter); empty (Ollama) | **Trusted layers only.** A POSIX identifier (`envname`), re-checked by the dispatch script. Ignored for Ollama. |
 | `harness_options.effort` | `low` | `low` \| `medium` \| `high` — `ocr`'s review rounds (1/2/3). |
 | `harness_options.concurrency` | *(ocr's own)* | integer 1–32 |
-| `harness_options.max_tokens_budget` | `0` (= ocr's default) | positive integer; `ocr` stops and publishes partial results when it is spent. |
+| `harness_options.max_tokens_budget` | `0` (= ocr's default) | positive integer, at most 9 digits; `ocr` stops and publishes partial results when it is spent. |
 | `harness_options.timeout_minutes` | *(derived from the run budget)* | integer 1–180 — see [Budget](#budget-for-a-seat). |
 | `harness_options.flags` | *(none)* | **Trusted layers only.** A YAML list of extra `ocr review` argv tokens. Each token: letters, digits, `._:/@=,+%-` and the glob characters `*`/`?`, ≤ 256 chars; it reaches `ocr` as one quoted argv element, never through a command line. |
 | `harness_options.env` | *(none)* | **Trusted layers only.** A map `NAME: value` added to `ocr`'s environment. `NAME` is a POSIX identifier; values may not contain control characters. |
@@ -157,7 +157,8 @@ committed `config.yml` (or a tracked `config.local.yml`) they are ignored with a
 **Reserved — never settable, from any layer.** Flags that would undo the seat's isolation or
 its output contract are dropped with a note: `--rule --repo --from --to --commit -c --tools
 --provider --model -o --output --format -f --audience --resume --preview -p` (also their
-`--flag=value` forms). Reserved env names: `HOME`, `PATH`, `TMPDIR`, `OCR_NO_UPDATE`, and the
+`--flag=value` forms, and any single-dash cluster or attached value touching `-c -f -o -p`, e.g.
+`-o/x` or `-cv`). Reserved env names: `HOME`, `PATH`, `TMPDIR`, `OCR_NO_UPDATE`, and the
 provider key variable.
 
 **Don't put secrets in `harness_options.env`** — the effective config (including these lines)
@@ -230,7 +231,10 @@ To give only this seat more time, set its `timeout_minutes`; there is no need to
 ### Other rules
 
 - **One seat per run.** Every valid seat is emitted; the orchestrator runs the **first
-  available** one in config order (committed, then user, then local) and notes the rest.
+  available** one in `reviewer.custom_slots` order and notes the rest. The reader lists **trusted seats
+  first** — untracked `config.local.yml`, then the user file, then the tracked local file and
+  committed `config.yml` (document order within each) — so a reviewed repo's seat can never
+  displace one you configured.
 - **Availability:** `ocr` and `jq` installed; for OpenRouter, the variable `api_key_env` names
   is set and non-empty; and the target has a diff (a plan/document review skips the seat).
 - **Egress:** OpenRouter seats send review context to OpenRouter and the model's host, with
@@ -238,7 +242,7 @@ To give only this seat more time, set its `timeout_minutes`; there is no need to
   seats talk to `127.0.0.1:11434` only. Endpoints are council literals — there is no URL key.
 
 Reader output (the `# custom reviewers` section): `reviewer.custom_slots=<a,b>`, then per
-seat `reviewer.custom.<s>.enabled|source|harness|provider|model|role|api_key_env|family|distinct`,
+seat `reviewer.custom.<s>.enabled|source|needs_confirm|harness|provider|model|role|api_key_env|family|distinct`,
 `reviewer.custom.<s>.opt.<option>`, `reviewer.custom.<s>.flag.<n>`,
 `reviewer.custom.<s>.env.<NAME>`, plus any `confirm.<n>=` lines.
 

@@ -366,7 +366,7 @@ A plan or document target has no diff for ocr to review: the seat is skipped wit
 
 **At most ONE custom slot participates**, and the cap applies to the **available** set, *after* the availability filter — never to the raw configured list. (Taking the first *configured* name would pick a disabled or uninstallable slot, drop it at the availability check, and leave zero custom reviewers while a good one never ran.)
 
-**The winner is the first available slot in config document order** (which `yq keys` preserves), so it is predictable from reading the config top-down and reproducible across runs. Slots skipped by the cap are reported explicitly, never silently.
+**The winner is the first available slot, trusted layers first**: untracked `config.local.yml`, then the user file, then the tracked local file and committed `config.yml`, in document order within each layer (which `yq keys` preserves). So a reviewed repo's seat never displaces one the user configured (council review, 2026-10-13), and the order stays predictable and reproducible across runs. Slots skipped by the cap are reported explicitly, never silently.
 
 ### Consumers of `family`
 
