@@ -170,7 +170,7 @@ Skip this subsection when no custom seat participates. Otherwise pick the seat's
 
 | Target (from above) | Mode args |
 |---|---|
-| Staged changes, or unstaged working changes | `--worktree` (note: `ocr` reviews the working tree against `HEAD` — staged and unstaged together) |
+| Staged changes, or unstaged working changes | `--worktree` (the script snapshots the **tracked** working tree — staged and unstaged together — with `git stash create` and reviews `HEAD..snapshot`; untracked files are never part of the seat's diff) |
 | PR | `--range <base-sha> <head-sha>` (resolved below) |
 | A single commit (not one of the targets above today — `rc-ocr.sh` supports it for when one is added) | `--commit <sha>` |
 | Plan/document, or a source path with no diff | none — **skip the seat** with the note `<slot>: skipped — target has no diff` |

@@ -485,13 +485,33 @@ EOF
 # Target modes
 # ===========================================================================
 
-@test "--worktree passes no range/commit flags" {
+@test "--worktree reviews a snapshot of TRACKED changes only (HEAD..stash-create), never ocr's workspace mode" {
   printf 'c\n' >>a.sh
+  printf 'SECRET=1\n' >untracked.env
   run_ocr --worktree
   [ "${lines[0]}" = "TOOL: qwen (ocr)" ]
-  refute_in "$CTL/review.argv" -qx -- '--from'
+  # a range from HEAD to a snapshot commit — never ocr's own workspace mode
+  grep -A1 -x -- '--from' "$CTL/review.argv" | grep -qx "$HEAD_SHA"
+  snap="$(grep -A1 -x -- '--to' "$CTL/review.argv" | tail -n 1)"
+  [ -n "$snap" ] && [ "$snap" != "$HEAD_SHA" ]
+  grep -A1 -x -- '--to' "$CTL/preview.argv" | grep -qx "$snap"
   refute_in "$CTL/review.argv" -qx -- '--commit'
-  refute_in "$CTL/preview.argv" -qx -- '--from'
+  # the snapshot carries the tracked change but not the untracked file
+  git show "$snap:a.sh" | grep -qx c
+  run git cat-file -e "$snap:untracked.env"
+  [ "$status" -ne 0 ]
+  # nothing moved: no stash ref, the file is still modified, the untracked file untouched
+  run git stash list
+  [ -z "$output" ]
+  git status --porcelain | grep -q '^ M a.sh'
+  [ -f untracked.env ]
+}
+
+@test "--worktree with no tracked changes -> SKIPPED, ocr never reviews" {
+  printf 'SECRET=1\n' >untracked.env
+  run_ocr --worktree
+  [ "$output" = "SKIPPED: qwen (ocr) unavailable — ocr: no tracked changes in the working tree" ]
+  [ ! -e "$CTL/review.argv" ]
 }
 
 @test "--commit resolves the rev to a SHA for preview and review" {
@@ -554,7 +574,7 @@ EOF
 
 @test "preview with nothing reviewable -> SKIPPED nothing to review" {
   printf '%s' "$FIX/preview-empty.json" >"$CTL/preview_src"
-  run_ocr --worktree
+  run_ocr --range "$BASE" "$HEAD_SHA"
   [ "$output" = "SKIPPED: qwen (ocr) unavailable — ocr: nothing to review (0 changed, 0 excluded by ocr)" ]
   [ ! -e "$CTL/review.argv" ]
 }

@@ -418,6 +418,22 @@ if [ -n "$REV_B" ]; then
   [ -n "$SHA_B" ] || skip "ref not found locally: $REV_B"
 fi
 
+# Worktree mode: never use ocr's own workspace mode — it also reviews UNTRACKED
+# files, so a stray non-ignored file (an .env, a local config) would be sent
+# to the provider although the council's target is tracked changes only.
+# Instead snapshot the tracked working tree (staged + unstaged) as a dangling
+# commit with `git stash create` — it writes objects only, moves no ref and
+# touches no file — and review HEAD..snapshot as a range.
+if [ "$MODE" = "--worktree" ]; then
+  SHA_A="$(resolve_rev HEAD)" || SHA_A=""
+  [ -n "$SHA_A" ] || skip "no HEAD commit to diff the working tree against"
+  SHA_B="$(GIT_AUTHOR_NAME=review-council GIT_AUTHOR_EMAIL=review-council@localhost \
+    GIT_COMMITTER_NAME=review-council GIT_COMMITTER_EMAIL=review-council@localhost \
+    git stash create 2>/dev/null)" || SHA_B=""
+  [ -n "$SHA_B" ] || skip "no tracked changes in the working tree"
+  MODE="--range"
+fi
+
 # ---------------------------------------------------------------------------
 # Isolated HOME
 # ---------------------------------------------------------------------------
@@ -452,7 +468,7 @@ if [ -n "${LANG:-}" ]; then ENV_LIST="${ENV_LIST}LANG=$LANG$NL"; fi
 if [ -n "${LC_ALL:-}" ]; then ENV_LIST="${ENV_LIST}LC_ALL=$LC_ALL$NL"; fi
 ENV_LIST="$ENV_LIST$ENV_EXTRA"
 
-# Target flags (SHAs only; worktree mode has none).
+# Target flags (SHAs only; worktree mode became a range above).
 TARGET=""
 case "$MODE" in
   --commit) TARGET="--commit$NL$SHA_A$NL" ;;
