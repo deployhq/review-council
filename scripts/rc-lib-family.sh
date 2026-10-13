@@ -1,3 +1,4 @@
+# shellcheck shell=sh
 # rc-lib-family.sh — the slug -> model-family map for custom reviewer seats.
 #
 # Sourced (not executed) by scripts/rc-config.sh and scripts/rc-ocr.sh, so the

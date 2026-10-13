@@ -32,13 +32,16 @@ setup() {
   #   review_mode  fixture (default) | noout
   #   review_src   fixture copied to -o for a real `review`
   #   review_rc    exit code of a real `review` (default 0)
-  # Records: rules.argv preview.argv review.argv review.env home config.json
-  #          rule.json fd3 stdin
+  #   review_sleep seconds a real `review` sleeps (after recording) before
+  #                writing its output; touches `sleeping` first
+  # Records: calls (one line per invocation) rules.argv preview.argv
+  #          review.argv review.env home config.json rule.json fd3 stdin
   cat >"$FAKEDIR/ocr" <<FAKE_EOF
 #!/bin/sh
 CTL='$CTL'
 FAKE_EOF
   cat >>"$FAKEDIR/ocr" <<'FAKE_EOF'
+printf '%s\n' "${1:-}" >>"$CTL/calls"
 if [ "${1:-}" = "--version" ]; then
   echo "open-code-review v1.12.13 (fake) darwin/arm64"
   exit 0
@@ -71,6 +74,10 @@ cp "$HOME/.opencodereview/config.json" "$CTL/config.json"
 cp "$HOME/rule.json" "$CTL/rule.json"
 if { : <&3; } 2>/dev/null; then echo open >"$CTL/fd3"; else echo closed >"$CTL/fd3"; fi
 cat >"$CTL/stdin" 2>/dev/null
+if [ -s "$CTL/review_sleep" ]; then
+  : >"$CTL/sleeping"
+  sleep "$(cat "$CTL/review_sleep")"
+fi
 mode="$(cat "$CTL/review_mode" 2>/dev/null || echo fixture)"
 rc="$(cat "$CTL/review_rc" 2>/dev/null || echo 0)"
 case "$mode" in
@@ -243,6 +250,26 @@ run_ocr() {
   [ "$(meta coverage)" = "ocr v1.12.13 · qwen (qwen/qwen3.8-max-0902): reviewed 3/5 selected files · 2 failed: provider (1), timeout (1) · 2 of 4 changed files excluded before review · 0 comments dropped (path not reviewed) · 1 warnings" ]
 }
 
+@test "coverage: a selected file neither completed nor reused -> partial, never complete" {
+  # run-5 with one completed entry dropped: failed=0 and terminal_state=complete
+  # still, but only 22 of the 23 selected files were actually reviewed.
+  jq 'del(.manifest.coverage.completed[0])' "$FIX/run5-excerpt.json" >"$BATS_TEST_TMPDIR/short.json"
+  printf '%s' "$BATS_TEST_TMPDIR/short.json" >"$CTL/review_src"
+  run_ocr --range "$BASE" "$HEAD_SHA"
+  [ "$status" -eq 0 ]
+  [ "${lines[0]}" = "TOOL: qwen (ocr)" ]
+  [ "$(meta status)" = partial ]
+  [[ "$(meta coverage)" == *"reviewed 22/23 selected files · 0 failed"* ]] || false # bash 3.2: a bare [[ ]] mid-test never fails
+}
+
+@test "coverage: nothing selected is never complete" {
+  jq '.manifest.coverage.selected = []' "$FIX/run5-excerpt.json" >"$BATS_TEST_TMPDIR/nosel.json"
+  printf '%s' "$BATS_TEST_TMPDIR/nosel.json" >"$CTL/review_src"
+  run_ocr --range "$BASE" "$HEAD_SHA"
+  [ "$status" -eq 0 ]
+  [ "$(meta status)" != complete ]
+}
+
 @test "severity vocabulary: critical/HIGH/medium/low/null/unknown" {
   printf '%s' "$FIX/partial-synthetic.json" >"$CTL/review_src"
   use_openrouter
@@ -275,7 +302,7 @@ run_ocr() {
   run_ocr --range "$BASE" "$HEAD_SHA"
   [ "${lines[0]}" = "TOOL: qwen (ocr)" ]
   [ "$(meta status)" = complete ]
-  [[ "$stderr" == *"ocr exited 1"* ]]
+  [[ "$stderr" == *"ocr exited 1"* ]] || false
 }
 
 # ===========================================================================
@@ -294,7 +321,7 @@ run_ocr() {
 @test "wrong schema_version -> SKIPPED invalid output" {
   printf '%s' "$FIX/wrong-schema.json" >"$CTL/review_src"
   run_ocr --range "$BASE" "$HEAD_SHA"
-  [[ "$output" == "SKIPPED: qwen (ocr) unavailable — ocr: invalid output (schema_version 'ocr.run-manifest/v2')" ]]
+  [[ "$output" == "SKIPPED: qwen (ocr) unavailable — ocr: invalid output (schema_version 'ocr.run-manifest/v2')" ]] || false
 }
 
 @test "missing out.json after a kill (exit 124) -> SKIPPED timeout" {
@@ -302,7 +329,7 @@ run_ocr() {
   printf '124' >"$CTL/review_rc"
   run_ocr --range "$BASE" "$HEAD_SHA"
   [ "$status" -eq 0 ]
-  [[ "$output" == "SKIPPED: qwen (ocr) unavailable — ocr: timeout (killed at the 450s hard cap; no output)" ]]
+  [[ "$output" == "SKIPPED: qwen (ocr) unavailable — ocr: timeout (killed at the 450s hard cap; no output)" ]] || false
   [ "$(printf '%s\n' "$stderr" | grep -c '^ELAPSED: ')" -eq 1 ]
 }
 
@@ -320,7 +347,7 @@ run_ocr() {
   [ "$(meta family)" = unknown ]
   [ "$(meta distinct)" = false ]
   [ "$(meta findings)" = 3 ]
-  [[ "$stderr" == *"family set to unknown"* ]]
+  [[ "$stderr" == *"family set to unknown"* ]] || false
 }
 
 # ===========================================================================
@@ -393,7 +420,8 @@ run_ocr() {
   refute_in "$CTL/review.env" -q 'OPENROUTER_API_KEY'
   grep -qx 'OCR_NO_UPDATE=1' "$CTL/review.env"
   home="$(cat "$CTL/home")"
-  case "$home" in "$TMPDIR"/rc-ocr.*) ;; *) false ;; esac
+  # rc-ocr-home.*, never rc-ocr.* — the orchestrator's result dirs use that
+  case "$home" in "$TMPDIR"/rc-ocr-home.*) ;; *) false ;; esac
   grep -qx "TMPDIR=$home/tmp" "$CTL/review.env"
 }
 
@@ -409,6 +437,33 @@ run_ocr() {
   printf '%s' "$FIX/invalid.json" >"$CTL/review_src"
   run_ocr --range "$BASE" "$HEAD_SHA"
   [ ! -e "$(cat "$CTL/home")" ]
+}
+
+@test "TERM mid-run -> SKIPPED interrupted, .meta + ELAPSED written, temp HOME removed, exit 0" {
+  printf '3' >"$CTL/review_sleep"
+  "$SCRIPT" qwen "$OUTF" --range "$BASE" "$HEAD_SHA" \
+    >"$BATS_TEST_TMPDIR/so" 2>"$BATS_TEST_TMPDIR/se" &
+  pid=$!
+  i=0
+  while [ ! -e "$CTL/sleeping" ] && [ "$i" -lt 100 ]; do
+    sleep 0.1
+    i=$((i + 1))
+  done
+  [ -e "$CTL/sleeping" ]
+  kill -TERM "$pid"
+  rc=0
+  wait "$pid" || rc=$?
+  [ "$rc" -eq 0 ]
+  [ "$(cat "$OUTF")" = "SKIPPED: qwen (ocr) unavailable — ocr: interrupted" ]
+  [ "$(cat "$BATS_TEST_TMPDIR/so")" = "SKIPPED: qwen (ocr) unavailable — ocr: interrupted" ]
+  [ "$(meta status)" = skipped ]
+  [ "$(meta reason)" = interrupted ]
+  [ "$(meta findings)" = 0 ]
+  [ "$(grep -c '^ELAPSED: [0-9][0-9]*$' "$BATS_TEST_TMPDIR/se")" -eq 1 ]
+  home="$(cat "$CTL/home")"
+  [ -n "$home" ]
+  [ ! -e "$home" ]
+  [ -z "$(ls -A "$TMPDIR")" ]
 }
 
 @test "neutral rule file is byte-for-byte the council's" {
@@ -432,7 +487,7 @@ reviewer.custom.qwen.flag.2=80
 EOF
   run_ocr --range "$BASE" "$HEAD_SHA"
   argv="$(tr '\n' ' ' <"$CTL/review.argv")"
-  [[ "$argv" == "review --format json --audience agent -o "*" --rule "*"/rule.json --repo $REPO --provider ollama --model qwen3.6:35b-a3b-coding-nvfp4 --effort low --timeout 6 --from $BASE --to $HEAD_SHA --max-tools 80 " ]]
+  [[ "$argv" == "review --format json --audience agent -o "*" --rule "*"/rule.json --repo $(cd "$REPO" && pwd -P) --provider ollama --model qwen3.6:35b-a3b-coding-nvfp4 --effort low --timeout 6 --from $BASE --to $HEAD_SHA --max-tools 80 " ]] || false
   refute_in "$CTL/review.argv" -qx -- '--concurrency'
   refute_in "$CTL/review.argv" -qx -- '--max-tokens-budget'
 }
@@ -457,7 +512,7 @@ EOF
   [ "${lines[0]}" = "TOOL: qwen (ocr)" ]
   refute_in "$CTL/review.argv" -q -- '--max-tools'
   refute_in "$CTL/review.argv" -q 'steal'
-  [[ "$stderr" == *"ignoring all harness flags"* ]]
+  [[ "$stderr" == *"ignoring all harness flags"* ]] || false
 }
 
 @test "typed options: concurrency, max_tokens_budget, effort reach argv" {
@@ -514,6 +569,71 @@ EOF
   [ ! -e "$CTL/review.argv" ]
 }
 
+@test "--worktree: a failing git stash create is reported as such, not as 'no tracked changes'" {
+  printf 'c\n' >>a.sh
+  : >.git/index.lock # stash create must write the index: this makes it fail
+  run_ocr --worktree
+  rm -f .git/index.lock
+  [ "$status" -eq 0 ]
+  [[ "$output" == "SKIPPED: qwen (ocr) unavailable — ocr: git stash create failed: "* ]] || false # bash 3.2: a bare [[ ]] mid-test never fails
+  [ "$(printf '%s\n' "$output" | wc -l)" -eq 1 ]
+  [ "$(meta status)" = skipped ]
+  [ ! -e "$CTL/calls" ]
+}
+
+@test "--staged reviews the INDEX only (HEAD..stash^2): unstaged edits never reach ocr" {
+  printf 'b\n' >b.txt
+  git add b.txt && git commit -qm three
+  HEAD_SHA="$(git rev-parse HEAD)"
+  printf 'staged\n' >>a.sh
+  git add a.sh
+  printf 'UNSTAGED-SECRET\n' >>b.txt
+  printf 'SECRET=1\n' >untracked.env
+  wt_before="$(git diff)"
+  ix_before="$(git diff --cached)"
+  run_ocr --staged
+  [ "${lines[0]}" = "TOOL: qwen (ocr)" ]
+  grep -A1 -x -- '--from' "$CTL/review.argv" | grep -qx "$HEAD_SHA"
+  snap="$(grep -A1 -x -- '--to' "$CTL/review.argv" | tail -n 1)"
+  [ -n "$snap" ] && [ "$snap" != "$HEAD_SHA" ]
+  grep -A1 -x -- '--to' "$CTL/preview.argv" | grep -qx "$snap"
+  # the reviewed range carries the staged a.sh only
+  [ "$(git diff --name-only "$HEAD_SHA" "$snap")" = a.sh ]
+  git show "$snap:a.sh" | grep -qx staged
+  run git show "$snap:b.txt"
+  [ "$output" = b ]
+  # nothing moved: no stash ref, HEAD, index and working tree unchanged
+  run git stash list
+  [ -z "$output" ]
+  [ "$(git rev-parse HEAD)" = "$HEAD_SHA" ]
+  [ "$(git diff)" = "$wt_before" ]
+  [ "$(git diff --cached)" = "$ix_before" ]
+  [ -f untracked.env ]
+}
+
+@test "--staged with only unstaged edits -> SKIPPED no staged changes, ocr never runs" {
+  printf 'c\n' >>a.sh
+  run_ocr --staged
+  [ "$status" -eq 0 ]
+  [ "$output" = "SKIPPED: qwen (ocr) unavailable — ocr: no staged changes" ]
+  [ ! -e "$CTL/calls" ]
+}
+
+@test "--staged: a failing git stash create is reported as such" {
+  printf 'c\n' >>a.sh
+  git add a.sh
+  : >.git/index.lock
+  run_ocr --staged
+  rm -f .git/index.lock
+  [[ "$output" == "SKIPPED: qwen (ocr) unavailable — ocr: git stash create failed: "* ]] || false # bash 3.2: a bare [[ ]] mid-test never fails
+  [ ! -e "$CTL/calls" ]
+}
+
+@test "--staged takes no revs" {
+  run_ocr --staged HEAD
+  [ "$output" = "SKIPPED: qwen (ocr) unavailable — ocr: usage: --staged takes no revs" ]
+}
+
 @test "--commit resolves the rev to a SHA for preview and review" {
   run_ocr --commit HEAD
   grep -A1 -x -- '--commit' "$CTL/review.argv" | grep -qx "$HEAD_SHA"
@@ -558,7 +678,7 @@ EOF
   printf '%s' "$FIX/invalid.json" >"$CTL/preview_src"
   run_ocr --range "$BASE" "$HEAD_SHA"
   [ "$status" -eq 0 ]
-  [[ "$output" == "SKIPPED: qwen (ocr) unavailable — ocr: preview failed (exit 0)"* ]]
+  [[ "$output" == "SKIPPED: qwen (ocr) unavailable — ocr: preview failed (exit 0)"* ]] || false
   [ ! -e "$CTL/review.argv" ]
 }
 
@@ -569,7 +689,7 @@ EOF
   printf '%s' "$FIX/partial-synthetic.json" >"$CTL/review_src"
   run_ocr --range "$BASE" "$HEAD_SHA"
   [ "$(meta coverage | wc -c)" -gt 300 ]
-  [[ "$(meta coverage)" == *"· 1 warnings" ]]
+  [[ "$(meta coverage)" == *"· 1 warnings" ]] || false
 }
 
 @test "preview with nothing reviewable -> SKIPPED nothing to review" {
@@ -624,6 +744,38 @@ EOF
   [ "$output" = "SKIPPED: qwen (ocr) unavailable — ocr: slot disabled" ]
 }
 
+@test "needs_confirm=true without --confirmed -> SKIPPED before ocr is ever invoked" {
+  cfg_set reviewer.custom.qwen.needs_confirm true
+  run_ocr --range "$BASE" "$HEAD_SHA"
+  [ "$status" -eq 0 ]
+  [ "$output" = "SKIPPED: qwen (ocr) unavailable — ocr: not confirmed by the operator" ]
+  [ "$(meta status)" = skipped ]
+  [ "$(meta reason)" = "not confirmed by the operator" ]
+  [ ! -e "$CTL/calls" ]
+}
+
+@test "needs_confirm=true with --confirmed -> the seat runs" {
+  cfg_set reviewer.custom.qwen.needs_confirm true
+  run_ocr --confirmed --range "$BASE" "$HEAD_SHA"
+  [ "$status" -eq 0 ]
+  [ "${lines[0]}" = "TOOL: qwen (ocr)" ]
+  [ "$(meta status)" = complete ]
+  grep -A1 -x -- '--to' "$CTL/review.argv" | grep -qx "$HEAD_SHA"
+}
+
+@test "needs_confirm=false -> runs without --confirmed" {
+  cfg_set reviewer.custom.qwen.needs_confirm false
+  run_ocr --range "$BASE" "$HEAD_SHA"
+  [ "${lines[0]}" = "TOOL: qwen (ocr)" ]
+}
+
+@test "--confirmed is accepted with every mode (--worktree)" {
+  cfg_set reviewer.custom.qwen.needs_confirm true
+  printf 'c\n' >>a.sh
+  run_ocr --confirmed --worktree
+  [ "${lines[0]}" = "TOOL: qwen (ocr)" ]
+}
+
 @test "bad usage -> SKIPPED, exit 0, ELAPSED once" {
   run --separate-stderr "$SCRIPT" qwen "$OUTF" --bogus
   [ "$status" -eq 0 ]
@@ -644,7 +796,7 @@ EOF
 
 @test "budget: default 600s run budget -> 6 min deadline, 450s hard cap" {
   run_ocr --range "$BASE" "$HEAD_SHA"
-  [[ "$stderr" == *"budget deadline_min=6 rounds=1 hard_cap_s=450 llm_timeout_s=360 effort=low"* ]]
+  [[ "$stderr" == *"budget deadline_min=6 rounds=1 hard_cap_s=450 llm_timeout_s=360 effort=low"* ]] || false
   grep -A1 -x -- '--timeout' "$CTL/review.argv" | grep -qx 6
   grep -qx 'OCR_LLM_TIMEOUT=360' "$CTL/review.env"
 }
@@ -652,26 +804,26 @@ EOF
 @test "budget: effort multiplies the hard cap by rounds" {
   cfg_set reviewer.custom.qwen.opt.effort high
   run_ocr --range "$BASE" "$HEAD_SHA"
-  [[ "$stderr" == *"deadline_min=6 rounds=3 hard_cap_s=1170 "* ]]
+  [[ "$stderr" == *"deadline_min=6 rounds=3 hard_cap_s=1170 "* ]] || false
 }
 
 @test "budget: timeout_minutes overrides; per-request timeout capped at 600" {
   cfg_set reviewer.custom.qwen.opt.timeout_minutes 60
   run_ocr --range "$BASE" "$HEAD_SHA"
-  [[ "$stderr" == *"deadline_min=60 rounds=1 hard_cap_s=3690 llm_timeout_s=600 "* ]]
+  [[ "$stderr" == *"deadline_min=60 rounds=1 hard_cap_s=3690 llm_timeout_s=600 "* ]] || false
   grep -A1 -x -- '--timeout' "$CTL/review.argv" | grep -qx 60
 }
 
 @test "budget: derived deadline clamps at 180 min" {
   cfg_set settings.run_budget_seconds 100000
   run_ocr --range "$BASE" "$HEAD_SHA"
-  [[ "$stderr" == *"deadline_min=180 rounds=1 hard_cap_s=10890 "* ]]
+  [[ "$stderr" == *"deadline_min=180 rounds=1 hard_cap_s=10890 "* ]] || false
 }
 
 @test "budget: tiny run budget floors the deadline at 1 min" {
   cfg_set settings.run_budget_seconds 30
   run_ocr --range "$BASE" "$HEAD_SHA"
-  [[ "$stderr" == *"deadline_min=1 rounds=1 hard_cap_s=150 llm_timeout_s=60 "* ]]
+  [[ "$stderr" == *"deadline_min=1 rounds=1 hard_cap_s=150 llm_timeout_s=60 "* ]] || false
 }
 
 @test "budget: trusted env OCR_LLM_TIMEOUT overrides the derived per-request timeout" {

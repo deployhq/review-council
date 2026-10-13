@@ -3,9 +3,15 @@
 # OpenCodeReview) custom reviewer seat.
 #
 # Usage (the orchestrator passes ONLY these atoms — never free-form text):
-#   rc-ocr.sh <slot> <result-file> --worktree
-#   rc-ocr.sh <slot> <result-file> --commit <rev>
-#   rc-ocr.sh <slot> <result-file> --range <base-rev> <head-rev>
+#   rc-ocr.sh <slot> <result-file> [--confirmed] --worktree
+#   rc-ocr.sh <slot> <result-file> [--confirmed] --staged
+#   rc-ocr.sh <slot> <result-file> [--confirmed] --commit <rev>
+#   rc-ocr.sh <slot> <result-file> [--confirmed] --range <base-rev> <head-rev>
+#
+# --worktree reviews the tracked working tree (staged + unstaged) against HEAD;
+# --staged reviews the index only — unstaged edits never leave the machine.
+# --confirmed records the operator's yes for a seat the reader marks
+# `needs_confirm=true`; without it such a seat is SKIPPED before any ocr call.
 #
 # The script re-reads the council config itself (`rc-config.sh`, overridable via
 # RC_CONFIG_SH; config dir ${RC_CONFIG_DIR:-.review-council}) and uses only the
@@ -19,7 +25,14 @@
 #                       derived from model text: status family distinct role
 #                       ocr_version findings dropped coverage [reason].
 #   stderr              free-form notes + exactly one "ELAPSED: <seconds>".
-#   exit                always 0 — the seat degrades, it never blocks a review.
+#   exit                always 0 — the seat degrades, it never blocks a review;
+#                       an INT/TERM/HUP ends it as SKIPPED "interrupted" (the
+#                       same three outputs) once the running child returns.
+#
+# The whole seat output is untrusted model text, rendered as data: multi-line
+# ocr text (detail, proposed code, quoted code) is fenced; single-line fields
+# (the issue sentence, the path in location/how_to_verify) are unfenced but
+# flattened to one line with control and bidi characters stripped.
 #
 # Isolation (spec §12.2, PR-1 contract):
 #   - HOME is a fresh temp dir holding a council-written
@@ -28,7 +41,8 @@
 #   - ocr runs under `env -i` with an allowlist — host vars such as
 #     ANTHROPIC_BASE_URL / AWS_* never reach it;
 #   - the provider key travels on a pipe (fd 3), never argv, never disk.
-#   - the temp dir is removed on exit by a trap.
+#   - the temp dir (rc-ocr-home.XXXXXX — never the orchestrator's rc-ocr.*
+#     result-dir prefix) is removed on exit by a trap.
 # Pre-flight (no LLM call): `ocr review --preview` (exclusion count + a changed
 # path) and `ocr rules check --rule` (must report "Source: Custom (--rule)").
 # Every gate is on the PARSED JSON, never on ocr's exit code.
@@ -64,6 +78,8 @@ OCR_VERSION=""
 N_FINDINGS=0
 N_DROPPED=0
 COVERAGE=""
+CONFIRMED=false
+FINISHING="" # set by skip/succeed: a terminal path is writing the outputs
 
 note() { printf 'rc-ocr: %s\n' "$*" >&2; }
 
@@ -74,7 +90,22 @@ cleanup() {
   fi
 }
 trap cleanup EXIT
-trap 'cleanup; exit 0' INT TERM HUP
+
+# on_signal: INT/TERM/HUP end the seat like any other failure — the normal
+# SKIPPED outputs (result, .meta, ELAPSED), then exit 0 via skip, whose exit
+# runs the EXIT trap (cleanup). Further signals are ignored from here on, so
+# the handler can't recurse or run twice; if skip/succeed is already writing
+# the outputs, it is left to finish (and exit) rather than double-written.
+# NB: sh runs a trap only after the current FOREGROUND child returns, so a
+# signal to this script alone may take effect only once that ocr/git call
+# ends (the run itself stays bounded by run_capped's hard cap).
+# shellcheck disable=SC2329 # invoked via trap
+on_signal() {
+  trap '' INT TERM HUP
+  [ -n "$FINISHING" ] && return 0
+  skip "interrupted"
+}
+trap on_signal INT TERM HUP
 
 # flat <text>: strip control chars, newline/tab -> space (no length cap).
 flat() {
@@ -83,6 +114,11 @@ flat() {
 # one_line <text>: flat + cap at 300 bytes (for reasons that may carry ocr text).
 one_line() {
   flat "$1" | cut -c1-300
+}
+# last_log_line <file>: a tool's own last diagnostic line, sanitised.
+last_log_line() {
+  [ -s "$1" ] || return 0
+  one_line "$(grep -v '^[[:space:]]*$' "$1" | tail -n 1)" | cut -c1-200
 }
 
 # label used in SKIPPED/TOOL lines: the slot only when it passed validation.
@@ -113,6 +149,7 @@ emit_elapsed() {
 
 # skip <reason>: the single SKIPPED exit path.
 skip() {
+  FINISHING=1
   _reason="$(one_line "$1")"
   _line="SKIPPED: $(slot_label) (ocr) unavailable — ocr: $_reason"
   if [ -z "$COVERAGE" ]; then
@@ -130,6 +167,7 @@ skip() {
 
 # succeed <status> <markdown-file>: the single success exit path.
 succeed() {
+  FINISHING=1
   if [ -n "$RESULT" ]; then
     { printf 'TOOL: %s (ocr)\n' "$SLOT"; cat "$2"; } >"$RESULT" 2>/dev/null ||
       note "cannot write $RESULT"
@@ -205,7 +243,14 @@ reserved_env() {
 # ---------------------------------------------------------------------------
 # Arguments
 # ---------------------------------------------------------------------------
-[ "$#" -ge 3 ] || skip "usage: rc-ocr.sh <slot> <result-file> --worktree|--commit <rev>|--range <base> <head>"
+# Optional --confirmed right after <result-file>: drop it from the positionals
+# so the mode is $3 again and the per-mode arity checks below stay exact.
+if [ "$#" -ge 3 ] && [ "$3" = --confirmed ]; then
+  CONFIRMED=true
+  shift 3
+  set -- "$SLOT" "$RESULT" "$@"
+fi
+[ "$#" -ge 3 ] || skip "usage: rc-ocr.sh <slot> <result-file> [--confirmed] --worktree|--staged|--commit <rev>|--range <base> <head>"
 valid_slot "$SLOT" || skip "invalid slot name"
 [ -n "$RESULT" ] || skip "usage: empty result-file"
 MODE="$3"
@@ -213,6 +258,7 @@ REV_A=""
 REV_B=""
 case "$MODE" in
   --worktree) [ "$#" -eq 3 ] || skip "usage: --worktree takes no revs" ;;
+  --staged) [ "$#" -eq 3 ] || skip "usage: --staged takes no revs" ;;
   --commit)
     [ "$#" -eq 4 ] || skip "usage: --commit <rev>"
     REV_A="$4"
@@ -267,6 +313,14 @@ if rc_family_distinct "$FAMILY"; then DISTINCT=true; else DISTINCT=false; fi
 
 ENABLED="$(cfg "$P.enabled")"
 [ "$ENABLED" = false ] && skip "slot disabled"
+
+# Script-side confirm lock: a seat the reader marks needs_confirm=true (e.g. a
+# committed-only, non-ollama seat) runs only with the operator's --confirmed.
+# Checked before any ocr call, so an unconfirmed seat never egresses. An absent
+# key (an older reader) means false.
+if [ "$(cfg "$P.needs_confirm")" = true ] && [ "$CONFIRMED" != true ]; then
+  skip "not confirmed by the operator"
+fi
 
 PROVIDER="$(cfg "$P.provider")"
 [ -n "$PROVIDER" ] || PROVIDER=openrouter
@@ -418,28 +472,62 @@ if [ -n "$REV_B" ]; then
   [ -n "$SHA_B" ] || skip "ref not found locally: $REV_B"
 fi
 
-# Worktree mode: never use ocr's own workspace mode — it also reviews UNTRACKED
-# files, so a stray non-ignored file (an .env, a local config) would be sent
-# to the provider although the council's target is tracked changes only.
-# Instead snapshot the tracked working tree (staged + unstaged) as a dangling
-# commit with `git stash create` — it writes objects only, moves no ref and
-# touches no file — and review HEAD..snapshot as a range.
-if [ "$MODE" = "--worktree" ]; then
+# ---------------------------------------------------------------------------
+# Isolated HOME (created before the snapshot so git's stderr has a home). The
+# prefix is rc-ocr-home.*, never the orchestrator's rc-ocr.* result dirs.
+# ---------------------------------------------------------------------------
+T="$(mktemp -d "${TMPDIR:-/tmp}/rc-ocr-home.XXXXXX")" || T=""
+[ -n "$T" ] && [ -d "$T" ] || skip "cannot create temp dir"
+chmod 700 "$T"
+
+# stash_snapshot: SNAP=<sha of a `git stash create` snapshot>, or empty when
+# there is nothing to snapshot. A git failure (exit != 0, e.g. a held
+# index.lock) is SKIPPED with git's own last stderr line — never mistaken for
+# "no changes". `git stash create` writes objects and refreshes the index
+# file, but creates and moves no ref and touches no working-tree file.
+SNAP=""
+stash_snapshot() {
+  SNAP="$(GIT_AUTHOR_NAME=review-council GIT_AUTHOR_EMAIL=review-council@localhost \
+    GIT_COMMITTER_NAME=review-council GIT_COMMITTER_EMAIL=review-council@localhost \
+    git stash create 2>"$T/stash.err")"
+  _src=$?
+  if [ "$_src" -ne 0 ]; then
+    _why="$(last_log_line "$T/stash.err")"
+    skip "git stash create failed: ${_why:-exit $_src}"
+  fi
+}
+
+# Worktree / staged modes: never use ocr's own workspace mode — it also reviews
+# UNTRACKED files, so a stray non-ignored file (an .env, a local config) would
+# be sent to the provider although the council's target is tracked changes
+# only. Instead snapshot with `git stash create` (a dangling commit W whose
+# tree is the tracked working tree, staged + unstaged, and whose second parent
+# W^2 is the index) and review a range: HEAD..W for --worktree, HEAD..W^2 for
+# --staged, so --staged never sends an unstaged edit.
+if [ "$MODE" = --worktree ] || [ "$MODE" = --staged ]; then
   SHA_A="$(resolve_rev HEAD)" || SHA_A=""
   [ -n "$SHA_A" ] || skip "no HEAD commit to diff the working tree against"
-  SHA_B="$(GIT_AUTHOR_NAME=review-council GIT_AUTHOR_EMAIL=review-council@localhost \
-    GIT_COMMITTER_NAME=review-council GIT_COMMITTER_EMAIL=review-council@localhost \
-    git stash create 2>/dev/null)" || SHA_B=""
-  [ -n "$SHA_B" ] || skip "no tracked changes in the working tree"
+  if [ "$MODE" = --staged ]; then
+    git diff --cached --quiet 2>/dev/null
+    _drc=$?
+    case "$_drc" in
+      0) skip "no staged changes" ;;
+      1) ;;
+      *) skip "git diff --cached failed (exit $_drc)" ;;
+    esac
+    stash_snapshot
+    [ -n "$SNAP" ] || skip "no staged changes"
+    SHA_B="$(resolve_rev "$SNAP^2")" || SHA_B=""
+    [ -n "$SHA_B" ] || skip "cannot resolve the index commit of the snapshot"
+  else
+    stash_snapshot
+    [ -n "$SNAP" ] || skip "no tracked changes in the working tree"
+    SHA_B="$SNAP"
+  fi
   MODE="--range"
 fi
 
-# ---------------------------------------------------------------------------
-# Isolated HOME
-# ---------------------------------------------------------------------------
-T="$(mktemp -d "${TMPDIR:-/tmp}/rc-ocr.XXXXXX")" || T=""
-[ -n "$T" ] && [ -d "$T" ] || skip "cannot create temp dir"
-chmod 700 "$T"
+# Populate the isolated HOME.
 mkdir -p "$T/.opencodereview" "$T/tmp" || skip "cannot populate temp dir"
 RULE="$T/rule.json"
 printf '%s' '{"rules":[{"path":"**","rule":"","merge_system_rule":true}],"exclude":["__none__"]}' >"$RULE"
@@ -468,18 +556,12 @@ if [ -n "${LANG:-}" ]; then ENV_LIST="${ENV_LIST}LANG=$LANG$NL"; fi
 if [ -n "${LC_ALL:-}" ]; then ENV_LIST="${ENV_LIST}LC_ALL=$LC_ALL$NL"; fi
 ENV_LIST="$ENV_LIST$ENV_EXTRA"
 
-# Target flags (SHAs only; worktree mode became a range above).
+# Target flags (SHAs only; worktree/staged modes became a range above).
 TARGET=""
 case "$MODE" in
   --commit) TARGET="--commit$NL$SHA_A$NL" ;;
   --range) TARGET="--from$NL$SHA_A$NL--to$NL$SHA_B$NL" ;;
 esac
-
-# last_log_line <file>: ocr's own last diagnostic line, sanitised.
-last_log_line() {
-  [ -s "$1" ] || return 0
-  one_line "$(grep -v '^[[:space:]]*$' "$1" | tail -n 1)" | cut -c1-200
-}
 
 # --- ocr version (no LLM call) ----------------------------------------------
 IFS=$NL
@@ -646,7 +728,10 @@ _drop_txt="$N_DROPPED comments dropped (path not reviewed)"
 [ "$N_DROPPED" -eq 1 ] && _drop_txt="1 comment dropped (path not reviewed)"
 COVERAGE="ocr ${OCR_VERSION:-unknown-version} · $SLOT ($MODEL): reviewed $S_DONE/$S_SEL selected files · $_failed_txt · $PV_EXCL of $PV_TOTAL changed files excluded before review · $_drop_txt · $S_WARN warnings"
 
-if [ "$S_FAILED" -eq 0 ] && [ "$S_TERM" = complete ]; then
+# complete = ocr says so AND every selected file was covered (completed or
+# reused); anything less — including nothing selected — is at best partial.
+if [ "$S_FAILED" -eq 0 ] && [ "$S_TERM" = complete ] &&
+  [ "$S_SEL" -gt 0 ] && [ "$S_DONE" -ge "$S_SEL" ]; then
   STATUS=complete
 elif [ "$S_DONE" -gt 0 ]; then
   STATUS=partial
@@ -657,7 +742,10 @@ else
 fi
 
 # ---------------------------------------------------------------------------
-# Render §3.1 markdown (deterministic; ocr text only ever appears as fenced data)
+# Render §3.1 markdown (deterministic). All ocr text is untrusted data:
+# multi-line text (detail, proposed code, quoted code) is fenced; single-line
+# fields (the ≤200-char issue sentence, the path in location/how_to_verify) are
+# unfenced but flattened to one line with control/bidi characters stripped.
 # ---------------------------------------------------------------------------
 MD="$T/findings.md"
 "$JQ" -r --arg slot "$SLOT" --arg model "$MODEL" --arg coverage "$COVERAGE" \

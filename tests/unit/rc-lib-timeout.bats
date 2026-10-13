@@ -108,3 +108,90 @@ start_neverending_stdin() {
   [ "$LAST_RC" -eq 124 ] || [ "$LAST_RC" -eq 143 ] || [ "$LAST_RC" -eq 137 ]
   [ "$((end - start))" -lt 10 ]
 }
+
+# --- fallback branch: process-group kill -------------------------------------
+# The bg+watchdog fallback runs the child in its OWN process group (via perl's
+# setpgrp) and signals the whole group, so the descendants of an agentic CLI
+# can't outlive the cap. These tests force the fallback with an isolated PATH
+# that has perl but no timeout/gtimeout.
+
+# fallback_path: an isolated PATH with sh/cat/sleep/perl only.
+fallback_path() {
+  TEST_PATH="$BATS_TEST_TMPDIR/isolated-bin-perl"
+  mkdir -p "$TEST_PATH"
+  for _t in sh cat sleep perl; do ln -s "$(command -v "$_t")" "$TEST_PATH/$_t"; done
+}
+
+@test "run_capped (fallback) kills the whole process group — a TERM-ignoring grandchild does not survive the cap" {
+  command -v perl >/dev/null 2>&1 || skip "perl not installed"
+  . "$LIB"
+  fallback_path
+  GP="$BATS_TEST_TMPDIR/grandchild.pid"
+  RCFILE="$BATS_TEST_TMPDIR/rc-grp"
+  SPAWNER="$BATS_TEST_TMPDIR/spawner"
+  cat >"$SPAWNER" <<SPAWN_EOF
+#!/bin/sh
+sh -c 'trap "" TERM; echo \$\$ >"$GP"; exec sleep 30' &
+wait
+SPAWN_EOF
+  chmod +x "$SPAWNER"
+
+  start=$(date +%s)
+  ( PATH="$TEST_PATH"; run_capped 2 "$OUT" "$SPAWNER"; printf '%s' "$LAST_RC" >"$RCFILE" )
+  end=$(date +%s)
+
+  gp="$(cat "$GP")"
+  [ -n "$gp" ]
+  # init/launchd reaps the orphan asynchronously: allow a moment before judging.
+  i=0
+  while kill -0 "$gp" 2>/dev/null && [ "$i" -lt 20 ]; do
+    sleep 0.1
+    i=$((i + 1))
+  done
+  if kill -0 "$gp" 2>/dev/null; then
+    kill -KILL "$gp" 2>/dev/null
+    echo "grandchild $gp survived the cap" >&2
+    return 1
+  fi
+  rc="$(cat "$RCFILE")"
+  [ "$rc" -eq 124 ] || [ "$rc" -eq 143 ] || [ "$rc" -eq 137 ]
+  [ "$((end - start))" -lt 10 ]
+}
+
+@test "run_capped (fallback, process group) propagates the child's own exit status" {
+  command -v perl >/dev/null 2>&1 || skip "perl not installed"
+  . "$LIB"
+  fallback_path
+  RCFILE="$BATS_TEST_TMPDIR/rc-exit"
+  ( PATH="$TEST_PATH"; run_capped 5 "$OUT" sh -c 'echo hi; exit 7'; printf '%s' "$LAST_RC" >"$RCFILE" )
+  [ "$(cat "$RCFILE")" -eq 7 ]
+  grep -qx hi "$OUT"
+}
+
+@test "run_capped (fallback, process group) never hands a one-word command to a shell" {
+  command -v perl >/dev/null 2>&1 || skip "perl not installed"
+  . "$LIB"
+  fallback_path
+  RCFILE="$BATS_TEST_TMPDIR/rc-meta"
+  MARK="$BATS_TEST_TMPDIR/injected"
+  ( PATH="$TEST_PATH"; run_capped 5 "$OUT" "sh -c 'touch $MARK'"; printf '%s' "$LAST_RC" >"$RCFILE" )
+  [ ! -e "$MARK" ]
+  [ "$(cat "$RCFILE")" -ne 0 ]
+}
+
+@test "run_capped (fallback, process group) still closes child stdin" {
+  command -v perl >/dev/null 2>&1 || skip "perl not installed"
+  . "$LIB"
+  fallback_path
+  FIFO="$BATS_TEST_TMPDIR/fifo3"
+  start_neverending_stdin "$FIFO"
+  RCFILE="$BATS_TEST_TMPDIR/rc3"
+
+  ( PATH="$TEST_PATH"; run_capped 3 "$OUT" "$DRAINER" <"$FIFO"; printf '%s' "$LAST_RC" >"$RCFILE" )
+
+  kill "$PRODUCER_PID" 2>/dev/null || true
+  wait "$PRODUCER_PID" 2>/dev/null || true
+
+  [ "$(cat "$RCFILE")" -eq 0 ]
+  grep -q DRAINED "$OUT"
+}
