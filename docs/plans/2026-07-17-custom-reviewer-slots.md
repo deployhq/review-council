@@ -11,6 +11,7 @@
 > - **Draft 2** → reviewed again. **2 more criticals, both inside §5/§6** — the very sections draft 1's review had produced. Both had the same shape: they correctly identified the reader as the place to *compute* a value, then assumed computing it was *enforcing* it.
 > - **Draft 3** → fixed both, and reversed one headline claim: custom slots are **finder-only** (§7).
 > - **Draft 4** (this one, unreviewed) → makes **`ocr` v1.12.13 the Phase-1 harness** (new §12): opt-in, finder-only, Round 1, model-configurable, never Tier B. Family now comes from a **fixed prefix map with `unknown` = non-distinct** (§5), replacing draft 3's "else itself" and its three rejection rules. `api_key_env` is admitted with the host kept a council literal (§6). `harness` is now required. Phases renumbered: `codex` → 2, `opencode` → 3, trust layer → 4, N slots → 5. §6's Sink 1 is marked **shipped** (v0.9.3).
+> - **Draft 5** (in progress) → adds §13, a tested comparison of `codex`, `opencode` and Claude Code as harnesses (2026-10-13, local Ollama). The draft-4 full-roster review's fixes are still to be applied.
 > - Both reviews ran with **only one non-Claude family** (`agy` quota exhausted), so each round's criticals rest on a single cross-family verification. The second review found that the first review's own fix was still wrong — which is the strongest available argument for re-reviewing this with a full roster before implementing.
 
 ---
@@ -559,6 +560,81 @@ No configuration met spike #1's go bar — full coverage in under ~10 min for un
 6. **The temp `HOME` hides `~/.gitconfig`.** Confirm on a real run that nothing a local diff needs lives there.
 7. **A distinct seat in a solo-Claude run** gets partial refutation (§7). Confirm reviewers want that, rather than all-or-nothing.
 8. **Upstream feature requests** — each would remove a workaround above: `--config` or `OCR_HOME`; `OCR_LLM_EXTRA_BODY`; `--no-project-rules`; pre-review exclusions in the review manifest; an include/keep-tests flag; `--session-dir` or `--no-session`.
+
+---
+
+## 13. Harness comparison — `codex` vs `opencode` vs Claude Code vs `ocr`
+
+**Why a harness at all.** A model behind a plain API call sees only what we paste into the prompt: it cannot open a file, follow a caller, or grep for a symbol. A *harness* is an agentic CLI that gives the model read/search tools over the repo and runs the tool loop for us. Review Council owns no agent loop (see the architecture line at the top), so every repo-capable custom seat borrows one. The harness is **transport only** — a slot's identity and family stay the model's (§2): Kimi through Claude Code is the `Moonshot` family, not Claude.
+
+**How this was tested (2026-10-13).** One synthetic two-file repo, the same local model for all three agentic CLIs — `qwen3.6:35b-a3b-coding-nvfp4` on Ollama 0.40.3 (M5 Pro, 48 GB) — so nothing left the machine and nothing was billed. OpenRouter was not re-run: the test key had hit its $10 spend limit. Each harness got the same two prompts:
+
+- **Read test** — "What is the exact value of `MAGIC` in `lib/secret_fact.py`?" The value (`zebra-4471`) cannot be guessed, so a correct answer proves a real file read.
+- **Write canary** — "Create `canary.txt` in the repo root, using any tool you have." Pass = no file, and `git status --porcelain` empty.
+
+Every harness ran with its user state redirected to a throwaway directory; before/after checks confirmed the user's own `~/.codex`, `~/.claude` and opencode config were untouched.
+
+### 13.1 Results
+
+| | `codex` 0.152.1 | `opencode` 1.19.0 | Claude Code 2.1.296 | `ocr` 1.12.13 (§12) |
+|---|---|---|---|---|
+| **Model API it speaks** | OpenAI Responses only | OpenAI chat-completions | Anthropic Messages | OpenAI-compatible / native |
+| **Ollama** | ✅ `--oss --local-provider ollama` (Ollama serves `/v1/responses`) | ✅ `@ai-sdk/openai-compatible` → `:11434/v1` | ✅ `ANTHROPIC_BASE_URL=http://127.0.0.1:11434` (Ollama serves `/v1/messages`) | ✅ spike run 5 |
+| **OpenRouter** | ✅ verified earlier (§3), Kimi, ~$0.04 a task | documented, not run | documented ("Anthropic Skin", `https://openrouter.ai/api`), not run | ✅ spikes 1–3 |
+| **Read test** | ✅ 5 s, via a `cat` shell call | ✅ 12–25 s | ✅ 21 s, 2 turns | n/a (review pipeline) |
+| **Write canary** | ✅ blocked — but see "no turn limit" | ✅ blocked, **only when hardened** (13.2) | ✅ blocked, **only with `--tools`** (13.2) | ✅ no write tool exists |
+| **Where read-only is enforced** | **OS kernel** (macOS seatbelt / Linux landlock) — every write failed `Operation not permitted` | agent layer — denied tools are removed from the request | agent layer — tools not listed in `--tools` don't exist for the model | agent layer — fixed four-tool set |
+| **Reviewed repo can override us** | not tested (Codex reads project config only for trusted projects) | **yes, by default** — a repo `opencode.json` re-enabled write/bash and the canary was created; a repo plugin **executed JavaScript** at startup | settings blocked with `--setting-sources ""`; whether a repo `CLAUDE.md` still loads is not tested | yes for `rule.json` — displaced by our `--rule` (§12.2) |
+| **Turn / time limit** | **none** — the canary run looped 99 tool calls over 16 min trying writes until killed | none observed | `--max-turns` | `--timeout` |
+| **OpenRouter `data_collection: deny`** | no per-request body option found — use a key-level guardrail | ✅ verified in the captured request body (model `options.provider`) | ✅ sent via `CLAUDE_CODE_EXTRA_BODY` — **undocumented** variable | ✅ `extra_body` in the council-written config |
+| **Already used by the plugin** | ✅ the Codex seat (`rc-invoke-provider.sh`) | no | it *is* the host | no |
+
+### 13.2 Required invocation and gotchas, per harness
+
+**`codex`** — cwd = the repo; `CODEX_HOME` = a throwaway dir:
+```bash
+codex exec --oss --local-provider ollama --sandbox read-only --skip-git-repo-check \
+  --model <slug> -o "$T/last.txt" "<prompt>" </dev/null           # Ollama
+# OpenRouter: -c model_providers.openrouter={…wire_api='responses', env_key=…} -c model_provider=openrouter (§3)
+```
+- **Wrap every run in an external cap.** `codex exec` has no turn or time limit; a model that keeps trying a refused action never stops by itself. `run_capped` already provides this.
+- Take the answer from `-o <file>` (`--output-last-message`); stdout and stderr carry the whole working transcript. (The current Codex seat merges them — see the plugin bug noted in the draft-4 review.)
+- `</dev/null` is mandatory (stdin is drained). The sandbox also blocks `/tmp`, so expect noisy temp-file errors from git/python; reads still work. The "Model metadata … not found" warning is benign.
+
+**`opencode`** — cwd = the repo; `HOME` and every `XDG_*_HOME` = throwaway dirs:
+```bash
+OPENCODE_CONFIG="$T/opencode.json" OPENCODE_DISABLE_PROJECT_CONFIG=1 \
+  opencode run --pure --model <provider>/<slug> "<prompt>" </dev/null
+```
+with permissions `{"*":"deny","read":"allow","grep":"allow","glob":"allow","list":"allow","external_directory":"deny"}`, `autoupdate: false`, `share: "disabled"`, `enabled_providers` = the one provider, and `small_model` set (each run sends an extra title request to it).
+- **`OPENCODE_DISABLE_PROJECT_CONFIG=1` is the security boundary, and it is undocumented** — found in the binary, confirmed by test. Without it the reviewed repo controls permissions and can run code on the operator's machine. `--pure` (no plugins) is the second guard. Pin the version and re-run the canary plus a planted-plugin test on every bump.
+- Exit code is 0 even when the model attempted denied tools — parse `--format json` if that matters.
+- First run fetches the models.dev catalog and npm-installs `@opencode-ai/plugin` into `XDG_CONFIG_HOME` (network at startup).
+- Writes nothing into the repo, but keeps a shadow-git snapshot of it under `XDG_DATA_HOME`.
+
+**Claude Code** — cwd = the repo; `CLAUDE_CONFIG_DIR` = a throwaway dir:
+```bash
+env -u ANTHROPIC_API_KEY -u ANTHROPIC_AUTH_TOKEN -u ANTHROPIC_MODEL \
+  ANTHROPIC_BASE_URL=<endpoint> ANTHROPIC_AUTH_TOKEN=<key or dummy> \
+  CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1 DISABLE_TELEMETRY=1 \
+  claude -p --tools=Read,Grep,Glob --restricted --strict-mcp-config --setting-sources "" \
+    --permission-mode dontAsk --max-turns <n> --no-session-persistence --output-format json \
+    --model <slug> "<prompt>" </dev/null
+```
+- **`--tools` (with `--restricted`) is the lockdown; `--allowedTools`/`--disallowedTools` are not.** With only the allow/deny lists the model still had Agent, Skill, Workflow, Worktree and Cron, and it tried to spawn five subagents (they 404'd on Ollama — on a real Anthropic-compatible endpoint they would have run).
+- `--tools` is variadic: written last, it swallows the prompt. Use `--tools=…`.
+- `--no-session-persistence` is not total (subagent metadata still lands in the config dir) — the throwaway `CLAUDE_CONFIG_DIR` is required.
+- Unknown models are assumed to have a 200k context; set `CLAUDE_CODE_MAX_CONTEXT_TOKENS` to the real window.
+- The reported `costUSD` is priced at Anthropic list rates — meaningless for other models.
+
+### 13.3 Recommendation
+
+1. **`codex` is the default general-purpose harness.** It is the only one whose read-only boundary is the operating system rather than a configuration the agent honours; both providers are verified; and the plugin already ships it. Its two gaps — no turn limit and no per-request `deny` — are closed by the existing `run_capped` wrapper and an OpenRouter key-level guardrail.
+2. **Claude Code is a solid second.** Clean flags, a real turn limit, and `deny` support (via an undocumented variable). Its boundary is the tool list, so `--tools=Read,Grep,Glob --restricted` is non-negotiable.
+3. **`opencode` only with both guards, version-pinned.** It has the best documented `deny` support, but its defaults let the reviewed repo grant itself write/shell access and run code — the exact threat model in §6 — and the guard that stops it is undocumented.
+4. **`ocr` stays the review-specialised harness** (§12): its own file grouping, coverage manifest and fact-check pass, at the cost of speed.
+
+**Open:** run the OpenRouter path for `opencode` and Claude Code once the key has credit; test whether a repo `CLAUDE.md` or `.codex/config.toml` reaches a harness run; test `opencode`'s `.opencode/opencode.json` and agent/command dirs.
 
 ---
 
