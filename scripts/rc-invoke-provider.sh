@@ -210,6 +210,10 @@ build_and_run() {
   _bar_cap="$2"
   _bar_out="$3"
   _bar_bn="$(basename "$_bar_bin")"
+  # LAST_MSG_FILE: the codex `-o` final-message file for THIS invocation, or ""
+  # for every other profile. Reset per call so a stale codex path never leaks
+  # into an agy/gemini attempt. Read by invoke_once after classify.
+  LAST_MSG_FILE=""
 
   case "$_bar_bn" in
     *agy*)
@@ -252,7 +256,23 @@ build_and_run() {
       #      stdin. run_capped (rc-lib-timeout.sh) closes the child's stdin
       #      (</dev/null) for exactly this reason; agy/gemini share the trait.
       #      See tests/unit/rc-lib-timeout.bats.
-      set -- "$_bar_bin" exec --sandbox read-only --skip-git-repo-check "$prompt"
+      #   5. `-o <file>` (`--output-last-message`) makes codex write ONLY the
+      #      final agent message to <file>. The merged stdout+stderr transcript
+      #      (prompt echo, every tool call, reasoning) still lands in the
+      #      out-file and is classified FIRST — the AUTH/QUOTA/RATE_LIMIT/
+      #      OVERLOAD phrases live there, and TIMEOUT comes from the exit code.
+      #      invoke_once then prefers the `-o` file when it is non-empty AND
+      #      itself classifies OK: the transcript is huge (265 KB seen live) and
+      #      its prompt echo carries the very Findings/Overall Assessment
+      #      headings the OK-guard keys on, so a failed model could pass as OK.
+      #      When the `-o` file is empty/missing (codex 0.152.1: "Warning: no
+      #      last agent message; wrote empty content to <file>" even though the
+      #      model answered in the transcript), it falls back to the transcript
+      #      unchanged. The file sits beside the attempt file under $WORKDIR
+      #      (removed by the EXIT trap). It goes with the flags, BEFORE the
+      #      positional prompt.
+      LAST_MSG_FILE="${_bar_out}.last"
+      set -- "$_bar_bin" exec --sandbox read-only --skip-git-repo-check -o "$LAST_MSG_FILE" "$prompt"
       ;;
     *)
       set -- "$_bar_bin" -p "$prompt"
@@ -488,6 +508,27 @@ invoke_once() {
   spent=$((spent + _io_el))
 
   classify "$LAST_RC" "$_io_out"
+
+  # Codex only (LAST_MSG_FILE is "" for every other profile): the transcript is
+  # classified above, exactly as before, so hard-fail phrases and TIMEOUT keep
+  # their meaning. If the `-o` final message is non-empty and is itself a valid
+  # RESULT (review headings or refutation verdicts — the same OK test), return
+  # it instead of the transcript. An empty/missing `-o` file leaves the
+  # transcript's class and output untouched. A non-empty `-o` that is NOT a
+  # valid result is the model's real (bad) answer: a transcript "OK" can then
+  # only come from the echoed prompt's own headings, so it becomes EMPTY;
+  # a transcript hard-fail (AUTH/QUOTA/…) keeps its class. TIMEOUT stays.
+  if [ "$CLASS" != TIMEOUT ] && [ -n "$LAST_MSG_FILE" ] && [ -s "$LAST_MSG_FILE" ]; then
+    _io_tclass="$CLASS"
+    classify "$LAST_RC" "$LAST_MSG_FILE"
+    if [ "$CLASS" = OK ]; then
+      _io_out="$LAST_MSG_FILE"
+    elif [ "$_io_tclass" = OK ]; then
+      CLASS=EMPTY
+    else
+      CLASS="$_io_tclass"
+    fi
+  fi
 
   INVOKE_CLASS="$CLASS"
   INVOKE_ELAPSED="$_io_el"
