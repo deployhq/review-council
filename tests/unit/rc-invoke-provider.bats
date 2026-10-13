@@ -258,6 +258,19 @@ GEM_EOF
   #   auth        -> auth error, exit 1
   #   quota       -> quota error, exit 1
   #   timeout     -> sleep $CDX_SLEEP (default 999s) to force a wrapper kill
+  #   noisy       -> a real-codex-shaped merged TRANSCRIPT, exit 0: banner, the
+  #                  echoed prompt (which carries "### Findings" / "### Overall
+  #                  Assessment" heading lines, so it classifies OK on its own),
+  #                  tool calls and reasoning chatter
+  #   rubric-echo -> transcript echoing the refutation rubric ("Allowed: UPHELD |
+  #                  REFUTED | INCONCLUSIVE") + chatter, NO real verdict line, exit 0
+  # `-o <file>` (--output-last-message) is honoured: the fake writes the final
+  # message there per CDX_LAST (set only if exported by the test):
+  #   unset    -> in `ok` mode mirror the review into <file>; other modes write
+  #               nothing (the file is never created)
+  #   review   -> a review DIFFERENT from any transcript body (provable source)
+  #   verdicts -> refutation verdict lines ("<id> | UPHELD — ...")
+  #   empty    -> create <file> empty (codex 0.152.1's "no last agent message")
   # Bookkeeping (set only if the env var is exported by the test):
   #   CDX_CALLS -> one "call" line appended per invocation (call counting)
   #   CDX_ARGS  -> one space-joined line of this call's argv appended
@@ -277,11 +290,64 @@ if [ -n "${CDX_ARGS:-}" ]; then
   } >>"$CDX_ARGS"
 fi
 
+# -o <file>: where `codex exec --output-last-message` writes the final message.
+last_file=""
+_prev=""
+for a in "$@"; do
+  if [ "$_prev" = "-o" ]; then
+    last_file="$a"
+    break
+  fi
+  _prev="$a"
+done
+
 case "$call_n" in
   1) mode="${CDX_MODE_1:-${CDX_MODE:-ok}}" ;;
   2) mode="${CDX_MODE_2:-${CDX_MODE:-ok}}" ;;
   *) mode="${CDX_MODE:-ok}" ;;
 esac
+
+if [ -n "$last_file" ]; then
+  case "${CDX_LAST:-}" in
+    review)
+      cat >"$last_file" <<'LAST_EOF'
+Findings:
+- [P1] Final answer via -o: missing null check in parse().
+
+What's Good:
+- Clear naming.
+
+Overall Assessment: One real bug; otherwise fine.
+LAST_EOF
+      ;;
+    verdicts)
+      cat >"$last_file" <<'LAST_EOF'
+F1 | UPHELD — src/app.rb:12 dereferences nil when the header is absent.
+F2 | REFUTED — src/app.rb:40 already guards the empty case.
+LAST_EOF
+      ;;
+    junk)
+      printf 'Sorry, I could not complete the review.\n' >"$last_file"
+      ;;
+    empty)
+      : >"$last_file"
+      echo "Warning: no last agent message; wrote empty content to $last_file" >&2
+      ;;
+    '')
+      if [ "$mode" = ok ]; then
+        cat >"$last_file" <<'LAST_EOF'
+Findings:
+- [P2] Example finding from codex.
+
+What's Good:
+- Reasonable structure.
+
+Overall Assessment: Looks fine.
+LAST_EOF
+      fi
+      ;;
+  esac
+fi
 
 case "$mode" in
   ok)
@@ -294,6 +360,39 @@ What's Good:
 
 Overall Assessment: Looks fine.
 REVIEW_EOF
+    exit 0
+    ;;
+  noisy)
+    cat <<'NOISY_EOF'
+OpenAI Codex v0.152.1 (research preview)
+--------
+workdir: /repo
+sandbox: read-only
+--------
+user
+Review this diff. Respond with:
+### Findings
+### Overall Assessment
+
+thinking
+CHATTER-REASONING: let me inspect the parser first.
+exec
+CHATTER-TOOLCALL: bash -lc 'sed -n 1,80p src/app.rb'
+ succeeded in 12ms:
+CHATTER-TOOLOUT: def parse(h) h[:x].strip end
+NOISY_EOF
+    exit 0
+    ;;
+  rubric-echo)
+    cat <<'NOISY_EOF'
+OpenAI Codex v0.152.1 (research preview)
+user
+For each finding return one line. Allowed: UPHELD | REFUTED | INCONCLUSIVE
+thinking
+CHATTER-REASONING: checking src/app.rb:12.
+exec
+CHATTER-TOOLCALL: bash -lc 'sed -n 1,60p src/app.rb'
+NOISY_EOF
     exit 0
     ;;
   empty)
@@ -783,7 +882,7 @@ call_count() {
   echo "codex argv: $(cat "$CDX_ARGS")"
   # Frozen shape: the non-interactive `exec` subcommand, then the least-privilege
   # read-only sandbox, pinned against `codex exec --help`.
-  grep -qF -- 'exec --sandbox read-only --skip-git-repo-check' "$CDX_ARGS"
+  grep -qF -- 'exec --sandbox read-only --skip-git-repo-check -o ' "$CDX_ARGS"
   # Least privilege: the reviewer must NOT run with the "EXTREMELY DANGEROUS"
   # no-sandbox flag.
   ! grep -qF -- 'dangerously-bypass' "$CDX_ARGS"
@@ -1060,4 +1159,98 @@ call_count() {
   echo "status=$status"
   echo "stderr=<<$stderr>>"
   [ "$status" -eq 2 ]
+}
+
+# ---------------------------------------------------------------------------
+# Codex `-o` (--output-last-message): return ONLY the final agent message.
+#
+# Plain `codex exec` stdout+stderr is the whole merged transcript — prompt echo,
+# every tool call, reasoning (265 KB seen live). Worse, the echoed prompt carries
+# the Findings / Overall Assessment headings, so a failed model could classify
+# OK on the echo alone. The transcript is still classified first (hard-fail
+# phrases + TIMEOUT live there); a non-empty, itself-OK `-o` file then wins.
+# ---------------------------------------------------------------------------
+
+@test "codex-last-message: noisy transcript + valid -o review -> ONLY the -o body is returned" {
+  CDX_MODE=noisy CDX_LAST=review \
+    run --separate-stderr "$SCRIPT" "$CODEX" "" "$PROMPT_FILE"
+  echo "status=$status"
+  echo "output=<<$output>>"
+  [ "$status" -eq 0 ]
+  _expected="$(printf '%s\n' 'TOOL: Codex' 'Findings:' \
+    '- [P1] Final answer via -o: missing null check in parse().' '' \
+    "What's Good:" '- Clear naming.' '' \
+    'Overall Assessment: One real bug; otherwise fine.')"
+  [ "$output" = "$_expected" ]
+  # None of the transcript (banner, prompt echo, tool chatter) leaks through.
+  ! printf '%s\n' "$output" | grep -qF 'CHATTER-' || false
+  ! printf '%s\n' "$output" | grep -qF 'OpenAI Codex v' || false
+  ! printf '%s\n' "$output" | grep -qF '### Findings' || false
+}
+
+@test "codex-last-message: -o carrying refutation verdict lines is used (Step-4 shape)" {
+  # The transcript only echoes the rubric enumeration (no real "<id> | VERDICT"
+  # line), so on its own it is not a valid RESULT; the -o verdicts must win.
+  CDX_MODE=rubric-echo CDX_LAST=verdicts \
+    run --separate-stderr "$SCRIPT" "$CODEX" "" "$PROMPT_FILE"
+  echo "status=$status"
+  echo "output=<<$output>>"
+  [ "$status" -eq 0 ]
+  _expected="$(printf '%s\n' 'TOOL: Codex' \
+    'F1 | UPHELD — src/app.rb:12 dereferences nil when the header is absent.' \
+    'F2 | REFUTED — src/app.rb:40 already guards the empty case.')"
+  [ "$output" = "$_expected" ]
+  ! printf '%s\n' "$output" | grep -qF 'CHATTER-' || false
+  ! printf '%s\n' "$output" | grep -qF 'Allowed:' || false
+}
+
+@test "codex-last-message: empty -o + valid transcript -> falls back to the transcript (today's behaviour)" {
+  # codex 0.152.1 can write an EMPTY -o file ("no last agent message") even
+  # though the model answered in the transcript. Fallback guard: unchanged path.
+  CDX_MODE=noisy CDX_LAST=empty \
+    run --separate-stderr "$SCRIPT" "$CODEX" "" "$PROMPT_FILE"
+  echo "status=$status"
+  echo "output=<<$output>>"
+  [ "$status" -eq 0 ]
+  case "$output" in
+  "TOOL: Codex"*) : ;;
+  *) echo "expected TOOL: Codex from the transcript fallback" && return 1 ;;
+  esac
+  printf '%s\n' "$output" | grep -qF 'CHATTER-TOOLCALL'
+  printf '%s\n' "$output" | grep -qF '### Overall Assessment'
+  [ "$(call_count "$CDX_CALLS")" -eq 1 ]
+}
+
+@test "codex-last-message: auth phrase in transcript + empty -o -> SKIPPED with the auth reason" {
+  CDX_MODE=auth CDX_LAST=empty \
+    run --separate-stderr "$SCRIPT" "$CODEX" "" "$PROMPT_FILE"
+  echo "status=$status"
+  echo "output=<<$output>>"
+  [ "$status" -eq 1 ]
+  [ "$output" = "SKIPPED: Codex unavailable — codex: auth failure" ]
+}
+
+@test "codex-last-message: argv passes -o <file under the run WORKDIR> before the positional prompt" {
+  CDX_MODE=ok run --separate-stderr "$SCRIPT" "$CODEX" "" "$PROMPT_FILE"
+  echo "status=$status"
+  echo "codex argv: $(cat "$CDX_ARGS")"
+  [ "$status" -eq 0 ]
+  # `-o` + its path come with the flags, immediately BEFORE the prompt.
+  grep -qE -- ' -o [^ ]+ Please review this change' "$CDX_ARGS"
+  # The path lives under the script's private mktemp WORKDIR.
+  grep -qE -- ' -o [^ ]*rc-invoke\.[^ /]+/[^ ]+ ' "$CDX_ARGS"
+}
+
+@test "codex-last-message: a non-empty but invalid -o is never rescued by the echoed prompt's headings" {
+  # The transcript passes the OK test only because it echoes the prompt's own
+  # "### Findings"/"### Overall Assessment" headings; the model's real answer
+  # (-o) is not a review. That must not be returned as a valid Codex review.
+  CDX_MODE=noisy CDX_LAST=junk \
+    run --separate-stderr "$SCRIPT" "$CODEX" "" "$PROMPT_FILE"
+  echo "output=<<$output>>"
+  [ "$status" -eq 1 ]
+  case "$output" in
+  "SKIPPED: Codex unavailable"*) : ;;
+  *) echo "expected SKIPPED, got a review" && return 1 ;;
+  esac
 }
