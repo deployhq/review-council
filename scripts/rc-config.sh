@@ -572,6 +572,8 @@ printf 'pr_comments.bot_token_env=%s\n' "$_pc_tokenenv"
 # applies to the harnesses listed at its resolve below (set on another, it is
 # dropped with a note); free-form flags/env are ocr-only — every agent harness
 # has isolation-critical flags/env, so none of them gets a free-form surface.
+# Harness codex runs with provider ollama only. Of the enabled seats that ONLY
+# an untrusted layer defines, just the first (in slot order) is emitted.
 # A seat that ONLY an untrusted layer defines and that sends code off
 # the machine gets a `confirm.<n>=` line: the orchestrator asks the human once
 # before running it (skills/run/SKILL.md, Step 0).
@@ -762,9 +764,10 @@ cs_note_untrusted() {
 
 # Enumerate: union of every layer's valid names, TRUSTED layers first (over,
 # user, then overu, base), document order within a layer; a name takes the
-# position of its first appearance in that order. The order matters: the
-# orchestrator's one-seat cap takes the first available entry of
-# reviewer.custom_slots, so a committed seat must never displace a trusted one.
+# position of its first appearance in that order. The order matters: every
+# trusted seat is emitted, but of the seats only the committed config names,
+# just the first enabled one in this order runs (the rest are dropped below),
+# and reviewer.custom_slots lists trusted seats before it.
 CS_ALL=""
 if [ "$yq_present" -eq 1 ]; then
   for _cs_layer in over user overu base; do
@@ -782,6 +785,7 @@ CS_OUT=""
 CS_SLOTS=""
 CS_CONFIRM=0
 CS_CONF_OUT=""
+CS_COMMITTED_TAKEN=0
 
 _cs_old_ifs="$IFS"
 IFS=','
@@ -814,6 +818,30 @@ for _cs in $CS_ALL; do
     user) _source=user ;;
     *) _source=committed ;;
   esac
+
+  # codex is Ollama-only: its read-only sandbox blocks writes, not reads (the
+  # model can read any file on this machine), and it cannot send OpenRouter's
+  # `data_collection: deny`. Checked before the committed-seat limit below, so
+  # a skipped seat never uses up the repo's one seat.
+  if [ "$_harness" = codex ] && [ "$_provider" != ollama ]; then
+    echo "rc-config: reviewer.custom.$_cs: harness codex supports provider ollama only (codex can read any file on this machine and cannot deny OpenRouter data collection); use harness claude or opencode for OpenRouter; seat skipped" >&2
+    IFS=','
+    continue
+  fi
+
+  # At most ONE enabled seat that only the repo's committed config names runs
+  # per review — otherwise a reviewed repo could field many (Ollama seats need
+  # no confirm) and forge cross-family agreement between its own seats. The
+  # first in slot order (trusted-first) is kept; the rest emit nothing. A
+  # disabled seat never runs, so it does not use up the slot.
+  if [ "$_source" = committed ] && [ "$_enabled" = true ]; then
+    if [ "$CS_COMMITTED_TAKEN" -eq 1 ]; then
+      echo "rc-config: reviewer.custom.$_cs: only one seat from the repo's committed config runs per review; seat skipped (enable it in ~/.review-council/config.yml or an untracked config.local.yml to run it)" >&2
+      IFS=','
+      continue
+    fi
+    CS_COMMITTED_TAKEN=1
+  fi
 
   if [ "$_provider" = "ollama" ]; then
     _keyenv=""
@@ -949,11 +977,7 @@ for _cs in $CS_ALL; do
 
   if [ "$_needs_confirm" = true ]; then
     CS_CONFIRM=$((CS_CONFIRM + 1))
-    # codex has no per-request OpenRouter provider preferences, so the council's
-    # `data_collection: deny` cannot be sent for it — say so in the one question.
-    _cf_note=""
-    [ "$_harness" != codex ] || _cf_note=" Note: the codex harness cannot ask OpenRouter to deny data collection."
-    CS_CONF_OUT="${CS_CONF_OUT}confirm.$CS_CONFIRM=Seat '$_cs' is enabled only by the repo's committed config, and sends code to OpenRouter (model $_model), billed to your $_keyenv.$_cf_note
+    CS_CONF_OUT="${CS_CONF_OUT}confirm.$CS_CONFIRM=Seat '$_cs' is enabled only by the repo's committed config, and sends code to OpenRouter (model $_model), billed to your $_keyenv.
 "
   fi
   IFS=','
