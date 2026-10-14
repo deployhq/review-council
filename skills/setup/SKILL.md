@@ -53,7 +53,7 @@ test -n "$PERPLEXITY_API_KEY" && echo "set" || echo "not set"
 
 ### Custom reviewer seat harness (`ocr` + `jq`) — optional, detect and PRINT-ONLY
 
-An opt-in custom reviewer seat (`reviewers.custom` in `rules/config.md`) runs a model you choose — e.g. Kimi on OpenRouter, or a local Ollama model — through a harness CLI: `codex`, Claude Code (`claude`), `opencode`, or Alibaba OpenCodeReview (`ocr`, which also needs `jq`). **Detect and print only — `setup` never installs any of them, not even with consent.**
+An opt-in custom reviewer seat (`reviewers.custom` in `rules/config.md`) runs a model you choose — e.g. Kimi on OpenRouter, or a local Ollama model — through a harness CLI: `codex` (local Ollama models only), Claude Code (`claude`), `opencode`, or Alibaba OpenCodeReview (`ocr`). Every harness also needs `jq`. **Detect and print only — `setup` never installs any of them, not even with consent.**
 
 ```bash
 command -v codex    >/dev/null 2>&1 && codex --version
@@ -63,7 +63,8 @@ command -v ocr      >/dev/null 2>&1 && ocr --version
 command -v jq       >/dev/null 2>&1 && jq --version
 ```
 Print one row per harness:
-- "Custom seat harness: codex ...... available (<version>)" / "not found — install: `npm i -g @openai/codex`"
+- "Custom seat harness: codex ...... available (<version>; local Ollama models only)" / "not found — install: `npm i -g @openai/codex`"
+- "Custom seats need jq ...... available (<version>)" / "jq not found — install: `brew install jq`"
 - "Custom seat harness: claude ...... available (<version>)" (it is the host, so normally always present)
 - "Custom seat harness: opencode ...... available (<version>)" — add "(untested version — seats will be skipped; tested: 1.19.0)" when the version is not `1.19.0` / "not found — install: `npm i -g opencode-ai@1.19.0`"
 - "Custom seat harness: ocr ...... available (ocr <version>, jq <version>)" / "not found — install: `npm i -g @alibaba-group/open-code-review`" / "jq not found — install: `brew install jq`"

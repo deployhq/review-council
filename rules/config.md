@@ -193,12 +193,14 @@ on your key without your say-so. Values that are never legitimate from committed
 
 | | `signal` (default) | `reviewer` |
 |---|---|---|
-| Seat-only findings land in | a separate **"Extra signals (<slot> via ocr)"** report section | the main severity lists |
-| Counts toward `settings.min_reviewers` | never | only if the family is **distinct** (as re-checked after the run) **and** its coverage ends **complete** — otherwise it is demoted to `signal` for that run (with a note) |
+| Seat-only findings land in | a separate **"Extra signals (<slot> via <harness>)"** report section | the main severity lists |
+| Counts toward `settings.min_reviewers` | never | only if the family is **distinct** (as re-checked after the run) **and** the run ends **complete** (for `ocr`: every selected file covered) — otherwise it is demoted to `signal` for that run (with a note); seats sharing a family count once |
 
-Either role: never a refutation verifier; no lens; no severity cap (`ocr` `critical` →
-critical, `high` → important, anything else → suggestion); never lifts solo-Claude mode for
-the native reviewers' findings.
+Either role: never a refutation verifier; no severity cap (`ocr` `critical` → critical,
+`high` → important, anything else → suggestion); never lifts solo-Claude mode for the native
+reviewers' findings; and **seats never corroborate each other** — agreement between seats
+alone (even two distinct families) is not cross-family corroboration; it needs a native
+reviewer. An `ocr` seat gets no lens; `codex`/`claude`/`opencode` seats get one.
 
 ### Family
 
@@ -218,9 +220,10 @@ then match a prefix at a boundary (end, `/`, `-`, `.`, `:` or a digit):
 
 A **distinct** seat's findings go through the refutation pass like any single-family finding
 and can corroborate another family's. A **non-distinct** seat is allowed (you may run a Claude
-or GPT model through `ocr`), but its findings skip refutation, stay `[unverified]`, and
-**never** count as cross-family corroboration. The family is re-derived from the model `ocr`
-reports it actually ran; a mismatch makes it `unknown` for that run, with a note.
+or GPT model through a harness), but its findings skip refutation, stay `[unverified]`, and
+**never** count as cross-family corroboration. For `ocr` and `claude` the family is re-derived
+from the model the harness reports it actually ran; a mismatch makes it `unknown` for that
+run, with a note. `codex` and `opencode` do not report it (`model_check=argv`).
 
 ### Budget for a seat
 
@@ -246,22 +249,27 @@ To give only this seat more time, set its `timeout_minutes`; there is no need to
   the tracked local file and committed `config.yml` (document order within each). **Families,
   not seats, count:** two seats on one vendor are one family for `min_reviewers` and for
   cross-family corroboration.
-- **Availability:** the harness binary installed (`ocr` also needs `jq`); for OpenRouter, the
+- **At most one seat from the repo's committed config.** Of the seats only the committed
+  `config.yml` (or a tracked `config.local.yml`) names, the first runs and the rest are
+  dropped with a note — a reviewed repo cannot field a crowd of seats. Name a seat in your own
+  file to run more.
+- **Availability:** the harness binary and `jq` installed; for Ollama, the model already
+  pulled (seats never pull models); for OpenRouter, the
   variable `api_key_env` names is set and non-empty. An `ocr` seat also needs a target with a
   diff (a plan/document review skips it); the other harnesses review any target.
 - **Egress:** OpenRouter seats send review context to OpenRouter and the model's host, with
-  `data_collection: deny` hard-coded on every request (never read from any config) — **except
-  `codex`**, which has no way to send it: for a `codex` seat, set a data policy on the
-  OpenRouter key itself. Ollama seats talk to `127.0.0.1:11434` only. Endpoints are council
+  `data_collection: deny` hard-coded on every request (never read from any config).
+  `codex` seats are **Ollama-only**: `codex` can read any file on the machine (its sandbox
+  blocks writes, not reads) and cannot send the `deny`. Ollama seats talk to `127.0.0.1:11434` only. Endpoints are council
   literals — there is no URL key.
 
 ### Which harness
 
 | `harness` | Read-only boundary | Takes the council prompt / lens | Best for |
 |---|---|---|---|
-| `codex` | **OS kernel** sandbox (`--sandbox read-only`) | yes | The default general-purpose choice; the strongest boundary. No `data_collection: deny` on OpenRouter. |
-| `claude` | tool list (`--tools=Read,Grep,Glob`) | yes | Any model behind an Anthropic-compatible endpoint (OpenRouter, Ollama); real turn limit (`max_turns`). |
-| `opencode` | council-written deny-by-default config + two guards | yes | Pinned to the tested release (`1.19.0`); any other version is skipped. |
+| `codex` | **OS kernel** sandbox for writes (`--sandbox read-only`); reads are **not** confined | yes | **Ollama only.** The strongest write boundary; good for local models. |
+| `claude` | tool list (`--tools=Read,Grep,Glob`) + `--restricted` (file tools confined to the snapshot) | yes | Any model behind an Anthropic-compatible endpoint (OpenRouter, Ollama); real turn limit (`max_turns`). |
+| `opencode` | council-written deny-by-default config (`external_directory: deny`) + two guards | yes | Pinned to the tested release (`1.19.0`); any other version is skipped. |
 | `ocr` | fixed four-tool set | no (own review pipeline, no lens) | Whole-diff review with a coverage manifest; slow. |
 
 Details and the evidence behind each boundary: `rules/providers.md` → Custom seats.
