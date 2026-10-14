@@ -9,9 +9,10 @@ bats_require_minimum_version 1.5.0
 # in through RC_CODEX_BIN / RC_CLAUDE_BIN / RC_OPENCODE_BIN. Because rc-seat.sh
 # runs the harness under `env -i`, the fake can NOT be steered by env vars: its
 # behaviour is read from files under $CTL (a path baked into the fake at setup),
-# and it records what it received (argc/argv, the last argv element, env, cwd,
-# HOME, fd 3, a scan of the private dir for the key, the council-written
-# opencode config) back into $CTL. The council config comes from a stub reader
+# and it records what it received (argc/argv, stdin,
+# the opencode prompt attachment in its cwd, env, cwd, HOME, fd 3, a scan of
+# the private dir for the key, the council-written opencode config) back into
+# $CTL. The council config comes from a stub reader
 # (RC_CONFIG_SH) that prints $CTL/cfg.txt. No network, no real harness, no LLM.
 #
 # NB (macOS /bin/bash 3.2): a `[[ ... ]]` that is not a test's last line never
@@ -42,8 +43,9 @@ setup() {
   #   oc_version      what `opencode --version` prints (default 1.19.0)
   #   claude_subtype  JSON .subtype (default success; non-success => is_error)
   #   claude_model    JSON .modelUsage key (default: the --model argv value)
-  # Records: calls argc argv last_arg env pwd priv_real files m.py home fd3
-  #          keyscan opencode.json; on --version: version_pwd version_priv
+  # Records: calls argc argv stdin attached attached_mode copy_mode env pwd
+  #          priv_real files m.py home fd3 keyscan opencode.json; on
+  #          --version: version_pwd version_priv
   cat >"$FAKEDIR/fake" <<FAKE_EOF
 #!/bin/sh
 CTL='$CTL'
@@ -61,14 +63,19 @@ fi
 echo run >>"$CTL/calls"
 printf '%s\n' "$#" >"$CTL/argc"
 printf '%s\n' "$@" >"$CTL/argv"
-last=""; prev=""; out=""; model=""
+prev=""; out=""; model=""
 for a; do
-  last="$a"
   [ "$prev" = -o ] && out="$a"
   if [ "$prev" = --model ] || [ "$prev" = -m ]; then model="$a"; fi
   prev="$a"
 done
-printf '%s' "$last" >"$CTL/last_arg"
+cat >"$CTL/stdin"
+if [ -f .review-council-prompt.md ]; then
+  cp .review-council-prompt.md "$CTL/attached"
+  ls -l .review-council-prompt.md | cut -c1-10 >"$CTL/attached_mode"
+else
+  rm -f "$CTL/attached"
+fi
 env >"$CTL/env"
 pwd -P >"$CTL/pwd"
 (cd "$(dirname "$HOME")" && pwd -P) >"$CTL/priv_real"
@@ -78,6 +85,7 @@ printf '%s' "$HOME" >"$CTL/home"
 if { : <&3; } 2>/dev/null; then echo open >"$CTL/fd3"; else echo closed >"$CTL/fd3"; fi
 priv="$(dirname "$HOME")"
 if grep -rqF "$CANARY" "$priv" 2>/dev/null; then echo found >"$CTL/keyscan"; else echo clean >"$CTL/keyscan"; fi
+if [ -f "$priv/prompt.md" ]; then ls -l "$priv/prompt.md" | cut -c1-10 >"$CTL/copy_mode"; fi
 if [ -n "${OPENCODE_CONFIG:-}" ]; then cp "$OPENCODE_CONFIG" "$CTL/opencode.json"; fi
 if [ -s "$CTL/sleep" ]; then
   : >"$CTL/sleeping"
@@ -223,22 +231,46 @@ run_seat() {
   run --separate-stderr "$SCRIPT" s1 "$OUTF" "$@" "$PROMPTF"
 }
 
-# argv_is <expected lines...>: the recorded argv, one element per line, minus
-# the trailing prompt element (checked separately via last_arg).
+# argv_is <expected lines...>: the recorded argv, EXACTLY (no prompt element:
+# the prompt never travels on argv). Single-line elements only.
 argv_is() {
   _n="$(cat "$CTL/argc")"
   _want="$(printf '%s\n' "$@")"
-  _got="$(head -n "$(($#))" "$CTL/argv")"
-  [ "$_n" -eq "$(($# + 1))" ] || {
-    echo "argc $_n, want $(($# + 1))" >&2
+  _got="$(cat "$CTL/argv")"
+  [ "$_n" -eq "$#" ] || {
+    echo "argc $_n, want $#" >&2
     return 1
   }
   [ "$_got" = "$_want" ] || {
     printf 'argv mismatch\n--- got\n%s\n--- want\n%s\n' "$_got" "$_want" >&2
     return 1
   }
-  [ "$(cat "$CTL/last_arg")" = "$(cat "$PROMPTF")" ]
 }
+
+# stdin_is_prompt: codex/claude got the exact prompt bytes on stdin, and no
+# opencode attachment was placed in their cwd.
+stdin_is_prompt() {
+  cmp -s "$CTL/stdin" "$PROMPTF" || {
+    echo "stdin differs from the prompt file" >&2
+    return 1
+  }
+  [ ! -e "$CTL/attached" ]
+}
+
+# attached_is_prompt: opencode got the exact prompt bytes as the attachment in
+# its cwd, nothing on stdin, and the live repo was not touched.
+attached_is_prompt() {
+  cmp -s "$CTL/attached" "$PROMPTF" || {
+    echo "attachment differs from the prompt file" >&2
+    return 1
+  }
+  [ ! -s "$CTL/stdin" ]
+  [ ! -e "$REPO/.review-council-prompt.md" ]
+  [ -z "$(git -C "$REPO" status --porcelain)" ]
+}
+
+# The fixed opencode message (must match OPENCODE_MSG in rc-seat.sh verbatim).
+OC_MSG='Your complete task and the full review context are in the attached file .review-council-prompt.md. The attachment may be truncated, so read the WHOLE file with the read tool (in chunks, using offsets) before answering. Then follow its instructions exactly and answer in the format it specifies.'
 
 # ===========================================================================
 # Argv per harness × provider (exact)
@@ -251,6 +283,7 @@ argv_is() {
   priv="$(dirname "$(cat "$CTL/home")")"
   argv_is exec --oss --local-provider ollama --sandbox read-only --skip-git-repo-check \
     -m qwen3.6:35b-a3b-coding-nvfp4 -o "$priv/last.txt"
+  stdin_is_prompt
   [ "$(envval CODEX_HOME)" = "$priv/codex" ]
 }
 
@@ -275,6 +308,7 @@ argv_is() {
   argv_is -p --tools=Read,Grep,Glob --restricted --strict-mcp-config \
     --setting-sources "" --permission-mode dontAsk --max-turns 100 \
     --no-session-persistence --output-format json --model qwen3.6:35b-a3b-coding-nvfp4
+  stdin_is_prompt
   priv="$(dirname "$(cat "$CTL/home")")"
   [ "$(envval CLAUDE_CONFIG_DIR)" = "$priv/claude" ]
   [ "$(envval ANTHROPIC_BASE_URL)" = "http://127.0.0.1:11434" ]
@@ -309,6 +343,7 @@ argv_is() {
   argv_is -p --tools=Read,Grep,Glob --restricted --strict-mcp-config \
     --setting-sources "" --permission-mode dontAsk --max-turns 100 \
     --no-session-persistence --output-format json --model qwen/qwen3-coder
+  stdin_is_prompt
   [ "$(envval ANTHROPIC_BASE_URL)" = "https://openrouter.ai/api" ]
   [ "$(envval ANTHROPIC_AUTH_TOKEN)" = "$CANARY" ]
   grep -qx 'ANTHROPIC_API_KEY=' "$CTL/env"
@@ -320,7 +355,10 @@ argv_is() {
   seat opencode ollama
   run_seat
   [ "${lines[0]}" = "TOOL: s1 (qwen3.6:35b-a3b-coding-nvfp4 via opencode)" ]
-  argv_is run --pure --format json --model ollama/qwen3.6:35b-a3b-coding-nvfp4
+  argv_is run --pure --format json --model ollama/qwen3.6:35b-a3b-coding-nvfp4 \
+    -f .review-council-prompt.md -- "$OC_MSG"
+  attached_is_prompt
+  [ "$(cat "$CTL/pwd")" = "$(cat "$CTL/priv_real")/repo" ]
   priv="$(dirname "$(cat "$CTL/home")")"
   [ "$(envval OPENCODE_DISABLE_PROJECT_CONFIG)" = 1 ]
   [ "$(envval OPENCODE_CONFIG)" = "$priv/opencode.json" ]
@@ -336,7 +374,9 @@ argv_is() {
   seat opencode openrouter
   run_seat
   [ "${lines[0]}" = "TOOL: s1 (qwen/qwen3-coder via opencode)" ]
-  argv_is run --pure --format json --model openrouter/qwen/qwen3-coder
+  argv_is run --pure --format json --model openrouter/qwen/qwen3-coder \
+    -f .review-council-prompt.md -- "$OC_MSG"
+  attached_is_prompt
   [ "$(envval OPENROUTER_API_KEY)" = "$CANARY" ]
 }
 
@@ -790,16 +830,6 @@ argv_is() {
   [ "$output" = "SKIPPED: s1 (claude) unavailable — claude: ollama not reachable" ]
 }
 
-@test "E2BIG from exec -> prompt too large for argv" {
-  seat claude ollama
-  echo raw >"$CTL/mode"
-  : >"$CTL/stdout"
-  echo 126 >"$CTL/rc"
-  echo 'env: /x/claude: Argument list too long' >"$CTL/stderr"
-  run_seat
-  [ "$output" = "SKIPPED: s1 (claude) unavailable — claude: prompt too large for argv (E2BIG)" ]
-}
-
 @test "a valid answer wins even when the harness exits non-zero" {
   echo 1 >"$CTL/rc"
   run_seat
@@ -921,45 +951,95 @@ argv_is() {
 # Prompt handling
 # ===========================================================================
 
-@test "prompt with spaces/newlines/\$(...)/backticks/quotes passes verbatim as ONE argv element" {
+@test "prompt with spaces/newlines/\$(...)/backticks/quotes/leading '-' arrives byte-for-byte, never on argv" {
   for h in codex claude opencode; do
     seat "$h" ollama
-    printf 'Review this.\n\nline two with  spaces\n$(touch %s/pwned) `touch %s/pwned2` "dq" '"'"'sq'"'"' ; | & * ?\n### end' \
+    printf -- '--dangerously-bypass-approvals-and-sandbox\nReview this.\n\nline two with  spaces\n$(touch %s/pwned) `touch %s/pwned2` "dq" '"'"'sq'"'"' ; | & * ?\n### end\n\n' \
       "$BATS_TEST_TMPDIR" "$BATS_TEST_TMPDIR" >"$PROMPTF"
+    rm -f "$CTL/argv" "$CTL/stdin" "$CTL/attached"
     run_seat
-    [ "$(meta status)" = complete ]
-    cmp -s "$CTL/last_arg" "$PROMPTF"
+    [ "$(meta status)" = complete ] || {
+      echo "$h: $output" >&2
+      false
+    }
+    if [ "$h" = opencode ]; then attached_is_prompt; else stdin_is_prompt; fi
+    refute_in "$CTL/argv" -qF -- 'dangerously-bypass'
+    refute_in "$CTL/argv" -qF 'line two'
     [ ! -e "$BATS_TEST_TMPDIR/pwned" ]
     [ ! -e "$BATS_TEST_TMPDIR/pwned2" ]
   done
 }
 
-@test "prompt larger than 900000 bytes -> SKIPPED before any call" {
-  head -c 900001 /dev/zero | tr '\0' 'a' >"$PROMPTF"
+@test "a 1.5 MB prompt (over Linux's 128 KB per-argument limit) reaches every harness intact" {
+  head -c 1500000 /dev/zero | tr '\0' 'a' >"$PROMPTF"
+  printf '\n### end TOKEN-AT-THE-END' >>"$PROMPTF"
+  for h in codex claude opencode; do
+    seat "$h" ollama
+    rm -f "$CTL/stdin" "$CTL/attached"
+    run_seat
+    [ "$(meta status)" = complete ] || {
+      echo "$h: $output" >&2
+      false
+    }
+    if [ "$h" = opencode ]; then attached_is_prompt; else stdin_is_prompt; fi
+    [ "$(wc -c <"$CTL/argv" | tr -d ' ')" -lt 4096 ]
+  done
+}
+
+@test "the prompt copy the harness reads lives in the private dir and is user-only (0600)" {
+  for h in codex claude opencode; do
+    seat "$h" ollama
+    rm -f "$CTL/copy_mode" "$CTL/attached_mode"
+    run_seat
+    [ "$(meta status)" = complete ]
+    [ "$(cat "$CTL/copy_mode")" = "-rw-------" ]
+    if [ "$h" = opencode ]; then [ "$(cat "$CTL/attached_mode")" = "-rw-------" ]; fi
+  done
+  # the private dir (and so every copy) is gone once the seat returns
+  [ -z "$(find "$TMPDIR" -maxdepth 1 -name 'rc-seat-priv.*' -print)" ]
+}
+
+@test "prompt larger than 4 MB -> SKIPPED before any call" {
+  head -c 4194305 /dev/zero | tr '\0' 'a' >"$PROMPTF"
   run_seat
-  [ "$output" = "SKIPPED: s1 (codex) unavailable — codex: prompt too large for argv (900001 bytes > 900000)" ]
+  [ "$output" = "SKIPPED: s1 (codex) unavailable — codex: prompt too large (> 4 MB)" ]
+  [ "$(meta reason)" = "prompt too large (> 4 MB)" ]
   [ ! -e "$CTL/calls" ]
 }
 
-@test "prompt of exactly 900000 bytes is accepted" {
-  head -c 899992 /dev/zero | tr '\0' 'a' >"$PROMPTF"
+@test "prompt of exactly 4 MB is accepted" {
+  head -c 4194296 /dev/zero | tr '\0' 'a' >"$PROMPTF"
   printf '\n### end' >>"$PROMPTF"
-  [ "$(wc -c <"$PROMPTF" | tr -d ' ')" -eq 900000 ]
+  [ "$(wc -c <"$PROMPTF" | tr -d ' ')" -eq 4194304 ]
   run_seat
   [ "$(meta status)" = complete ]
+  stdin_is_prompt
 }
 
-@test "prompt file missing / empty / starting with '-' -> SKIPPED, no call" {
+@test "prompt file missing / empty / whitespace-only -> SKIPPED, no call" {
   rm -f "$PROMPTF"
   run_seat
   [ "$output" = "SKIPPED: s1 (codex) unavailable — codex: prompt file missing or unreadable" ]
   : >"$PROMPTF"
   run_seat
   [ "$output" = "SKIPPED: s1 (codex) unavailable — codex: empty prompt" ]
-  printf -- '--dangerously-bypass-approvals-and-sandbox' >"$PROMPTF"
+  printf ' \n\t\n\n' >"$PROMPTF"
   run_seat
-  [ "$output" = "SKIPPED: s1 (codex) unavailable — codex: prompt starts with '-' (would parse as a harness flag)" ]
+  [ "$output" = "SKIPPED: s1 (codex) unavailable — codex: empty prompt" ]
   [ ! -e "$CTL/calls" ]
+}
+
+@test "opencode: a tracked .review-council-prompt.md symlink in the repo is replaced, never written through" {
+  seat opencode ollama
+  printf 'outside\n' >"$BATS_TEST_TMPDIR/outside.txt"
+  ln -s "$BATS_TEST_TMPDIR/outside.txt" "$REPO/.review-council-prompt.md"
+  git -C "$REPO" add .review-council-prompt.md
+  git -C "$REPO" commit -qm link
+  run_seat
+  [ "$(meta status)" = complete ]
+  [ "$(cat "$BATS_TEST_TMPDIR/outside.txt")" = outside ]
+  cmp -s "$CTL/attached" "$PROMPTF"
+  [ -L "$REPO/.review-council-prompt.md" ]
 }
 
 # ===========================================================================
