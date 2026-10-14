@@ -42,7 +42,8 @@ setup() {
   #   oc_version      what `opencode --version` prints (default 1.19.0)
   #   claude_subtype  JSON .subtype (default success; non-success => is_error)
   #   claude_model    JSON .modelUsage key (default: the --model argv value)
-  # Records: calls argc argv last_arg env pwd home fd3 keyscan opencode.json
+  # Records: calls argc argv last_arg env pwd priv_real files m.py home fd3
+  #          keyscan opencode.json; on --version: version_pwd version_priv
   cat >"$FAKEDIR/fake" <<FAKE_EOF
 #!/bin/sh
 CTL='$CTL'
@@ -52,6 +53,8 @@ FAKE_EOF
 name="$(basename "$0")"
 if [ "${1:-}" = --version ]; then
   echo version >>"$CTL/calls"
+  pwd -P >"$CTL/version_pwd"
+  (cd "$(dirname "$HOME")" && pwd -P) >"$CTL/version_priv"
   cat "$CTL/oc_version" 2>/dev/null || echo 1.19.0
   exit 0
 fi
@@ -68,6 +71,9 @@ done
 printf '%s' "$last" >"$CTL/last_arg"
 env >"$CTL/env"
 pwd -P >"$CTL/pwd"
+(cd "$(dirname "$HOME")" && pwd -P) >"$CTL/priv_real"
+find . -print | sort >"$CTL/files"
+[ -f m.py ] && cp m.py "$CTL/m.py"
 printf '%s' "$HOME" >"$CTL/home"
 if { : <&3; } 2>/dev/null; then echo open >"$CTL/fd3"; else echo closed >"$CTL/fd3"; fi
 priv="$(dirname "$HOME")"
@@ -125,6 +131,10 @@ FAKE_EOF
   export RC_CLAUDE_BIN="$FAKEDIR/claude"
   export RC_OPENCODE_BIN="$FAKEDIR/opencode"
   cp "$FIX/review-ok.md" "$CTL/answer"
+
+  # --- Ollama /api/tags (test hook RC_OLLAMA_TAGS_URL; curl reads file://) ---
+  printf '%s\n' '{"models":[{"name":"qwen3.6:35b-a3b-coding-nvfp4"},{"name":"~vendor/Model_x.y:tag@v2-~"},{"name":"llama3:latest"}]}' >"$CTL/tags.json"
+  export RC_OLLAMA_TAGS_URL="file://$CTL/tags.json"
 
   # --- stub config reader ----------------------------------------------------
   cat >"$BATS_TEST_TMPDIR/cfg.sh" <<CFG_EOF
@@ -244,16 +254,18 @@ argv_is() {
   [ "$(envval CODEX_HOME)" = "$priv/codex" ]
 }
 
-@test "codex + openrouter: exact argv (provider -c table, model_provider) and key in env only" {
+@test "codex + openrouter -> SKIPPED (ollama only) before any binary, key or curl access" {
   seat codex openrouter
-  run_seat
-  [ "${lines[0]}" = "TOOL: s1 (qwen/qwen3-coder via codex)" ]
-  priv="$(dirname "$(cat "$CTL/home")")"
-  argv_is exec \
-    -c "model_providers.openrouter={ name='OpenRouter', base_url='https://openrouter.ai/api/v1', wire_api='responses', env_key='OPENROUTER_API_KEY' }" \
-    -c model_provider=openrouter --sandbox read-only --skip-git-repo-check \
-    -m qwen/qwen3-coder -o "$priv/last.txt"
-  [ "$(envval OPENROUTER_API_KEY)" = "$CANARY" ]
+  # an api_key_env that would itself skip proves the check runs before the key
+  cfg_set reviewer.custom.s1.api_key_env 'X;rm'
+  unset OPENROUTER_API_KEY
+  export RC_CODEX_BIN="$BATS_TEST_TMPDIR/no-such-codex"
+  RC_OLLAMA_TAGS_URL="file://$BATS_TEST_TMPDIR/no-such-tags.json" run_seat
+  [ "$status" -eq 0 ]
+  [ "$output" = "SKIPPED: s1 (codex) unavailable — codex: codex seats support provider ollama only" ]
+  [ "$(meta status)" = skipped ]
+  [ "$(meta reason)" = "codex seats support provider ollama only" ]
+  [ ! -e "$CTL/calls" ]
 }
 
 @test "claude + ollama: exact argv (--tools= form, --setting-sources \"\") and env" {
@@ -271,6 +283,23 @@ argv_is() {
   [ "$(envval CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC)" = 1 ]
   [ "$(envval DISABLE_TELEMETRY)" = 1 ]
   refute_in "$CTL/env" -q '^CLAUDE_CODE_EXTRA_BODY='
+}
+
+@test "claude: background/alias models are pinned to the configured model (both providers)" {
+  for p in ollama openrouter; do
+    seat claude "$p"
+    rm -f "$CTL/env"
+    run_seat
+    [ "$(meta status)" = complete ]
+    m="$(sed -n 's/^reviewer\.custom\.s1\.model=//p' "$CTL/cfg.txt")"
+    for v in ANTHROPIC_SMALL_FAST_MODEL ANTHROPIC_DEFAULT_HAIKU_MODEL \
+      ANTHROPIC_DEFAULT_SONNET_MODEL ANTHROPIC_DEFAULT_OPUS_MODEL; do
+      [ "$(envval "$v")" = "$m" ] || {
+        echo "$p: $v=[$(envval "$v")] want [$m]" >&2
+        false
+      }
+    done
+  done
 }
 
 @test "claude + openrouter: base URL, token via fd 3, data_collection deny extra body" {
@@ -360,6 +389,96 @@ argv_is() {
   [ "$(meta harness)" = opencode ]
 }
 
+@test "opencode --version probe runs with cwd = the private dir, never the reviewed repo" {
+  seat opencode ollama
+  echo 1.20.0 >"$CTL/oc_version" # skip right after the probe
+  cd "$REPO/sub"
+  run_seat
+  [ "$(cat "$CTL/calls")" = version ]
+  vp="$(cat "$CTL/version_pwd")"
+  [ "$vp" = "$(cat "$CTL/version_priv")" ]
+  case "$vp" in */rc-seat-priv.*) ;; *) false ;; esac
+  case "$vp" in "$REPO_REAL" | "$REPO_REAL"/*) false ;; esac
+}
+
+# ===========================================================================
+# Ollama: the model must already be pulled (no harness ever pulls one)
+# ===========================================================================
+
+@test "ollama: model present in /api/tags -> runs (every harness)" {
+  for h in codex claude opencode; do
+    seat "$h" ollama
+    rm -f "$CTL/calls"
+    run_seat
+    [ "$(meta status)" = complete ]
+    grep -qx run "$CTL/calls"
+  done
+}
+
+@test "ollama: model absent from /api/tags -> SKIPPED with the pull hint, no harness binary run" {
+  for h in codex claude opencode; do
+    seat "$h" ollama
+    cfg_set reviewer.custom.s1.model rc-not-pulled:1b
+    rm -f "$CTL/calls"
+    run_seat
+    [ "$status" -eq 0 ]
+    [ "$output" = "SKIPPED: s1 ($h) unavailable — $h: model not pulled in Ollama: rc-not-pulled:1b (run: ollama pull rc-not-pulled:1b)" ]
+    [ "$(meta status)" = skipped ]
+    [ ! -e "$CTL/calls" ]
+  done
+}
+
+@test "ollama: exact name match only (a prefix / other tag does not count)" {
+  cfg_set reviewer.custom.s1.model qwen3.6
+  run_seat
+  [[ "$output" == *"model not pulled in Ollama: qwen3.6 "* ]] || false
+  cfg_set reviewer.custom.s1.model qwen3.6:35b
+  run_seat
+  [[ "$output" == *"model not pulled in Ollama: qwen3.6:35b "* ]] || false
+  cfg_set reviewer.custom.s1.model llama3:8b
+  run_seat
+  [[ "$output" == *"model not pulled in Ollama: llama3:8b "* ]] || false
+  [ ! -e "$CTL/calls" ]
+}
+
+@test "ollama: an untagged slug matches <slug>:latest; argv keeps the configured slug" {
+  cfg_set reviewer.custom.s1.model llama3
+  run_seat
+  [ "$(meta status)" = complete ]
+  grep -A1 -x -- -m "$CTL/argv" | tail -n 1 | grep -qx llama3
+}
+
+@test "ollama: /api/tags unreachable or not JSON -> SKIPPED ollama not reachable, no harness run" {
+  for h in codex claude opencode; do
+    seat "$h" ollama
+    RC_OLLAMA_TAGS_URL="file://$BATS_TEST_TMPDIR/no-such-tags.json" run_seat
+    [ "$output" = "SKIPPED: s1 ($h) unavailable — $h: ollama not reachable" ]
+    [ ! -e "$CTL/calls" ]
+  done
+  printf 'not json\n' >"$CTL/tags.json"
+  run_seat
+  [ "$output" = "SKIPPED: s1 (opencode) unavailable — opencode: ollama not reachable" ]
+  [ ! -e "$CTL/calls" ]
+}
+
+@test "ollama: the default tags URL is the local Ollama (127.0.0.1:11434), queried with a 5s cap" {
+  unset RC_OLLAMA_TAGS_URL
+  mkdir -p "$BATS_TEST_TMPDIR/curlwrap"
+  printf '#!/bin/sh\nprintf "%%s\\n" "$@" >%s\nexit 7\n' "$CTL/curl_argv" >"$BATS_TEST_TMPDIR/curlwrap/curl"
+  chmod +x "$BATS_TEST_TMPDIR/curlwrap/curl"
+  PATH="$BATS_TEST_TMPDIR/curlwrap:$PATH" run_seat
+  [ "$output" = "SKIPPED: s1 (codex) unavailable — codex: ollama not reachable" ]
+  grep -qx 'http://127.0.0.1:11434/api/tags' "$CTL/curl_argv"
+  grep -A1 -x -- --max-time "$CTL/curl_argv" | tail -n 1 | grep -qx 5
+  [ ! -e "$CTL/calls" ]
+}
+
+@test "openrouter seats never query Ollama" {
+  seat claude openrouter
+  RC_OLLAMA_TAGS_URL="file://$BATS_TEST_TMPDIR/no-such-tags.json" run_seat
+  [ "$(meta status)" = complete ]
+}
+
 # ===========================================================================
 # env allowlist, key handling, fd 3
 # ===========================================================================
@@ -379,7 +498,7 @@ argv_is() {
       grep -vxE 'PWD|OLDPWD|SHLVL|_' | sort | tr '\n' ' ')"
     case "$h" in
       codex) want="CODEX_HOME HOME LANG PATH TMPDIR " ;;
-      claude) want="ANTHROPIC_API_KEY ANTHROPIC_AUTH_TOKEN ANTHROPIC_BASE_URL CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC CLAUDE_CONFIG_DIR DISABLE_TELEMETRY HOME LANG PATH TMPDIR " ;;
+      claude) want="ANTHROPIC_API_KEY ANTHROPIC_AUTH_TOKEN ANTHROPIC_BASE_URL ANTHROPIC_DEFAULT_HAIKU_MODEL ANTHROPIC_DEFAULT_OPUS_MODEL ANTHROPIC_DEFAULT_SONNET_MODEL ANTHROPIC_SMALL_FAST_MODEL CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC CLAUDE_CONFIG_DIR DISABLE_TELEMETRY HOME LANG PATH TMPDIR " ;;
       opencode) want="HOME LANG OPENCODE_CONFIG OPENCODE_DISABLE_PROJECT_CONFIG PATH TMPDIR XDG_CACHE_HOME XDG_CONFIG_HOME XDG_DATA_HOME XDG_STATE_HOME " ;;
     esac
     [ "$got" = "$want" ] || {
@@ -399,12 +518,12 @@ argv_is() {
 }
 
 @test "openrouter: a custom api_key_env is read by name; only the harness var carries it" {
-  seat codex openrouter
+  seat opencode openrouter
   unset OPENROUTER_API_KEY
   cfg_set reviewer.custom.s1.api_key_env MY_OR_KEY
   export MY_OR_KEY="$CANARY"
   run_seat
-  [ "${lines[0]}" = "TOOL: s1 (qwen/qwen3-coder via codex)" ]
+  [ "${lines[0]}" = "TOOL: s1 (qwen/qwen3-coder via opencode)" ]
   [ "$(envval OPENROUTER_API_KEY)" = "$CANARY" ]
   refute_in "$CTL/env" -q '^MY_OR_KEY='
 }
@@ -418,7 +537,8 @@ argv_is() {
     "$CTL/env_argv" "$real_env" >"$BATS_TEST_TMPDIR/envwrap/env"
   chmod +x "$BATS_TEST_TMPDIR/envwrap/env"
   export PATH="$BATS_TEST_TMPDIR/envwrap:$PATH"
-  for h in codex claude opencode; do
+  # (codex is ollama-only: no key to leak)
+  for h in claude opencode; do
     seat "$h" openrouter
     rm -f "$CTL/argv" "$CTL/keyscan" "$CTL/env_argv"
     run_seat
@@ -451,10 +571,10 @@ argv_is() {
 }
 
 @test "invalid api_key_env -> SKIPPED" {
-  seat codex openrouter
+  seat claude openrouter
   cfg_set reviewer.custom.s1.api_key_env 'X;rm'
   run_seat
-  [ "$output" = "SKIPPED: s1 (codex) unavailable — codex: invalid api_key_env" ]
+  [ "$output" = "SKIPPED: s1 (claude) unavailable — claude: invalid api_key_env" ]
   [ ! -e "$CTL/calls" ]
 }
 
@@ -567,6 +687,32 @@ argv_is() {
   [[ "$stderr" == *"not the configured 'qwen3.6:35b-a3b-coding-nvfp4'"* ]] || false
 }
 
+@test "claude: real JSON + an extra claude-haiku-* key in .modelUsage -> findings kept, family unknown" {
+  seat claude ollama
+  echo raw >"$CTL/mode"
+  jq '.modelUsage["claude-haiku-4-5-20251001"] = {inputTokens: 12, outputTokens: 3}' \
+    "$FIX/claude-result-real.json" >"$CTL/stdout"
+  run_seat
+  [ "${lines[0]}" = "TOOL: s1 (qwen3.6:35b-a3b-coding-nvfp4 via claude)" ]
+  [ "$(tail -n +2 "$OUTF")" = "$(jq -r .result "$FIX/claude-result-real.json")" ]
+  [ "$(meta status)" = complete ]
+  [ "$(meta family)" = unknown ]
+  [ "$(meta distinct)" = false ]
+  [ "$(meta model_check)" = reported ]
+  [[ "$stderr" == *"claude-haiku-4-5-20251001"* ]] || false
+  [[ "$stderr" == *"not the configured 'qwen3.6:35b-a3b-coding-nvfp4'"* ]] || false
+}
+
+@test "claude: empty .modelUsage -> family unknown (nothing proves the model ran)" {
+  seat claude ollama
+  echo raw >"$CTL/mode"
+  jq '.modelUsage = {}' "$FIX/claude-result-real.json" >"$CTL/stdout"
+  run_seat
+  [ "$(meta status)" = complete ]
+  [ "$(meta family)" = unknown ]
+  [ "$(meta distinct)" = false ]
+}
+
 @test "claude: non-JSON stdout -> SKIPPED invalid output (not JSON)" {
   seat claude ollama
   echo raw >"$CTL/mode"
@@ -613,7 +759,6 @@ argv_is() {
 }
 
 @test "codex ERROR 401 -> auth failure; 402 -> out of credit; 429 -> rate limited" {
-  seat codex openrouter
   echo none >"$CTL/mode"
   echo 1 >"$CTL/rc"
   echo 'ERROR: unexpected status 401 Unauthorized: User not found., url: https://openrouter.ai/api/v1/responses' >"$CTL/stderr"
@@ -821,10 +966,82 @@ argv_is() {
 # Arguments, config, environment preconditions
 # ===========================================================================
 
-@test "cwd for the harness is the repo top level, even when run from a subdir" {
+@test "cwd for the harness is a snapshot of the repo top level in the private dir, even from a subdir" {
+  mkdir -p "$REPO/sub/deep"
+  printf 'x = 1\n' >"$REPO/sub/deep/n.py"
+  git -C "$REPO" add -A && git -C "$REPO" commit -qm two
   cd "$REPO/sub"
   run_seat
-  [ "$(cat "$CTL/pwd")" = "$REPO_REAL" ]
+  [ "$(meta status)" = complete ]
+  [ "$(cat "$CTL/pwd")" = "$(cat "$CTL/priv_real")/repo" ]
+  case "$(cat "$CTL/pwd")" in "$REPO_REAL" | "$REPO_REAL"/*) false ;; esac
+  # the repo's relative layout is kept (whole tree, not just the caller's subdir)
+  grep -qx './m.py' "$CTL/files"
+  grep -qx './sub/deep/n.py' "$CTL/files"
+  refute_in "$CTL/files" -qx './.git'
+}
+
+@test "snapshot: tracked state only — untracked .env and gitignored files never reach the harness" {
+  cd "$REPO"
+  printf '*.log\n' >.gitignore
+  git add .gitignore && git commit -qm ignore
+  for h in codex claude opencode; do
+    seat "$h" ollama
+    printf 'SECRET=%s\n' "$CANARY" >.env
+    printf 'gitignored %s\n' "$CANARY" >debug.log
+    mkdir -p sub
+    printf 'untracked %s\n' "$CANARY" >sub/notes.txt
+    # tracked, unstaged edit
+    printf 'def add(a, b):\n    return a + b  # fixed\n' >m.py
+    # staged new file + staged edit
+    printf 'y = 2\n' >staged.py
+    git add staged.py
+    before_status="$(git status --porcelain)"
+    before_refs="$(git for-each-ref)"
+    before_stash="$(git stash list)"
+    rm -f "$CTL/files" "$CTL/m.py"
+    run_seat
+    [ "$(meta status)" = complete ]
+    refute_in "$CTL/files" -qxE '\./\.env|\./debug\.log|\./sub/notes\.txt'
+    grep -qx './.gitignore' "$CTL/files"
+    grep -qx './staged.py' "$CTL/files"
+    grep -qF 'a + b  # fixed' "$CTL/m.py"
+    # the live repo is untouched: no ref, no stash entry, same status
+    [ "$(git status --porcelain)" = "$before_status" ]
+    [ "$(git for-each-ref)" = "$before_refs" ]
+    [ "$(git stash list)" = "$before_stash" ]
+    [ -z "$(git stash list)" ]
+    # the snapshot goes with the private dir
+    [ ! -e "$(cat "$CTL/priv_real")" ]
+    [ -z "$(ls -A "$TMPDIR")" ]
+    # reset for the next harness
+    git reset -q --hard && git clean -qfdx
+  done
+}
+
+@test "snapshot: a clean tree snapshots HEAD" {
+  run_seat
+  [ "$(meta status)" = complete ]
+  [ "$(cat "$CTL/m.py")" = "$(git -C "$REPO" show HEAD:m.py)" ]
+}
+
+@test "snapshot: repo without a HEAD commit -> SKIPPED before the harness" {
+  mkdir -p "$BATS_TEST_TMPDIR/empty"
+  cd "$BATS_TEST_TMPDIR/empty"
+  git init -q
+  run_seat
+  [ "$output" = "SKIPPED: s1 (codex) unavailable — codex: could not snapshot the repo: no HEAD commit" ]
+  [ ! -e "$CTL/calls" ]
+  [ -z "$(ls -A "$TMPDIR")" ]
+}
+
+@test "snapshot: a failing git stash create -> SKIPPED 'could not snapshot the repo: <git's line>'" {
+  printf 'edit\n' >>"$REPO/m.py"
+  : >"$REPO/.git/index.lock"
+  run_seat
+  [ "$output" = "SKIPPED: s1 (codex) unavailable — codex: could not snapshot the repo: error: could not write index" ]
+  [ ! -e "$CTL/calls" ]
+  rm -f "$REPO/.git/index.lock"
 }
 
 @test "relative result and prompt paths resolve against the caller's cwd" {
@@ -894,7 +1111,7 @@ argv_is() {
 }
 
 @test "family comes from the model slug (not the reader's family key)" {
-  seat codex openrouter
+  seat opencode openrouter
   cfg_set reviewer.custom.s1.model openai/gpt-5
   cfg_set reviewer.custom.s1.family Qwen
   run_seat
