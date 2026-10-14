@@ -262,6 +262,11 @@ GEM_EOF
   #                  echoed prompt (which carries "### Findings" / "### Overall
   #                  Assessment" heading lines, so it classifies OK on its own),
   #                  tool calls and reasoning chatter
+  #   noisy-401   -> the `noisy` banner + heading-bearing prompt echo, then
+  #                  codex's own "ERROR: unexpected status 401 Unauthorized"
+  #                  line, exit 1 (a dead codex that echoes the OK headings)
+  #   noisy-429   -> same, ending "ERROR: exceeded retry limit, last status:
+  #                  429 Too Many Requests", exit 1
   #   rubric-echo -> transcript echoing the refutation rubric ("Allowed: UPHELD |
   #                  REFUTED | INCONCLUSIVE") + chatter, NO real verdict line, exit 0
   # `-o <file>` (--output-last-message) is honoured: the fake writes the final
@@ -382,6 +387,28 @@ CHATTER-TOOLCALL: bash -lc 'sed -n 1,80p src/app.rb'
 CHATTER-TOOLOUT: def parse(h) h[:x].strip end
 NOISY_EOF
     exit 0
+    ;;
+  noisy-401 | noisy-429)
+    # A DEAD codex whose transcript still echoes the heading-bearing prompt
+    # (so the transcript alone classifies OK), then codex's own hard-fail line.
+    cat <<'NOISY_EOF'
+OpenAI Codex v0.152.1 (research preview)
+--------
+workdir: /repo
+sandbox: read-only
+--------
+user
+Review this diff. Respond with:
+### Findings
+### Overall Assessment
+
+NOISY_EOF
+    if [ "$mode" = noisy-401 ]; then
+      echo "ERROR: unexpected status 401 Unauthorized: Missing bearer or basic authentication in header" >&2
+    else
+      echo "ERROR: exceeded retry limit, last status: 429 Too Many Requests" >&2
+    fi
+    exit 1
     ;;
   rubric-echo)
     cat <<'NOISY_EOF'
@@ -1253,4 +1280,46 @@ call_count() {
   "SKIPPED: Codex unavailable"*) : ;;
   *) echo "expected SKIPPED, got a review" && return 1 ;;
   esac
+}
+
+# A hard failure leaves the `-o` file EMPTY ("no last agent message"), yet the
+# transcript still echoes the prompt's "### Findings"/"### Overall Assessment"
+# headings and so classifies OK on its own. codex's own ERROR lines must then
+# decide: a dead Codex is a SKIPPED, never `TOOL: Codex` + a prompt echo.
+
+@test "codex-last-message: echoed headings + ERROR 401 + empty -o -> SKIPPED auth failure (no retry)" {
+  CDX_MODE=noisy-401 CDX_LAST=empty \
+    run --separate-stderr "$SCRIPT" "$CODEX" "" "$PROMPT_FILE"
+  echo "status=$status"
+  echo "output=<<$output>>"
+  [ "$status" -eq 1 ]
+  [ "$output" = "SKIPPED: Codex unavailable — codex: auth failure" ]
+  # hard = terminal: exactly ONE call
+  [ "$(call_count "$CDX_CALLS")" -eq 1 ]
+}
+
+@test "codex-last-message: echoed headings + ERROR 429 + empty -o -> soft 'rate limited' (one retry)" {
+  RC_REVIEWER_TIMEOUT=6 RC_RATE_LIMIT_BACKOFF=0 CDX_MODE=noisy-429 CDX_LAST=empty \
+    run --separate-stderr "$SCRIPT" "$CODEX" "" "$PROMPT_FILE"
+  echo "status=$status"
+  echo "output=<<$output>>"
+  [ "$status" -eq 1 ]
+  [ "$output" = "SKIPPED: Codex unavailable — codex: rate limited on retry" ]
+  ! printf '%s\n' "$output" | grep -qF 'quota exhausted' || false
+  # soft = retryable: the throttled try + exactly one retry
+  [ "$(call_count "$CDX_CALLS")" -eq 2 ]
+}
+
+@test "codex-last-message: transcript hard-fail + VALID non-empty -o -> the -o review wins" {
+  # A valid final answer beats transcript noise, even an ERROR line.
+  CDX_MODE=noisy-401 CDX_LAST=review \
+    run --separate-stderr "$SCRIPT" "$CODEX" "" "$PROMPT_FILE"
+  echo "status=$status"
+  echo "output=<<$output>>"
+  [ "$status" -eq 0 ]
+  _expected="$(printf '%s\n' 'TOOL: Codex' 'Findings:' \
+    '- [P1] Final answer via -o: missing null check in parse().' '' \
+    "What's Good:" '- Clear naming.' '' \
+    'Overall Assessment: One real bug; otherwise fine.')"
+  [ "$output" = "$_expected" ]
 }

@@ -266,11 +266,15 @@ build_and_run() {
       #      its prompt echo carries the very Findings/Overall Assessment
       #      headings the OK-guard keys on, so a failed model could pass as OK.
       #      When the `-o` file is empty/missing (codex 0.152.1: "Warning: no
-      #      last agent message; wrote empty content to <file>" even though the
-      #      model answered in the transcript), it falls back to the transcript
-      #      unchanged. The file sits beside the attempt file under $WORKDIR
-      #      (removed by the EXIT trap). It goes with the flags, BEFORE the
-      #      positional prompt.
+      #      last agent message; wrote empty content to <file>" — both when the
+      #      model answered in the transcript AND on every hard failure), the
+      #      transcript's OK can be the prompt echo alone. So codex's OWN error
+      #      lines (`^(ERROR|Error|error)[: ]`, as rc-seat.sh does) are
+      #      classified on their own first: an AUTH/QUOTA/RATE_LIMIT/OVERLOAD
+      #      there wins (e.g. "ERROR: unexpected status 401 Unauthorized");
+      #      otherwise it falls back to the transcript's class and output. The
+      #      file sits beside the attempt file under $WORKDIR (removed by the
+      #      EXIT trap). It goes with the flags, BEFORE the positional prompt.
       LAST_MSG_FILE="${_bar_out}.last"
       set -- "$_bar_bin" exec --sandbox read-only --skip-git-repo-check -o "$LAST_MSG_FILE" "$prompt"
       ;;
@@ -328,6 +332,12 @@ QUOTA_PATTERN='exhausted your daily quota|terminalquotaerror|individual quota re
 # carrying one is hard.
 RATE_LIMIT_PATTERN='429|rate limit|rate_limit_exceeded|too many requests|retry.after'
 OVERLOAD_PATTERN='503|high demand'
+# Codex-only AUTH extension, applied ONLY to codex's own extracted error lines
+# (see invoke_once), never to a whole output: codex reports a bad/missing key as
+# "ERROR: unexpected status 401 Unauthorized", which AUTH_PATTERN (deliberately
+# free of bare status codes, see above) does not match. Same regex as
+# rc-seat.sh's codex auth check.
+CODEX_ERR_AUTH_PATTERN='(^|[^0-9])401([^0-9]|$)|invalid[ _-]?api[ _-]?key|unauthori[sz]ed|authentication[ _-]?(failed|error)'
 
 # Hard ceiling for ANY backoff. Nothing legitimate throttles for longer than an
 # hour, and RC_REVIEWER_TIMEOUT (default 600s) already bounds the useful range —
@@ -513,11 +523,19 @@ invoke_once() {
   # classified above, exactly as before, so hard-fail phrases and TIMEOUT keep
   # their meaning. If the `-o` final message is non-empty and is itself a valid
   # RESULT (review headings or refutation verdicts — the same OK test), return
-  # it instead of the transcript. An empty/missing `-o` file leaves the
-  # transcript's class and output untouched. A non-empty `-o` that is NOT a
-  # valid result is the model's real (bad) answer: a transcript "OK" can then
+  # it instead of the transcript (an empty/missing `-o`: see below). A
+  # non-empty `-o` that is NOT a valid result is the model's real (bad)
+  # answer: a transcript "OK" can then
   # only come from the echoed prompt's own headings, so it becomes EMPTY;
   # a transcript hard-fail (AUTH/QUOTA/…) keeps its class. TIMEOUT stays.
+  #
+  # An EMPTY/missing `-o` is also what codex leaves on a hard failure, and then
+  # the transcript can classify OK on the prompt echo alone. So classify only
+  # codex's OWN error lines (`^(ERROR|Error|error)[: ]`, as rc-seat.sh does —
+  # the rest of the transcript is the echo): an AUTH (incl. HTTP 401) / QUOTA /
+  # RATE_LIMIT / OVERLOAD there wins. Anything else keeps the transcript's class
+  # and output (an empty `-o` beside a genuinely answered transcript). _io_out
+  # stays the transcript either way — retry_after_of reads Retry-After from it.
   if [ "$CLASS" != TIMEOUT ] && [ -n "$LAST_MSG_FILE" ] && [ -s "$LAST_MSG_FILE" ]; then
     _io_tclass="$CLASS"
     classify "$LAST_RC" "$LAST_MSG_FILE"
@@ -527,6 +545,19 @@ invoke_once() {
       CLASS=EMPTY
     else
       CLASS="$_io_tclass"
+    fi
+  elif [ "$CLASS" != TIMEOUT ] && [ -n "$LAST_MSG_FILE" ]; then
+    _io_tclass="$CLASS"
+    _io_err="$(mktemp "$WORKDIR/errlines.XXXXXX")"
+    grep -E '^(ERROR|Error|error)[: ]' "$_io_out" >"$_io_err" 2>/dev/null || :
+    if grep -qiE "$CODEX_ERR_AUTH_PATTERN" "$_io_err" 2>/dev/null; then
+      CLASS=AUTH
+    else
+      classify "$LAST_RC" "$_io_err"
+      case "$CLASS" in
+        AUTH | QUOTA | RATE_LIMIT | OVERLOAD) : ;;
+        *) CLASS="$_io_tclass" ;;
+      esac
     fi
   fi
 
