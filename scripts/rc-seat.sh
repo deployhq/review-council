@@ -1,8 +1,8 @@
 #!/usr/bin/env sh
 # rc-seat.sh — dispatch for a custom reviewer seat run through an agent CLI
 # harness: `codex`, `claude` (Claude Code) or `opencode`, against an
-# `openrouter` or a local `ollama` provider. Sibling of rc-ocr.sh (which owns
-# the `ocr` harness) and built to the same discipline.
+# `openrouter` or a local `ollama` provider (codex: `ollama` only). Sibling of
+# rc-ocr.sh (which owns the `ocr` harness) and built to the same discipline.
 #
 # Usage (the orchestrator passes ONLY these atoms — never free-form text):
 #   rc-seat.sh <slot> <result-file> [--confirmed] <prompt-file>
@@ -43,6 +43,12 @@
 #   - the tool surface is read-only by construction: codex `--sandbox
 #     read-only`; claude `--tools=Read,Grep,Glob`; opencode deny-by-default
 #     permissions + OPENCODE_DISABLE_PROJECT_CONFIG=1 + `--pure`;
+#   - the harness's cwd is $T/repo, a `git stash create` + `git archive`
+#     snapshot of the TRACKED working state — untracked and gitignored files
+#     (an .env) are not in it; the live checkout is never the cwd;
+#   - ollama: the model must already be in the local /api/tags list (no
+#     harness ever pulls a repo-chosen model);
+#   - claude: background / alias models are pinned to the configured model;
 #   - an OpenRouter key travels on a pipe (fd 3), never argv, never disk;
 #   - the private dir (rc-seat-priv.XXXXXX) is removed on exit by a trap.
 #
@@ -300,6 +306,13 @@ case "$PROVIDER" in
   openrouter | ollama) ;;
   *) skip "unsupported provider '$(one_line "$PROVIDER" | cut -c1-40)'" ;;
 esac
+# codex's read-only sandbox still reads ANY file on the machine, and codex
+# cannot send OpenRouter's data_collection:deny — so a codex seat is local
+# (ollama) only. The reader rejects it too; this is defence in depth, checked
+# before any binary, key or network access.
+if [ "$HARNESS:$PROVIDER" = codex:openrouter ]; then
+  skip "codex seats support provider ollama only"
+fi
 
 API_KEY_ENV=""
 if [ "$PROVIDER" = openrouter ]; then
@@ -371,6 +384,31 @@ fi
 ROOT="$(git rev-parse --show-toplevel 2>/dev/null || true)"
 [ -n "$ROOT" ] && [ -d "$ROOT" ] || skip "not inside a git repository"
 
+# --- ollama: the model must already be pulled --------------------------------
+# `codex --oss` (and Ollama on first use) PULLS a missing model, so a
+# repo-chosen slug could make the operator's Ollama download an arbitrary
+# model — possibly from a registry host named in the slug. Require an exact
+# name in the local /api/tags list (an untagged slug also matches
+# <slug>:latest, Ollama's own normalisation) before any harness binary runs.
+# RC_OLLAMA_TAGS_URL is a test hook (operator env, never config).
+if [ "$PROVIDER" = ollama ]; then
+  CURL="$(command -v curl 2>/dev/null || true)"
+  [ -n "$CURL" ] || skip "curl not installed (needed to check the Ollama model)"
+  _tags="$("$CURL" -q -fsS --noproxy '*' --max-time 5 \
+    "${RC_OLLAMA_TAGS_URL:-http://127.0.0.1:11434/api/tags}" 2>/dev/null)" ||
+    skip "ollama not reachable"
+  _have="$(printf '%s' "$_tags" | "$JQ" -r --arg m "$MODEL" '
+    [(.models // [])[] | .name? | strings] as $n
+    | ($m | split("/") | last | contains(":") | not) as $untagged
+    | any($n[]; . == $m or ($untagged and . == $m + ":latest"))' 2>/dev/null)" ||
+    skip "ollama not reachable"
+  case "$_have" in
+    true) ;;
+    false) skip "model not pulled in Ollama: $MODEL (run: ollama pull $MODEL)" ;;
+    *) skip "ollama not reachable" ;;
+  esac
+fi
+
 # ---------------------------------------------------------------------------
 # Private dir: throwaway HOME / TMPDIR / harness config home. The prefix is
 # rc-seat-priv.*, never an orchestrator result-dir prefix.
@@ -378,7 +416,33 @@ ROOT="$(git rev-parse --show-toplevel 2>/dev/null || true)"
 T="$(mktemp -d "${TMPDIR:-/tmp}/rc-seat-priv.XXXXXX")" || T=""
 [ -n "$T" ] && [ -d "$T" ] || skip "cannot create temp dir"
 chmod 700 "$T"
-mkdir -p "$T/home" "$T/tmp" || skip "cannot populate temp dir"
+mkdir -p "$T/home" "$T/tmp" "$T/repo" || skip "cannot populate temp dir"
+
+# ---------------------------------------------------------------------------
+# Snapshot: the harness's cwd is $T/repo, a copy of the TRACKED working state
+# (staged + unstaged edits to tracked files), never the live checkout — so an
+# untracked .env or a gitignored file is simply not there to be read. `git
+# stash create` makes a dangling commit (no ref, no stash entry, no working
+# tree change); empty output = no tracked changes → HEAD. `git archive` is
+# run from the top level (from a subdir it would archive only that subdir), to
+# a file so its exit status is not hidden behind tar's. No .git in the copy.
+# ---------------------------------------------------------------------------
+# snap_fail <what> <stderr-file>: SKIPPED with git's own last stderr line.
+snap_fail() {
+  _why=""
+  [ -s "$2" ] && _why="$(one_line "$(grep -v '^[[:space:]]*$' "$2" | tail -n 1)" | cut -c1-200)"
+  skip "could not snapshot the repo: ${_why:-$1 failed}"
+}
+git -C "$ROOT" rev-parse -q --verify 'HEAD^{commit}' >/dev/null 2>&1 ||
+  skip "could not snapshot the repo: no HEAD commit"
+SNAP="$(GIT_AUTHOR_NAME=review-council GIT_AUTHOR_EMAIL=review-council@localhost \
+  GIT_COMMITTER_NAME=review-council GIT_COMMITTER_EMAIL=review-council@localhost \
+  git -C "$ROOT" stash create 2>"$T/snap.err")" || snap_fail "git stash create" "$T/snap.err"
+[ -n "$SNAP" ] || SNAP=HEAD
+git -C "$ROOT" archive --format=tar "$SNAP" >"$T/snap.tar" 2>"$T/snap.err" ||
+  snap_fail "git archive" "$T/snap.err"
+tar -xf "$T/snap.tar" -C "$T/repo" 2>"$T/snap.err" || snap_fail "tar" "$T/snap.err"
+rm -f "$T/snap.tar" "$T/snap.err"
 
 # ---------------------------------------------------------------------------
 # env -i allowlist. Everything the harness sees is listed here; nothing else
@@ -407,6 +471,11 @@ case "$HARNESS" in
       ENV_LIST="${ENV_LIST}ANTHROPIC_BASE_URL=https://openrouter.ai/api$NL"
     fi
     ENV_LIST="${ENV_LIST}ANTHROPIC_API_KEY=${NL}CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1${NL}DISABLE_TELEMETRY=1$NL"
+    # Claude Code's background "small/fast" calls and model aliases default to
+    # Claude models — via OpenRouter that would silently send the code to
+    # Anthropic. Pin every one to the configured (validated) model.
+    ENV_LIST="${ENV_LIST}ANTHROPIC_SMALL_FAST_MODEL=$MODEL${NL}ANTHROPIC_DEFAULT_HAIKU_MODEL=$MODEL$NL"
+    ENV_LIST="${ENV_LIST}ANTHROPIC_DEFAULT_SONNET_MODEL=$MODEL${NL}ANTHROPIC_DEFAULT_OPUS_MODEL=$MODEL$NL"
     ;;
   opencode)
     mkdir -p "$T/xdg/config" "$T/xdg/data" "$T/xdg/cache" "$T/xdg/state" ||
@@ -425,7 +494,12 @@ if [ "$HARNESS" = opencode ]; then
   # shellcheck disable=SC2086 # deliberate newline split of the allowlist
   set -- $ENV_LIST
   IFS=$_old_ifs
-  run_capped 30 "$T/version.log" env -i "$@" "$BIN" --version 3<&-
+  # cwd = the private dir: before the version is known to be the tested one,
+  # opencode must not see the reviewed repo (its config / plugins).
+  (
+    cd "$T" || exit 0
+    run_capped 30 "$T/version.log" env -i "$@" "$BIN" --version 3<&-
+  )
   _v="$(grep -v '^[[:space:]]*$' "$T/version.log" 2>/dev/null | head -n 1 | tr -d ' \r')"
   if [ "$_v" != "$OPENCODE_TESTED_VERSION" ]; then
     skip "untested opencode version $(printf '%s' "$_v" | tr -cd 'A-Za-z0-9._+-' | cut -c1-40) (tested: $OPENCODE_TESTED_VERSION)"
@@ -480,13 +554,8 @@ fi
 set -- env -i "$@" /bin/sh -c "$SHIM" "$OUT" "$BIN"
 case "$HARNESS" in
   codex)
-    set -- "$@" exec
-    if [ "$PROVIDER" = ollama ]; then
-      set -- "$@" --oss --local-provider ollama
-    else
-      set -- "$@" -c "model_providers.openrouter={ name='OpenRouter', base_url='https://openrouter.ai/api/v1', wire_api='responses', env_key='OPENROUTER_API_KEY' }" \
-        -c model_provider=openrouter
-    fi
+    # ollama only (an openrouter codex seat was SKIPPED above)
+    set -- "$@" exec --oss --local-provider ollama
     set -- "$@" --sandbox read-only --skip-git-repo-check -m "$MODEL" -o "$LAST"
     ;;
   claude)
@@ -502,19 +571,19 @@ case "$HARNESS" in
 esac
 set -- "$@" "$PROMPT"
 
-# The harness runs with cwd = the repo root, in a subshell so relative
-# result/prompt paths stay valid here. The key reaches the shim through fd 3:
-# run_capped closes stdin, so it can't be stdin; fd 3 survives timeout/env and
-# is closed by the shim before exec.
+# The harness runs with cwd = the tracked-only snapshot ($T/repo), in a
+# subshell so relative result/prompt paths stay valid here. The key reaches the
+# shim through fd 3: run_capped closes stdin, so it can't be stdin; fd 3
+# survives timeout/env and is closed by the shim before exec.
 if [ "$PROVIDER" = openrouter ]; then
   printf '%s\n' "$KEY" | (
-    cd "$ROOT" || exit 0
+    cd "$T/repo" || exit 0
     run_capped "$CAP" "$T/run.log" "$@" 3<&0
     printf '%s\n' "$LAST_RC" >"$T/run.rc"
   )
 else
   (
-    cd "$ROOT" || exit 0
+    cd "$T/repo" || exit 0
     run_capped "$CAP" "$T/run.log" "$@" 3<&-
     printf '%s\n' "$LAST_RC" >"$T/run.rc"
   )
@@ -582,7 +651,9 @@ case "$HARNESS" in
           (.errors // [] | tostring)' "$OUT" >>"$ERRTXT" 2>/dev/null
       fi
       # model check: did Claude Code run the model we asked for?
-      if ! "$JQ" -e --arg m "$MODEL" '(.modelUsage // {}) | type == "object" and has($m)' "$OUT" >/dev/null 2>&1; then
+      # Exclusive: ANY other key (e.g. a background claude-haiku-* call) means
+      # code may have gone to another model — family unknown, findings kept.
+      if ! "$JQ" -e --arg m "$MODEL" '(.modelUsage // {}) | type == "object" and keys == [$m]' "$OUT" >/dev/null 2>&1; then
         _ran="$("$JQ" -r '(.modelUsage // {}) | if type == "object" then keys | join(",") else "" end' "$OUT" 2>/dev/null)"
         note "claude ran model(s) '$(one_line "$_ran" | cut -c1-120)', not the configured '$MODEL' — family set to unknown"
         FAMILY=unknown
