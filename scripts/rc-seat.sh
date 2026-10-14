@@ -8,9 +8,13 @@
 #   rc-seat.sh <slot> <result-file> [--confirmed] <prompt-file>
 #
 # <prompt-file> holds the full review prompt (lens + review instructions +
-# context package) the orchestrator wrote. It is read into ONE argv element —
-# never through a shell eval. Missing/empty, larger than 900000 bytes, or
-# starting with '-' (it would parse as a harness flag) → SKIPPED.
+# context package) the orchestrator wrote — typically 200–300 KB, more than
+# Linux allows in ONE argv element (MAX_ARG_STRLEN, 128 KB). So the prompt
+# never travels on argv: it is copied into the private dir and fed to codex /
+# claude on STDIN (both read the prompt from stdin when no positional prompt is
+# given); opencode ignores stdin, so it gets the copy as an attached file in
+# its cwd plus a fixed short message telling it to read that file in full.
+# Missing, empty (whitespace only) or larger than 4 MB → SKIPPED.
 # --confirmed records the operator's yes for a seat the reader marks
 # `needs_confirm=true`; without it such a seat is SKIPPED before any harness
 # binary is invoked.
@@ -50,6 +54,8 @@
 #     harness ever pulls a repo-chosen model);
 #   - claude: background / alias models are pinned to the configured model;
 #   - an OpenRouter key travels on a pipe (fd 3), never argv, never disk;
+#   - the prompt the harness reads is a user-only (0600) COPY inside the
+#     private dir, never the orchestrator's file;
 #   - the private dir (rc-seat-priv.XXXXXX) is removed on exit by a trap.
 #
 # POSIX sh; no eval. The family map is sourced from rc-lib-family.sh and the
@@ -73,8 +79,14 @@ NL='
 # opencode's project-config guard (OPENCODE_DISABLE_PROJECT_CONFIG) is
 # undocumented, so only the version it was verified against is trusted.
 OPENCODE_TESTED_VERSION=1.19.0
-# Beyond this an argv element is unsafe on macOS (ARG_MAX ~1 MiB, env included).
-PROMPT_MAX_BYTES=900000
+# Sanity cap only: the prompt goes on stdin / an attached file, not argv, so no
+# OS argument limit applies; a prompt beyond this is a runaway context package.
+PROMPT_MAX_BYTES=4194304
+# opencode: the in-snapshot name of the prompt copy, and the fixed (never
+# config- or prompt-derived) message that points the model at it. `opencode
+# run -f` inlines the attachment TRUNCATED, so the model must read it in full.
+OPENCODE_PROMPT_NAME=.review-council-prompt.md
+OPENCODE_MSG="Your complete task and the full review context are in the attached file $OPENCODE_PROMPT_NAME. The attachment may be truncated, so read the WHOLE file with the read tool (in chunks, using offsets) before answering. Then follow its instructions exactly and answer in the format it specifies."
 # OpenRouter: opt out of providers that train on / retain prompts (claude).
 OR_EXTRA_BODY='{"provider":{"data_collection":"deny"}}'
 
@@ -347,19 +359,14 @@ fi
 note "harness=$HARNESS provider=$PROVIDER cap_s=$CAP${MAX_TURNS:+ max_turns=$MAX_TURNS}"
 
 # ---------------------------------------------------------------------------
-# Prompt (read verbatim into one shell variable; one argv element later)
+# Prompt (checked here; copied into the private dir below — never on argv)
 # ---------------------------------------------------------------------------
 [ -f "$PROMPT_FILE" ] && [ -r "$PROMPT_FILE" ] || skip "prompt file missing or unreadable"
 _psize="$(wc -c <"$PROMPT_FILE" 2>/dev/null | tr -d ' ')"
 is_uint "$_psize" || skip "cannot size the prompt file"
 [ "$_psize" -gt 0 ] || skip "empty prompt"
-[ "$_psize" -le "$PROMPT_MAX_BYTES" ] || skip "prompt too large for argv ($_psize bytes > $PROMPT_MAX_BYTES)"
-PROMPT="$(cat "$PROMPT_FILE")" || skip "cannot read the prompt file"
-[ -n "$PROMPT" ] || skip "empty prompt"
-# Each harness takes the prompt as a bare trailing positional: a leading '-'
-# would be parsed as a flag (e.g. a permissions override). The orchestrator
-# owns the prompt's first line, so this never fires for a well-formed prompt.
-case "$PROMPT" in -*) skip "prompt starts with '-' (would parse as a harness flag)" ;; esac
+[ "$_psize" -le "$PROMPT_MAX_BYTES" ] || skip "prompt too large (> 4 MB)"
+[ -n "$(tr -d ' \t\r\n' <"$PROMPT_FILE" | head -c 1)" ] || skip "empty prompt"
 
 # ---------------------------------------------------------------------------
 # Binaries, key, target
@@ -418,6 +425,13 @@ T="$(mktemp -d "${TMPDIR:-/tmp}/rc-seat-priv.XXXXXX")" || T=""
 chmod 700 "$T"
 mkdir -p "$T/home" "$T/tmp" "$T/repo" || skip "cannot populate temp dir"
 
+# The harness reads a user-only COPY of the prompt (never the orchestrator's
+# path). The size must match: a short copy would silently truncate the review.
+PROMPT_COPY="$T/prompt.md"
+(umask 077 && cat "$PROMPT_FILE" >"$PROMPT_COPY") 2>/dev/null || skip "cannot read the prompt file"
+chmod 600 "$PROMPT_COPY"
+[ "$(wc -c <"$PROMPT_COPY" | tr -d ' ')" = "$_psize" ] || skip "cannot read the prompt file"
+
 # ---------------------------------------------------------------------------
 # Snapshot: the harness's cwd is $T/repo, a copy of the TRACKED working state
 # (staged + unstaged edits to tracked files), never the live checkout — so an
@@ -443,6 +457,17 @@ git -C "$ROOT" archive --format=tar "$SNAP" >"$T/snap.tar" 2>"$T/snap.err" ||
   snap_fail "git archive" "$T/snap.err"
 tar -xf "$T/snap.tar" -C "$T/repo" 2>"$T/snap.err" || snap_fail "tar" "$T/snap.err"
 rm -f "$T/snap.tar" "$T/snap.err"
+
+# opencode: its read tool is confined to its cwd (external_directory: deny), so
+# the prompt copy goes INTO the snapshot. Whatever the repo tracks under that
+# name (even a symlink pointing out of the snapshot) is removed first, and the
+# copy is created with noclobber, so the write can never follow a link.
+if [ "$HARNESS" = opencode ]; then
+  _ocp="$T/repo/$OPENCODE_PROMPT_NAME"
+  rm -rf "$_ocp" 2>/dev/null
+  (set -C && umask 077 && cat "$PROMPT_COPY" >"$_ocp") 2>/dev/null ||
+    skip "cannot place the prompt in the snapshot"
+fi
 
 # ---------------------------------------------------------------------------
 # env -i allowlist. Everything the harness sees is listed here; nothing else
@@ -524,21 +549,28 @@ if [ "$HARNESS" = opencode ]; then
 fi
 
 # ---------------------------------------------------------------------------
-# The run. argv: env -i <allowlist> /bin/sh -c <shim> <stdout-file> <harness
-# argv...>. The shim (a fixed literal per key target — never config-derived)
-# reads the key from fd 3 when there is one, closes fd 3, and execs the
-# harness with its stdout in <stdout-file>; run_capped captures stderr.
+# The run. argv: env -i <allowlist> /bin/sh -c <shim> <stdout-file>
+# <stdin-file> <harness argv...>. The shim (a fixed literal per key target —
+# never config-derived) reads the key from fd 3 when there is one, closes fd 3,
+# and execs the harness with its stdout in <stdout-file> and its stdin from
+# <stdin-file> (the prompt copy for codex/claude; /dev/null for opencode);
+# run_capped captures stderr. run_capped itself runs the child with
+# </dev/null, which is why the prompt redirect has to live in the shim.
 # ---------------------------------------------------------------------------
 case "$PROVIDER:$HARNESS" in
   openrouter:claude)
-    SHIM='IFS= read -r K <&3 || [ -n "$K" ]; exec 3<&-; ANTHROPIC_AUTH_TOKEN=$K; export ANTHROPIC_AUTH_TOKEN; K=; o=$0; exec "$@" >"$o"'
+    SHIM='IFS= read -r K <&3 || [ -n "$K" ]; exec 3<&-; ANTHROPIC_AUTH_TOKEN=$K; export ANTHROPIC_AUTH_TOKEN; K=; o=$0; f=$1; shift; exec "$@" >"$o" <"$f"'
     ;;
   openrouter:*)
-    SHIM='IFS= read -r K <&3 || [ -n "$K" ]; exec 3<&-; OPENROUTER_API_KEY=$K; export OPENROUTER_API_KEY; K=; o=$0; exec "$@" >"$o"'
+    SHIM='IFS= read -r K <&3 || [ -n "$K" ]; exec 3<&-; OPENROUTER_API_KEY=$K; export OPENROUTER_API_KEY; K=; o=$0; f=$1; shift; exec "$@" >"$o" <"$f"'
     ;;
   *)
-    SHIM='exec 3<&-; o=$0; exec "$@" >"$o"'
+    SHIM='exec 3<&-; o=$0; f=$1; shift; exec "$@" >"$o" <"$f"'
     ;;
+esac
+case "$HARNESS" in
+  opencode) STDIN_SRC=/dev/null ;;
+  *) STDIN_SRC="$PROMPT_COPY" ;;
 esac
 
 OUT="$T/out"
@@ -551,30 +583,36 @@ IFS=$_old_ifs
 if [ "$HARNESS:$PROVIDER" = claude:openrouter ]; then
   set -- "$@" "CLAUDE_CODE_EXTRA_BODY=$OR_EXTRA_BODY"
 fi
-set -- env -i "$@" /bin/sh -c "$SHIM" "$OUT" "$BIN"
+set -- env -i "$@" /bin/sh -c "$SHIM" "$OUT" "$STDIN_SRC" "$BIN"
 case "$HARNESS" in
   codex)
-    # ollama only (an openrouter codex seat was SKIPPED above)
+    # ollama only (an openrouter codex seat was SKIPPED above). No positional
+    # prompt: `codex exec` then reads the prompt from stdin.
     set -- "$@" exec --oss --local-provider ollama
     set -- "$@" --sandbox read-only --skip-git-repo-check -m "$MODEL" -o "$LAST"
     ;;
   claude)
+    # No positional prompt: `claude -p` then reads the prompt from stdin.
     # --tools= MUST be the '=' form: the flag is variadic and would swallow
-    # the prompt otherwise.
+    # any following positional.
     set -- "$@" -p --tools=Read,Grep,Glob --restricted --strict-mcp-config \
       --setting-sources "" --permission-mode dontAsk --max-turns "$MAX_TURNS" \
       --no-session-persistence --output-format json --model "$MODEL"
     ;;
   opencode)
-    set -- "$@" run --pure --format json --model "$PROVIDER/$MODEL"
+    # `opencode run` ignores stdin. The prompt is the attached file (relative
+    # to the snapshot cwd); `--` ends the -f array so the fixed message is the
+    # positional message, not a second file.
+    set -- "$@" run --pure --format json --model "$PROVIDER/$MODEL" \
+      -f "$OPENCODE_PROMPT_NAME" -- "$OPENCODE_MSG"
     ;;
 esac
-set -- "$@" "$PROMPT"
 
 # The harness runs with cwd = the tracked-only snapshot ($T/repo), in a
 # subshell so relative result/prompt paths stay valid here. The key reaches the
 # shim through fd 3: run_capped closes stdin, so it can't be stdin; fd 3
-# survives timeout/env and is closed by the shim before exec.
+# survives timeout/env and is closed by the shim before exec (which then
+# points stdin at the prompt copy).
 if [ "$PROVIDER" = openrouter ]; then
   printf '%s\n' "$KEY" | (
     cd "$T/repo" || exit 0
@@ -589,7 +627,6 @@ else
   )
 fi
 KEY=""
-PROMPT=""
 RUN_RC="$(cat "$T/run.rc" 2>/dev/null || echo 1)"
 [ -n "$RUN_RC" ] || RUN_RC=1
 
@@ -632,7 +669,6 @@ case "$HARNESS" in
     # codex's own errors are "ERROR: ..." / "Error: ..." lines; the rest of
     # its stderr is the transcript (prompt echo) and is not classified.
     grep -hE '^(ERROR|Error|error)[: ]' "$T/run.log" "$OUT" >>"$ERRTXT" 2>/dev/null
-    grep -hi 'argument list too long' "$T/run.log" >>"$ERRTXT" 2>/dev/null
     ;;
   claude)
     cat "$T/run.log" >>"$ERRTXT"
@@ -698,9 +734,6 @@ fi
 # Classify the failure from error text only (never the prompt or the answer).
 # ---------------------------------------------------------------------------
 err_has() { grep -qiE "$1" "$ERRTXT" 2>/dev/null; }
-if err_has 'argument list too long'; then
-  skip "prompt too large for argv (E2BIG)"
-fi
 if err_has '(^|[^0-9])401([^0-9]|$)|invalid[ _-]?api[ _-]?key|unauthori[sz]ed|authentication[ _-]?(failed|error)'; then
   skip "auth failure"
 fi

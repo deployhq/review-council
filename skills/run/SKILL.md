@@ -552,7 +552,7 @@ These seats borrow an agentic CLI as a read-only runtime for the user's model. U
 ```bash
 mktemp -d "${TMPDIR:-/tmp}/rc-seat.XXXXXX"
 ```
-Write the delegation prompt to `<dir>/prompt` exactly as you would for Codex's `$PF` (lens block + §3.1 contract + the complete package), with the reviewer-id set to the **slot name** (so its findings say `source: <slot>`, never `codex`/`claude`). Print its size next to the seat in the roster — `<slot>: prompt <N> KB (~<N/4> k tokens)` — so a context window the model cannot hold is visible; above 900 KB the script skips the seat (`prompt too large for argv`).
+Write the delegation prompt to `<dir>/prompt` exactly as you would for Codex's `$PF` (lens block + §3.1 contract + the complete package), with the reviewer-id set to the **slot name** (so its findings say `source: <slot>`, never `codex`/`claude`). Print its size next to the seat in the roster — `<slot>: prompt <N> KB (~<N/4> k tokens)` — so a context window the model cannot hold is visible (the script delivers it on stdin or as an attached file, never on argv; above 4 MB it skips the seat). A local model on a large prompt can need far more than the default cap — see the seat's `timeout_minutes`.
 
 **2. Dispatch — in the same message as the Round-1 `Agent` calls, as a `Bash` call with `run_in_background: true`:**
 ```bash

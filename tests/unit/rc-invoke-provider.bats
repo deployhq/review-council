@@ -248,9 +248,11 @@ GEM_EOF
   # --- fake codex -------------------------------------------------------
   # Codex has NO CLI fallback, so it is invoked as
   #   rc-invoke-provider.sh <codex> "" <prompt-file>.
-  # The prompt reaches `codex exec` as a POSITIONAL arg (for codex, -p is
-  # --profile, not the prompt), so unlike agy/gemini this fake ignores -p and
-  # just records its full argv for the codex-profile-argv assertion.
+  # The prompt reaches `codex exec` on STDIN, never argv (a 200–300 KB argv
+  # element breaks Linux's 128 KB per-argument limit; and for codex, -p is
+  # --profile, not the prompt), so unlike agy/gemini this fake ignores -p,
+  # records its full argv for the codex-profile-argv assertion, and can record
+  # its stdin.
   # Modes (CDX_MODE, or CDX_MODE_1 / CDX_MODE_2 to vary per call):
   #   ok          -> valid review, exit 0
   #   empty       -> nothing, exit 0
@@ -279,6 +281,8 @@ GEM_EOF
   # Bookkeeping (set only if the env var is exported by the test):
   #   CDX_CALLS -> one "call" line appended per invocation (call counting)
   #   CDX_ARGS  -> one space-joined line of this call's argv appended
+  #   CDX_STDIN_OUT -> this call's stdin, written raw (byte-for-byte), so a
+  #                test can prove the prompt arrived intact on stdin
   cat >"$FAKEDIR/codex" <<'CDX_EOF'
 #!/usr/bin/env sh
 call_n=1
@@ -293,6 +297,10 @@ if [ -n "${CDX_ARGS:-}" ]; then
     for a in "$@"; do printf '%s ' "$a"; done
     printf '\n'
   } >>"$CDX_ARGS"
+fi
+
+if [ -n "${CDX_STDIN_OUT:-}" ]; then
+  cat >"$CDX_STDIN_OUT"
 fi
 
 # -o <file>: where `codex exec --output-last-message` writes the final message.
@@ -901,8 +909,9 @@ call_count() {
   ! echo "$output" | grep -q 'fallback:'
 }
 
-@test "codex-profile-argv: frozen 'codex exec' argv (subcommand + read-only sandbox, positional prompt)" {
-  CDX_MODE=ok run --separate-stderr "$SCRIPT" "$CODEX" "" "$PROMPT_FILE"
+@test "codex-profile-argv: frozen 'codex exec' argv (subcommand + read-only sandbox), prompt on stdin not argv" {
+  CDX_STDIN_OUT="$BATS_TEST_TMPDIR/cdx_stdin" CDX_MODE=ok \
+    run --separate-stderr "$SCRIPT" "$CODEX" "" "$PROMPT_FILE"
   echo "status=$status"
   [ "$status" -eq 0 ]
   [ -f "$CDX_ARGS" ]
@@ -913,10 +922,46 @@ call_count() {
   # Least privilege: the reviewer must NOT run with the "EXTREMELY DANGEROUS"
   # no-sandbox flag.
   ! grep -qF -- 'dangerously-bypass' "$CDX_ARGS"
-  # The prompt is a POSITIONAL arg for codex (NOT after -p) — prove it arrived.
-  grep -qF -- 'Please review this change' "$CDX_ARGS"
+  # The prompt is NOT on argv (Linux caps one argument at 128 KB): the argv
+  # ends with the -o file, and the prompt arrives byte-for-byte on stdin.
+  # (`if`, not a bare `!`: a negated command mid-test never fails a bats test)
+  if grep -qF -- 'Please review this change' "$CDX_ARGS"; then
+    echo "prompt found on codex argv" >&2
+    false
+  fi
+  grep -qE -- '-o [^ ]+\.last $' "$CDX_ARGS"
+  cmp -s "$BATS_TEST_TMPDIR/cdx_stdin" "$PROMPT_FILE"
   # And codex must NOT be handed a -p flag (that is --profile for codex exec).
   ! grep -qE -- '(^| )-p( |$)' "$CDX_ARGS"
+}
+
+@test "codex-prompt-stdin: a 1.5 MB prompt with shell metacharacters reaches codex intact on stdin; nothing executes" {
+  {
+    # shellcheck disable=SC2016 # $(...) / backticks are literal prompt text on purpose
+    printf -- '--dangerously-bypass-approvals-and-sandbox\n$(touch %s/pwned) `touch %s/pwned2` "dq" '"'"'sq'"'"' ; | &\n' \
+      "$BATS_TEST_TMPDIR" "$BATS_TEST_TMPDIR"
+    head -c 1500000 /dev/zero | tr '\0' 'a'
+    printf '\nEND-TOKEN\n\n'
+  } >"$PROMPT_FILE"
+  CDX_STDIN_OUT="$BATS_TEST_TMPDIR/cdx_stdin" CDX_MODE=ok \
+    run --separate-stderr "$SCRIPT" "$CODEX" "" "$PROMPT_FILE"
+  echo "status=$status stderr=<<$stderr>>"
+  [ "$status" -eq 0 ]
+  cmp -s "$BATS_TEST_TMPDIR/cdx_stdin" "$PROMPT_FILE"
+  [ "$(wc -c <"$CDX_ARGS" | tr -d ' ')" -lt 4096 ]
+  [ ! -e "$BATS_TEST_TMPDIR/pwned" ]
+  [ ! -e "$BATS_TEST_TMPDIR/pwned2" ]
+}
+
+@test "codex-probe-stdin: --probe feeds the trivial probe prompt to codex on stdin" {
+  CDX_STDIN_OUT="$BATS_TEST_TMPDIR/cdx_stdin" CDX_MODE=ok run "$SCRIPT" --probe "$CODEX" ""
+  [ "$status" -eq 0 ]
+  [ "$output" = "HEALTHY" ]
+  [ "$(cat "$BATS_TEST_TMPDIR/cdx_stdin")" = ping ]
+  if grep -qE -- '(^| )ping( |$)' "$CDX_ARGS"; then
+    echo "probe prompt found on codex argv" >&2
+    false
+  fi
 }
 
 @test "codex-fast-empty-retry: codex empty-fast -> exactly one retry (shared state machine)" {
@@ -1257,13 +1302,13 @@ call_count() {
   [ "$output" = "SKIPPED: Codex unavailable — codex: auth failure" ]
 }
 
-@test "codex-last-message: argv passes -o <file under the run WORKDIR> before the positional prompt" {
+@test "codex-last-message: argv passes -o <file under the run WORKDIR> as the last flag (no positional prompt)" {
   CDX_MODE=ok run --separate-stderr "$SCRIPT" "$CODEX" "" "$PROMPT_FILE"
   echo "status=$status"
   echo "codex argv: $(cat "$CDX_ARGS")"
   [ "$status" -eq 0 ]
-  # `-o` + its path come with the flags, immediately BEFORE the prompt.
-  grep -qE -- ' -o [^ ]+ Please review this change' "$CDX_ARGS"
+  # `-o` + its path end the argv: the prompt arrives on stdin, not after it.
+  grep -qE -- ' -o [^ ]+ $' "$CDX_ARGS"
   # The path lives under the script's private mktemp WORKDIR.
   grep -qE -- ' -o [^ ]*rc-invoke\.[^ /]+/[^ ]+ ' "$CDX_ARGS"
 }

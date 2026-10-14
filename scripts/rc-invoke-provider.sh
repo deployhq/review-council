@@ -145,6 +145,13 @@ spent=0
 WORKDIR="$(mktemp -d "${TMPDIR:-/tmp}/rc-invoke.XXXXXX")"
 trap 'rm -rf "$WORKDIR"' EXIT
 
+# Probe mode has no prompt file, but codex reads its prompt from a FILE on
+# stdin (see build_and_run), so the trivial probe prompt is materialised here.
+if [ "$MODE" = probe ]; then
+  prompt_file="$WORKDIR/probe-prompt.txt"
+  printf '%s\n' "$prompt" >"$prompt_file"
+fi
+
 # Per-invocation cap model (per rules/orchestration.md + rules/providers.md):
 # every CLI invocation gets its own FULL `RC_REVIEWER_TIMEOUT` cap — the primary
 # first call and the gemini fallback each get a fresh full budget. The ONLY
@@ -203,8 +210,11 @@ label_for() {
 
 # build_and_run <resolved-bin> <cap-seconds> <out-file>
 # Builds the argv for the resolved binary by basename, then hands off to
-# run_capped. The prompt is passed as a single -p argument built via `set --`
-# (never `eval`), so spaces/newlines in the prompt survive intact.
+# run_capped. agy/gemini: the prompt is passed as a single -p argument built
+# via `set --` (never `eval`), so spaces/newlines in the prompt survive intact
+# — NB they still carry the whole prompt on argv, so they inherit the OS
+# per-argument limit (Linux MAX_ARG_STRLEN, 128 KB). codex: the prompt is fed
+# on STDIN from the prompt file, never on argv (see the codex profile below).
 build_and_run() {
   _bar_bin="$1"
   _bar_cap="$2"
@@ -237,8 +247,11 @@ build_and_run() {
       #   1. `exec` is the non-interactive subcommand (interactive `codex` would
       #      hang forever with no TTY). `exec` has no --ask-for-approval flag —
       #      it never prompts — so no "bypass approvals" knob is needed.
-      #   2. The prompt is a POSITIONAL arg — for `codex exec`, `-p` is
-      #      `--profile`, NOT the prompt (unlike agy/gemini). It goes last.
+      #   2. The prompt is NOT on argv: with no positional prompt `codex exec`
+      #      reads it from STDIN, which is redirected from <prompt-file>. A
+      #      200–300 KB review prompt as ONE argv element breaks Linux's 128 KB
+      #      per-argument limit (MAX_ARG_STRLEN → E2BIG). (Never `-p` either:
+      #      for `codex exec`, `-p` is `--profile`, unlike agy/gemini.)
       #   3. `--sandbox read-only` is LEAST PRIVILEGE for a reviewer: the model's
       #      shell commands can read the repo but cannot write or reach the
       #      network. A code reviewer only reads, so this is sufficient — and we
@@ -250,12 +263,14 @@ build_and_run() {
       # `--skip-git-repo-check` is defensive (lets the review run even outside a
       # git repo). If Codex's CLI surface changes, re-pin from `codex exec
       # --help` and update the codex-profile-argv test in lockstep.
-      #   4. `codex exec` DRAINS stdin even with a positional prompt ("If stdin
-      #      is piped and a prompt is also provided, stdin is appended as a
-      #      <stdin> block"), so it hangs forever on an inherited never-EOF
-      #      stdin. run_capped (rc-lib-timeout.sh) closes the child's stdin
-      #      (</dev/null) for exactly this reason; agy/gemini share the trait.
-      #      See tests/unit/rc-lib-timeout.bats.
+      #   4. `codex exec` reads stdin to EOF, so an inherited never-EOF stdin
+      #      would hang it. run_capped (rc-lib-timeout.sh) runs every child
+      #      with </dev/null for exactly that reason (agy/gemini share the
+      #      trait; see tests/unit/rc-lib-timeout.bats) — so codex is launched
+      #      through a fixed `/bin/sh -c` shim that re-points ITS stdin at the
+      #      prompt file and `exec`s codex (same pid, so run_capped's TERM/KILL
+      #      still lands on codex itself). The file path is the shim's $1,
+      #      never interpolated into the shim text.
       #   5. `-o <file>` (`--output-last-message`) makes codex write ONLY the
       #      final agent message to <file>. The merged stdout+stderr transcript
       #      (prompt echo, every tool call, reasoning) still lands in the
@@ -274,9 +289,11 @@ build_and_run() {
       #      there wins (e.g. "ERROR: unexpected status 401 Unauthorized");
       #      otherwise it falls back to the transcript's class and output. The
       #      file sits beside the attempt file under $WORKDIR (removed by the
-      #      EXIT trap). It goes with the flags, BEFORE the positional prompt.
+      #      EXIT trap).
       LAST_MSG_FILE="${_bar_out}.last"
-      set -- "$_bar_bin" exec --sandbox read-only --skip-git-repo-check -o "$LAST_MSG_FILE" "$prompt"
+      # shellcheck disable=SC2016 # $1/$@ expand in the inner shell, on purpose
+      set -- /bin/sh -c 'f=$1; shift; exec "$@" <"$f"' sh "$prompt_file" \
+        "$_bar_bin" exec --sandbox read-only --skip-git-repo-check -o "$LAST_MSG_FILE"
       ;;
     *)
       set -- "$_bar_bin" -p "$prompt"
