@@ -82,7 +82,7 @@ pwd -P >"$CTL/pwd"
 find . -print | sort >"$CTL/files"
 [ -f m.py ] && cp m.py "$CTL/m.py"
 printf '%s' "$HOME" >"$CTL/home"
-if { : <&3; } 2>/dev/null; then echo open >"$CTL/fd3"; else echo closed >"$CTL/fd3"; fi
+if ( : <&3 ) 2>/dev/null; then echo open >"$CTL/fd3"; else echo closed >"$CTL/fd3"; fi
 priv="$(dirname "$HOME")"
 if grep -rqF "$CANARY" "$priv" 2>/dev/null; then echo found >"$CTL/keyscan"; else echo clean >"$CTL/keyscan"; fi
 if [ -f "$priv/prompt.md" ]; then ls -l "$priv/prompt.md" | cut -c1-10 >"$CTL/copy_mode"; fi
