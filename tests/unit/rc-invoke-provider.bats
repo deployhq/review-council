@@ -43,6 +43,10 @@ setup() {
   #   AGY_PROMPT_OUT -> the exact value of the arg following -p, written raw
   #                     (byte-for-byte) so a test can prove the prompt arrived
   #                     as a SINGLE intact argument (no word-split/newline-mangle)
+  #   AGY_STDIN_OUT  -> this call's stdin, written raw
+  #   AGY_ADDDIR_OUT -> each --add-dir value (one per line); plus "<file>.ls"
+  #                     (ls -ld/ls -l of each existing dir) and "<file>.files/"
+  #                     (a copy of the files inside it, taken mid-run)
   cat >"$FAKEDIR/agy" <<'AGY_EOF'
 #!/usr/bin/env sh
 call_n=1
@@ -68,6 +72,29 @@ if [ -n "${AGY_PROMPT_OUT:-}" ]; then
     if [ "$_prev" = "-p" ]; then
       printf '%s' "$a" >"$AGY_PROMPT_OUT"
       break
+    fi
+    _prev="$a"
+  done
+fi
+
+if [ -n "${AGY_STDIN_OUT:-}" ]; then
+  cat >"$AGY_STDIN_OUT"
+fi
+
+if [ -n "${AGY_ADDDIR_OUT:-}" ]; then
+  # For each --add-dir value: record the path, its listing (modes), and copy
+  # the files inside it to "$AGY_ADDDIR_OUT.files/" — the script's private
+  # prompt dir is removed by its EXIT trap, so it must be snapshotted here.
+  _prev=""
+  for a in "$@"; do
+    if [ "$_prev" = "--add-dir" ]; then
+      printf '%s\n' "$a" >>"$AGY_ADDDIR_OUT"
+      if [ -d "$a" ]; then
+        ls -ld "$a" >>"$AGY_ADDDIR_OUT.ls"
+        ls -l "$a" >>"$AGY_ADDDIR_OUT.ls"
+        mkdir -p "$AGY_ADDDIR_OUT.files"
+        cp "$a"/* "$AGY_ADDDIR_OUT.files/"
+      fi
     fi
     _prev="$a"
   done
@@ -192,6 +219,8 @@ AGY_EOF
   # --- fake gemini ------------------------------------------------------
   # Same mode vocabulary as agy, plus "dasher" for the Workspace-ineligible
   # auth flavor (still classified as AUTH by the script under test).
+  # Bookkeeping: GEM_CALLS / GEM_ARGS as agy; GEM_STDIN_OUT -> this call's
+  # stdin, raw; GEM_PROMPT_OUT -> the raw value of the arg following -p.
   cat >"$FAKEDIR/gemini" <<'GEM_EOF'
 #!/usr/bin/env sh
 call_n=1
@@ -206,6 +235,22 @@ if [ -n "${GEM_ARGS:-}" ]; then
     for a in "$@"; do printf '%s ' "$a"; done
     printf '\n'
   } >>"$GEM_ARGS"
+fi
+
+if [ -n "${GEM_STDIN_OUT:-}" ]; then
+  cat >"$GEM_STDIN_OUT"
+fi
+
+if [ -n "${GEM_PROMPT_OUT:-}" ]; then
+  # The exact value of the arg following -p, written raw (byte-for-byte).
+  _prev=""
+  for a in "$@"; do
+    if [ "$_prev" = "-p" ]; then
+      printf '%s' "$a" >"$GEM_PROMPT_OUT"
+      break
+    fi
+    _prev="$a"
+  done
 fi
 
 case "$call_n" in
@@ -1367,4 +1412,162 @@ call_count() {
     "What's Good:" '- Clear naming.' '' \
     'Overall Assessment: One real bug; otherwise fine.')"
   [ "$output" = "$_expected" ]
+}
+
+# ---------------------------------------------------------------------------
+# Large-prompt path (argv-size guard). Linux caps ONE argv element at 128 KB
+# (MAX_ARG_STRLEN -> E2BIG), so a prompt over the threshold must NOT ride on
+# -p. RC_ARGV_MAX_BYTES is the script's TEST-ONLY hook that forces the Linux
+# threshold (120000) on this macOS runner; on Ubuntu CI it equals the default.
+# ---------------------------------------------------------------------------
+
+# make_prompt <file> <pad-bytes>: a prompt whose first line is full of shell
+# metacharacters that would create $PWNED if anything ever eval'd it, padded
+# with <pad-bytes> 'a's, ending in a newline.
+make_prompt() {
+  {
+    printf 'Review: $(touch %s) `touch %s` ; touch %s | & * ? "q" '"'"'s'"'"' $HOME\n' \
+      "$PWNED" "$PWNED" "$PWNED"
+    head -c "$2" /dev/zero | tr '\0' 'a'
+    printf '\nReport your Findings.\n'
+  } >"$1"
+}
+
+@test "argv-guard small: 10 KB prompt keeps today's argv path for agy (-p = prompt, no --add-dir, no stdin)" {
+  PWNED="$BATS_TEST_TMPDIR/pwned"
+  SMALL="$BATS_TEST_TMPDIR/small.txt"
+  make_prompt "$SMALL" 10000
+  CAP="$BATS_TEST_TMPDIR/cap_p"
+  STDIN="$BATS_TEST_TMPDIR/cap_stdin"
+  ADD="$BATS_TEST_TMPDIR/cap_add"
+  AGY_MODE=ok AGY_PROMPT_OUT="$CAP" AGY_STDIN_OUT="$STDIN" AGY_ADDDIR_OUT="$ADD" \
+    RC_ARGV_MAX_BYTES=120000 run --separate-stderr "$SCRIPT" "$AGY" "$GEMINI" "$SMALL"
+  echo "status=$status"
+  [ "$status" -eq 0 ]
+  # -p carries the prompt (command substitution strips the trailing newline).
+  [[ "$(cat "$CAP")" == "$(cat "$SMALL")" ]] || false
+  [ ! -s "$STDIN" ]
+  [ ! -e "$ADD" ]
+  [ ! -e "$PWNED" ]
+}
+
+@test "argv-guard small: 10 KB prompt keeps today's argv path for gemini (-p = prompt, no stdin)" {
+  PWNED="$BATS_TEST_TMPDIR/pwned"
+  SMALL="$BATS_TEST_TMPDIR/small.txt"
+  make_prompt "$SMALL" 10000
+  CAP="$BATS_TEST_TMPDIR/cap_p"
+  STDIN="$BATS_TEST_TMPDIR/cap_stdin"
+  AGY_MODE=auth GEM_MODE=ok GEM_PROMPT_OUT="$CAP" GEM_STDIN_OUT="$STDIN" \
+    RC_ARGV_MAX_BYTES=120000 run --separate-stderr "$SCRIPT" "$AGY" "$GEMINI" "$SMALL"
+  echo "status=$status"
+  echo "output=<<$output>>"
+  [ "$status" -eq 0 ]
+  [[ "$output" == "TOOL: Gemini"* ]] || false
+  [[ "$(cat "$CAP")" == "$(cat "$SMALL")" ]] || false
+  [ ! -s "$STDIN" ]
+  grep -qF -- '--skip-trust' "$GEM_ARGS"
+  [ ! -e "$PWNED" ]
+}
+
+@test "argv-guard default: without the hook, a 300 KB prompt on Darwin stays on argv (<= 900000)" {
+  [ "$(uname -s)" = Darwin ] || skip "Darwin-only threshold"
+  PWNED="$BATS_TEST_TMPDIR/pwned"
+  BIG="$BATS_TEST_TMPDIR/big.txt"
+  make_prompt "$BIG" 300000
+  CAP="$BATS_TEST_TMPDIR/cap_p"
+  ADD="$BATS_TEST_TMPDIR/cap_add"
+  AGY_MODE=ok AGY_PROMPT_OUT="$CAP" AGY_ADDDIR_OUT="$ADD" \
+    run --separate-stderr "$SCRIPT" "$AGY" "$GEMINI" "$BIG"
+  echo "status=$status"
+  [ "$status" -eq 0 ]
+  [[ "$(cat "$CAP")" == "$(cat "$BIG")" ]] || false
+  [ ! -e "$ADD" ]
+}
+
+@test "argv-guard large: 300 KB prompt -> agy gets a short fixed -p + --add-dir to a private dir holding the exact prompt" {
+  PWNED="$BATS_TEST_TMPDIR/pwned"
+  BIG="$BATS_TEST_TMPDIR/big.txt"
+  make_prompt "$BIG" 300000
+  CAP="$BATS_TEST_TMPDIR/cap_p"
+  STDIN="$BATS_TEST_TMPDIR/cap_stdin"
+  ADD="$BATS_TEST_TMPDIR/cap_add"
+  USERDIR="$BATS_TEST_TMPDIR/user-add-dir"
+  mkdir -p "$USERDIR"
+  AGY_MODE=ok AGY_PROMPT_OUT="$CAP" AGY_STDIN_OUT="$STDIN" AGY_ADDDIR_OUT="$ADD" \
+    RC_GOOGLE_ADD_DIR="$USERDIR" RC_GOOGLE_MODEL=some-model \
+    RC_ARGV_MAX_BYTES=120000 run --separate-stderr "$SCRIPT" "$AGY" "$GEMINI" "$BIG"
+  echo "status=$status"
+  echo "p=<<$(cat "$CAP")>>"
+  echo "add=<<$(cat "$ADD")>>"
+  [ "$status" -eq 0 ]
+  [[ "$output" == "TOOL: Antigravity"* ]] || false
+  # -p is the short constant, naming the absolute prompt-file path.
+  [ "$(wc -c <"$CAP" | tr -d ' ')" -lt 1000 ]
+  [[ "$(cat "$CAP")" == "Your complete task, including all instructions and the full review context, is in the file /"* ]] || false
+  [[ "$(cat "$CAP")" == *"Read the WHOLE file before answering"* ]] || false
+  ! grep -q 'aaaaaaaa' "$CAP" || false
+  # Two --add-dir values: the private prompt dir first, then RC_GOOGLE_ADD_DIR.
+  [ "$(wc -l <"$ADD" | tr -d ' ')" -eq 2 ]
+  pdir="$(sed -n 1p "$ADD")"
+  [ "$(sed -n 2p "$ADD")" = "$USERDIR" ]
+  [[ "$(cat "$CAP")" == *"$pdir/prompt.txt ."* ]] || false
+  # The private file held the EXACT prompt bytes, mode 600, in a 700 dir.
+  cmp -s "$ADD.files/prompt.txt" "$BIG"
+  grep -qE '^drwx------' "$ADD.ls"
+  grep -qE '^-rw-------.* prompt\.txt$' "$ADD.ls"
+  # Other agy flags kept; nothing on stdin; private dir cleaned up on exit.
+  grep -qE -- '--print-timeout [0-9]+s' "$AGY_ARGS"
+  grep -qF -- '--dangerously-skip-permissions' "$AGY_ARGS"
+  grep -qF -- '--model some-model' "$AGY_ARGS"
+  [ ! -s "$STDIN" ]
+  [ ! -e "$pdir" ]
+  [ ! -e "$PWNED" ]
+}
+
+@test "argv-guard large: agy auth-fails -> gemini fallback gets a short fixed -p and the exact prompt on stdin" {
+  PWNED="$BATS_TEST_TMPDIR/pwned"
+  BIG="$BATS_TEST_TMPDIR/big.txt"
+  make_prompt "$BIG" 300000
+  CAP="$BATS_TEST_TMPDIR/cap_p"
+  STDIN="$BATS_TEST_TMPDIR/cap_stdin"
+  AGY_MODE=auth GEM_MODE=ok GEM_PROMPT_OUT="$CAP" GEM_STDIN_OUT="$STDIN" \
+    RC_ARGV_MAX_BYTES=120000 run --separate-stderr "$SCRIPT" "$AGY" "$GEMINI" "$BIG"
+  echo "status=$status"
+  echo "output=<<$output>>"
+  echo "p=<<$(cat "$CAP")>>"
+  [ "$status" -eq 0 ]
+  [[ "$output" == "TOOL: Gemini"* ]] || false
+  [ "$(call_count "$AGY_CALLS")" -eq 1 ]
+  [ "$(call_count "$GEM_CALLS")" -eq 1 ]
+  [ "$(cat "$CAP")" = "Follow the instructions in the input above exactly." ]
+  cmp -s "$STDIN" "$BIG"
+  grep -qF -- '--skip-trust' "$GEM_ARGS"
+  ! grep -q 'aaaaaaaa' "$GEM_ARGS" || false
+  [ ! -e "$PWNED" ]
+}
+
+@test "argv-guard large: agy fast-empty retry reuses the private prompt file" {
+  PWNED="$BATS_TEST_TMPDIR/pwned"
+  BIG="$BATS_TEST_TMPDIR/big.txt"
+  make_prompt "$BIG" 300000
+  ADD="$BATS_TEST_TMPDIR/cap_add"
+  AGY_MODE_1=empty AGY_MODE_2=ok AGY_ADDDIR_OUT="$ADD" \
+    RC_ARGV_MAX_BYTES=120000 run --separate-stderr "$SCRIPT" "$AGY" "$GEMINI" "$BIG"
+  echo "status=$status"
+  [ "$status" -eq 0 ]
+  [[ "$output" == "TOOL: Antigravity"* ]] || false
+  [ "$(call_count "$AGY_CALLS")" -eq 2 ]
+  [ "$(sed -n 1p "$ADD")" = "$(sed -n 2p "$ADD")" ]
+  cmp -s "$ADD.files/prompt.txt" "$BIG"
+  [ ! -e "$PWNED" ]
+}
+
+@test "argv-guard: a non-integer RC_ARGV_MAX_BYTES is ignored with a note (default threshold applies)" {
+  AGY_MODE=ok RC_ARGV_MAX_BYTES='1;touch x' \
+    run --separate-stderr "$SCRIPT" "$AGY" "$GEMINI" "$PROMPT_FILE"
+  echo "status=$status"
+  echo "stderr=<<$stderr>>"
+  [ "$status" -eq 0 ]
+  [[ "$stderr" == *"ignoring invalid RC_ARGV_MAX_BYTES"* ]] || false
+  grep -qF 'Please review this change' "$AGY_ARGS"
 }

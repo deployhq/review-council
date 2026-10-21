@@ -56,6 +56,8 @@
 #                            retry never exceed one RC_REVIEWER_TIMEOUT.
 #   RC_GOOGLE_ADD_DIR        optional, agy-only: appends --add-dir "<val>".
 #   RC_GOOGLE_MODEL          optional, agy-only: appends --model "<val>".
+#   RC_ARGV_MAX_BYTES        TEST-ONLY: overrides the agy/gemini argv-size
+#                            threshold (default 120000; 900000 on Darwin).
 #
 # stdout: review mode — on success, "TOOL: <Label>" then the raw review text;
 #         on total failure, a single "SKIPPED: ..." line attributed to the
@@ -152,6 +154,73 @@ if [ "$MODE" = probe ]; then
   printf '%s\n' "$prompt" >"$prompt_file"
 fi
 
+# ---------------------------------------------------------------------------
+# argv-size guard for the Google slot (agy / gemini)
+# ---------------------------------------------------------------------------
+# agy/gemini take the prompt as ONE -p argument. Linux caps a single argv
+# element at 128 KB (MAX_ARG_STRLEN) and fails the exec with E2BIG; real review
+# prompts are 200-300 KB, so on Linux (CI) the Google slot would always fail.
+# macOS has no per-argument cap (only the ~1 MB total ARG_MAX), which is why the
+# argv path works there today.
+#
+# The argv path is the ONLY one verified live, so it is kept byte-identical
+# whenever it is safe: prompt <= 120000 bytes on any OS (headroom under 128 KB),
+# or <= 900000 bytes on Darwin (headroom under ARG_MAX for env + other args).
+# Every realistic prompt on macOS therefore takes the unchanged path. Only a
+# prompt that WOULD hit E2BIG takes the large-prompt path in build_and_run.
+#
+# RC_ARGV_MAX_BYTES is a TEST-ONLY hook (tests/unit/rc-invoke-provider.bats):
+# it overrides the computed threshold so the large path can be exercised on
+# macOS. It is an env var (never read from config); a non-integer or absurdly
+# long value is ignored with a note, so it can never reach the arithmetic
+# below as anything but a short digit string.
+argv_max_bytes() {
+  _amb_v="${RC_ARGV_MAX_BYTES:-}"
+  if [ -n "$_amb_v" ]; then
+    case "$_amb_v" in
+      *[!0-9]*) ;;
+      *)
+        if [ "${#_amb_v}" -le 9 ]; then
+          echo "$_amb_v"
+          return 0
+        fi
+        ;;
+    esac
+    echo "note: ignoring invalid RC_ARGV_MAX_BYTES" >&2
+  fi
+  if [ "$(uname -s 2>/dev/null || true)" = Darwin ]; then
+    echo 900000
+  else
+    echo 120000
+  fi
+}
+PROMPT_BYTES="$(wc -c <"$prompt_file" | tr -d ' ')"
+LARGE_PROMPT=0
+if [ "$PROMPT_BYTES" -gt "$(argv_max_bytes)" ]; then
+  LARGE_PROMPT=1
+fi
+
+# Fixed -p messages for the large-prompt path (constants; the only variable
+# part is agy's prompt-file path, which this script itself generated under the
+# mktemp'd $WORKDIR — never anything from the prompt or from config).
+AGY_FILE_PROMPT_HEAD='Your complete task, including all instructions and the full review context, is in the file '
+AGY_FILE_PROMPT_TAIL=' . Read the WHOLE file before answering (read it in chunks if it is too large to read at once; do not stop at the first chunk), then follow the instructions in it exactly. The output format required by that file is the only output wanted.'
+GEMINI_STDIN_PROMPT='Follow the instructions in the input above exactly.'
+
+# agy_prompt_dir: materialise the prompt as a private file for agy's large
+# path, print the DIRECTORY (for --add-dir). Idempotent: a retry / second call
+# reuses it. $WORKDIR is mktemp -d (mode 700); the dir + file are tightened to
+# 700/600 explicitly anyway. Removed by the EXIT trap with $WORKDIR.
+agy_prompt_dir() {
+  _apd_dir="$WORKDIR/agy-prompt"
+  if [ ! -f "$_apd_dir/prompt.txt" ]; then
+    (umask 077 && mkdir -p "$_apd_dir" && cp "$prompt_file" "$_apd_dir/prompt.txt")
+    chmod 700 "$_apd_dir"
+    chmod 600 "$_apd_dir/prompt.txt"
+  fi
+  printf '%s\n' "$_apd_dir"
+}
+
 # Per-invocation cap model (per rules/orchestration.md + rules/providers.md):
 # every CLI invocation gets its own FULL `RC_REVIEWER_TIMEOUT` cap — the primary
 # first call and the gemini fallback each get a fresh full budget. The ONLY
@@ -212,8 +281,9 @@ label_for() {
 # Builds the argv for the resolved binary by basename, then hands off to
 # run_capped. agy/gemini: the prompt is passed as a single -p argument built
 # via `set --` (never `eval`), so spaces/newlines in the prompt survive intact
-# — NB they still carry the whole prompt on argv, so they inherit the OS
-# per-argument limit (Linux MAX_ARG_STRLEN, 128 KB). codex: the prompt is fed
+# — NB they carry the whole prompt on argv, so a prompt over the argv-size
+# guard (Linux MAX_ARG_STRLEN, 128 KB) switches them to a file (agy) / stdin
+# (gemini) instead; see LARGE_PROMPT. codex: the prompt is fed
 # on STDIN from the prompt file, never on argv (see the codex profile below).
 build_and_run() {
   _bar_bin="$1"
@@ -230,7 +300,21 @@ build_and_run() {
       # --print-timeout MUST carry the "s" unit suffix — a bare integer is
       # rejected by agy ("missing unit in duration"). This exact bug is why
       # this script exists; see the print-timeout-unit-suffix test.
-      set -- "$_bar_bin" -p "$prompt" --print-timeout "${_bar_cap}s" --dangerously-skip-permissions
+      #
+      # LARGE_PROMPT (see the argv-size guard): agy does NOT read stdin (an
+      # empty -p with the prompt on stdin fails "empty prompt", verified), so
+      # the prompt goes into a private file whose dir is granted via --add-dir
+      # and a short fixed -p tells agy to read it. UNVERIFIED LIVE: agy's quota
+      # was exhausted when this was written, so only the fakes in the bats
+      # suite exercise it — which is why small prompts never take this path.
+      if [ "$LARGE_PROMPT" = 1 ]; then
+        _bar_pdir="$(agy_prompt_dir)"
+        set -- "$_bar_bin" -p "${AGY_FILE_PROMPT_HEAD}${_bar_pdir}/prompt.txt${AGY_FILE_PROMPT_TAIL}" \
+          --print-timeout "${_bar_cap}s" --dangerously-skip-permissions \
+          --add-dir "$_bar_pdir"
+      else
+        set -- "$_bar_bin" -p "$prompt" --print-timeout "${_bar_cap}s" --dangerously-skip-permissions
+      fi
       if [ -n "${RC_GOOGLE_ADD_DIR:-}" ]; then
         set -- "$@" --add-dir "$RC_GOOGLE_ADD_DIR"
       fi
@@ -239,7 +323,19 @@ build_and_run() {
       fi
       ;;
     *gemini*)
-      set -- "$_bar_bin" -p "$prompt" --skip-trust
+      # LARGE_PROMPT: `gemini -p` is "Appended to input on stdin (if any)" per
+      # its --help, so the prompt is fed on STDIN through the same fixed
+      # /bin/sh shim as codex (file path is the shim's $1, never interpolated;
+      # `exec` keeps the pid so run_capped's TERM/KILL still lands on gemini)
+      # with a short fixed -p. UNVERIFIED LIVE: gemini could not authenticate
+      # on the account this was written on — small prompts stay on argv.
+      if [ "$LARGE_PROMPT" = 1 ]; then
+        # shellcheck disable=SC2016 # $1/$@ expand in the inner shell, on purpose
+        set -- /bin/sh -c 'f=$1; shift; exec "$@" <"$f"' sh "$prompt_file" \
+          "$_bar_bin" -p "$GEMINI_STDIN_PROMPT" --skip-trust
+      else
+        set -- "$_bar_bin" -p "$prompt" --skip-trust
+      fi
       ;;
     *codex*)
       # Frozen non-interactive Codex profile, pinned against `codex exec --help`
