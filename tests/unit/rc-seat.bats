@@ -1174,7 +1174,13 @@ OC_MSG='Your complete task and the full review context are in the attached file 
   printf 'edit\n' >>"$REPO/m.py"
   : >"$REPO/.git/index.lock"
   run_seat
-  [ "$output" = "SKIPPED: s1 (codex) unavailable — codex: could not snapshot the repo: error: could not write index" ]
+  # git's own wording differs by version (macOS: "error: could not write
+  # index"; Ubuntu's git words the index.lock failure differently), so assert
+  # the script's prefix plus a non-empty git line, not git's exact text.
+  case "$output" in
+  "SKIPPED: s1 (codex) unavailable — codex: could not snapshot the repo: "?*) : ;;
+  *) echo "unexpected: $output" && return 1 ;;
+  esac
   [ ! -e "$CTL/calls" ]
   rm -f "$REPO/.git/index.lock"
 }
