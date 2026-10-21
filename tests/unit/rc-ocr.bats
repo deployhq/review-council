@@ -72,7 +72,7 @@ env >"$CTL/review.env"
 printf '%s' "$HOME" >"$CTL/home"
 cp "$HOME/.opencodereview/config.json" "$CTL/config.json"
 cp "$HOME/rule.json" "$CTL/rule.json"
-if { : <&3; } 2>/dev/null; then echo open >"$CTL/fd3"; else echo closed >"$CTL/fd3"; fi
+if ( : <&3 ) 2>/dev/null; then echo open >"$CTL/fd3"; else echo closed >"$CTL/fd3"; fi
 cat >"$CTL/stdin" 2>/dev/null
 if [ -s "$CTL/review_sleep" ]; then
   : >"$CTL/sleeping"
