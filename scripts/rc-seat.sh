@@ -1,7 +1,7 @@
 #!/usr/bin/env sh
 # rc-seat.sh — dispatch for a custom reviewer seat run through an agent CLI
 # harness: `codex`, `claude` (Claude Code) or `opencode`, against an
-# `openrouter` or a local `ollama` provider (codex: `ollama` only). Sibling of
+# `openrouter` or a local `ollama` provider. Sibling of
 # rc-ocr.sh (which owns the `ocr` harness) and built to the same discipline.
 #
 # Usage (the orchestrator passes ONLY these atoms — never free-form text):
@@ -77,8 +77,8 @@ START_TS="$(date +%s)"
 NL='
 '
 # opencode's project-config guard (OPENCODE_DISABLE_PROJECT_CONFIG) is
-# undocumented, so only the version it was verified against is trusted.
-OPENCODE_TESTED_VERSION=1.19.0
+# undocumented; it was verified on this version, so anything older is skipped.
+OPENCODE_MIN_VERSION=1.19.0
 # Sanity cap only: the prompt goes on stdin / an attached file, not argv, so no
 # OS argument limit applies; a prompt beyond this is a runaway context package.
 PROMPT_MAX_BYTES=4194304
@@ -235,6 +235,31 @@ is_uint() {
   [ "${#1}" -le 9 ]
 }
 
+# version_ge <v> <min>: is dotted-numeric version <v> >= <min>? Each part is
+# compared as a number (missing parts count as 0). Anything that is not a
+# plain dotted-numeric version (empty, a prefix/suffix, an empty part) is
+# unparseable and returns false — treated as below the minimum.
+version_ge() {
+  case "$1" in
+    '' | .* | *. | *..* | *[!0-9.]*) return 1 ;;
+  esac
+  _vg_a="$1."
+  _vg_b="$2."
+  while [ -n "$_vg_a" ] || [ -n "$_vg_b" ]; do
+    _vg_x="${_vg_a%%.*}"
+    _vg_y="${_vg_b%%.*}"
+    _vg_a="${_vg_a#*.}"
+    _vg_b="${_vg_b#*.}"
+    # strip leading zeros so the numbers never read as octal / overflow
+    _vg_x="$(printf '%s' "${_vg_x:-0}" | sed 's/^0*//')"
+    _vg_y="$(printf '%s' "${_vg_y:-0}" | sed 's/^0*//')"
+    [ "${#_vg_x}" -le 9 ] || return 1
+    [ "${_vg_x:-0}" -gt "${_vg_y:-0}" ] && return 0
+    [ "${_vg_x:-0}" -lt "${_vg_y:-0}" ] && return 1
+  done
+  return 0
+}
+
 # ---------------------------------------------------------------------------
 # Arguments
 # ---------------------------------------------------------------------------
@@ -318,13 +343,6 @@ case "$PROVIDER" in
   openrouter | ollama) ;;
   *) skip "unsupported provider '$(one_line "$PROVIDER" | cut -c1-40)'" ;;
 esac
-# codex's read-only sandbox still reads ANY file on the machine, and codex
-# cannot send OpenRouter's data_collection:deny — so a codex seat is local
-# (ollama) only. The reader rejects it too; this is defence in depth, checked
-# before any binary, key or network access.
-if [ "$HARNESS:$PROVIDER" = codex:openrouter ]; then
-  skip "codex seats support provider ollama only"
-fi
 
 API_KEY_ENV=""
 if [ "$PROVIDER" = openrouter ]; then
@@ -333,15 +351,23 @@ if [ "$PROVIDER" = openrouter ]; then
   valid_envname "$API_KEY_ENV" || skip "invalid api_key_env"
 fi
 
-# Hard cap (seconds): opt.timeout_minutes × 60, else the shared reviewer timeout.
+# Hard cap (seconds): opt.timeout_minutes × 60, else 20 minutes for a local
+# (ollama) seat — local models are slow — else the shared reviewer timeout.
 CAP=""
 TIMEOUT_MIN="$(cfg "$P.opt.timeout_minutes")"
 if [ -n "$TIMEOUT_MIN" ]; then
   if is_uint "$TIMEOUT_MIN" && [ "$TIMEOUT_MIN" -ge 1 ]; then
     CAP=$((TIMEOUT_MIN * 60))
   else
-    note "invalid timeout_minutes; using settings.reviewer_timeout_seconds"
+    if [ "$PROVIDER" = ollama ]; then
+      note "invalid timeout_minutes; using the 20-minute local default"
+    else
+      note "invalid timeout_minutes; using settings.reviewer_timeout_seconds"
+    fi
   fi
+fi
+if [ -z "$CAP" ] && [ "$PROVIDER" = ollama ]; then
+  CAP=1200
 fi
 if [ -z "$CAP" ]; then
   CAP="$(cfg settings.reviewer_timeout_seconds)"
@@ -512,22 +538,23 @@ case "$HARNESS" in
     ;;
 esac
 
-# --- opencode: version pin + council-written config --------------------------
+# --- opencode: minimum version + council-written config --------------------------
 if [ "$HARNESS" = opencode ]; then
   _old_ifs=$IFS
   IFS=$NL
   # shellcheck disable=SC2086 # deliberate newline split of the allowlist
   set -- $ENV_LIST
   IFS=$_old_ifs
-  # cwd = the private dir: before the version is known to be the tested one,
+  # cwd = the private dir: before the version is known to be a tested one,
   # opencode must not see the reviewed repo (its config / plugins).
   (
     cd "$T" || exit 0
     run_capped 30 "$T/version.log" env -i "$@" "$BIN" --version 3<&-
   )
   _v="$(grep -v '^[[:space:]]*$' "$T/version.log" 2>/dev/null | head -n 1 | tr -d ' \r')"
-  if [ "$_v" != "$OPENCODE_TESTED_VERSION" ]; then
-    skip "untested opencode version $(printf '%s' "$_v" | tr -cd 'A-Za-z0-9._+-' | cut -c1-40) (tested: $OPENCODE_TESTED_VERSION)"
+  if ! version_ge "$_v" "$OPENCODE_MIN_VERSION"; then
+    _vs="$(printf '%s' "$_v" | tr -cd 'A-Za-z0-9._+-' | cut -c1-40)"
+    skip "opencode ${_vs:-unknown} is older than the minimum tested version $OPENCODE_MIN_VERSION"
   fi
 
   # The model is a jq --arg, never string-concatenated into JSON. Permissions
@@ -586,9 +613,16 @@ fi
 set -- env -i "$@" /bin/sh -c "$SHIM" "$OUT" "$STDIN_SRC" "$BIN"
 case "$HARNESS" in
   codex)
-    # ollama only (an openrouter codex seat was SKIPPED above). No positional
-    # prompt: `codex exec` then reads the prompt from stdin.
-    set -- "$@" exec --oss --local-provider ollama
+    # No positional prompt: `codex exec` then reads the prompt from stdin.
+    # OpenRouter: an inline provider whose key codex reads from
+    # OPENROUTER_API_KEY (exported by the shim from fd 3). Fixed literals only.
+    set -- "$@" exec
+    if [ "$PROVIDER" = ollama ]; then
+      set -- "$@" --oss --local-provider ollama
+    else
+      set -- "$@" -c "model_providers.openrouter={ name='OpenRouter', base_url='https://openrouter.ai/api/v1', wire_api='responses', env_key='OPENROUTER_API_KEY' }" \
+        -c model_provider="openrouter"
+    fi
     set -- "$@" --sandbox read-only --skip-git-repo-check -m "$MODEL" -o "$LAST"
     ;;
   claude)

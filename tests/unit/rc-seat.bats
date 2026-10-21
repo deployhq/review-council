@@ -287,18 +287,21 @@ OC_MSG='Your complete task and the full review context are in the attached file 
   [ "$(envval CODEX_HOME)" = "$priv/codex" ]
 }
 
-@test "codex + openrouter -> SKIPPED (ollama only) before any binary, key or curl access" {
+@test "codex + openrouter: exact argv (inline provider, -c model_provider), key exported as OPENROUTER_API_KEY" {
   seat codex openrouter
-  # an api_key_env that would itself skip proves the check runs before the key
-  cfg_set reviewer.custom.s1.api_key_env 'X;rm'
-  unset OPENROUTER_API_KEY
-  export RC_CODEX_BIN="$BATS_TEST_TMPDIR/no-such-codex"
   RC_OLLAMA_TAGS_URL="file://$BATS_TEST_TMPDIR/no-such-tags.json" run_seat
   [ "$status" -eq 0 ]
-  [ "$output" = "SKIPPED: s1 (codex) unavailable — codex: codex seats support provider ollama only" ]
-  [ "$(meta status)" = skipped ]
-  [ "$(meta reason)" = "codex seats support provider ollama only" ]
-  [ ! -e "$CTL/calls" ]
+  [ "${lines[0]}" = "TOOL: s1 (qwen/qwen3-coder via codex)" ]
+  priv="$(dirname "$(cat "$CTL/home")")"
+  argv_is exec \
+    -c "model_providers.openrouter={ name='OpenRouter', base_url='https://openrouter.ai/api/v1', wire_api='responses', env_key='OPENROUTER_API_KEY' }" \
+    -c model_provider=openrouter \
+    --sandbox read-only --skip-git-repo-check -m qwen/qwen3-coder -o "$priv/last.txt"
+  stdin_is_prompt
+  [ "$(cat "$CTL/pwd")" = "$(cat "$CTL/priv_real")/repo" ]
+  [ "$(envval CODEX_HOME)" = "$priv/codex" ]
+  [ "$(envval OPENROUTER_API_KEY)" = "$CANARY" ]
+  [ "$(meta status)" = complete ]
 }
 
 @test "claude + ollama: exact argv (--tools= form, --setting-sources \"\") and env" {
@@ -418,20 +421,50 @@ OC_MSG='Your complete task and the full review context are in the attached file 
   [ "$(jq -r '.provider.ollama.models | keys[0]' "$CTL/opencode.json")" = '~vendor/Model_x.y:tag@v2-~' ]
 }
 
-@test "opencode version pin: any version other than 1.19.0 -> SKIPPED, harness never run" {
+@test "opencode minimum version: older than 1.19.0 or unparseable -> SKIPPED, only --version invoked" {
+  for v in 1.18.9 0.99.99 garbage v1.20.0 1.20.0-beta 1..2; do
+    seat opencode ollama
+    rm -f "$CTL/calls"
+    echo "$v" >"$CTL/oc_version"
+    run_seat
+    [ "$status" -eq 0 ]
+    [ "$output" = "SKIPPED: s1 (opencode) unavailable — opencode: opencode $v is older than the minimum tested version 1.19.0" ] || {
+      echo "$v: $output" >&2
+      false
+    }
+    [ "$(cat "$CTL/calls")" = version ]
+    [ "$(meta status)" = skipped ]
+    [ "$(meta harness)" = opencode ]
+  done
+}
+
+@test "opencode minimum version: an empty --version -> SKIPPED, only --version invoked" {
   seat opencode ollama
-  echo 1.20.0 >"$CTL/oc_version"
+  printf '\n' >"$CTL/oc_version"
   run_seat
-  [ "$status" -eq 0 ]
-  [ "$output" = "SKIPPED: s1 (opencode) unavailable — opencode: untested opencode version 1.20.0 (tested: 1.19.0)" ]
+  [ "$output" = "SKIPPED: s1 (opencode) unavailable — opencode: opencode unknown is older than the minimum tested version 1.19.0" ]
   [ "$(cat "$CTL/calls")" = version ]
-  [ "$(meta status)" = skipped ]
-  [ "$(meta harness)" = opencode ]
+}
+
+@test "opencode minimum version: 1.19.0 and every newer version run" {
+  for v in 1.19.0 1.19.3 1.20.0 2.0.0 1.19.10; do
+    seat opencode ollama
+    rm -f "$CTL/calls"
+    echo "$v" >"$CTL/oc_version"
+    run_seat
+    [ "$status" -eq 0 ]
+    [ "$(meta status)" = complete ] || {
+      echo "$v: $output" >&2
+      false
+    }
+    [ "$(head -n 1 "$CTL/calls")" = version ]
+    [ "$(sed -n 2p "$CTL/calls")" = run ]
+  done
 }
 
 @test "opencode --version probe runs with cwd = the private dir, never the reviewed repo" {
   seat opencode ollama
-  echo 1.20.0 >"$CTL/oc_version" # skip right after the probe
+  echo 1.18.9 >"$CTL/oc_version" # skip right after the probe
   cd "$REPO/sub"
   run_seat
   [ "$(cat "$CTL/calls")" = version ]
@@ -577,8 +610,7 @@ OC_MSG='Your complete task and the full review context are in the attached file 
     "$CTL/env_argv" "$real_env" >"$BATS_TEST_TMPDIR/envwrap/env"
   chmod +x "$BATS_TEST_TMPDIR/envwrap/env"
   export PATH="$BATS_TEST_TMPDIR/envwrap:$PATH"
-  # (codex is ollama-only: no key to leak)
-  for h in claude opencode; do
+  for h in codex claude opencode; do
     seat "$h" openrouter
     rm -f "$CTL/argv" "$CTL/keyscan" "$CTL/env_argv"
     run_seat
@@ -595,6 +627,9 @@ OC_MSG='Your complete task and the full review context are in the attached file 
 
 @test "fd 3 is closed in the harness (openrouter key pipe and ollama)" {
   seat claude openrouter
+  run_seat
+  [ "$(cat "$CTL/fd3")" = closed ]
+  seat codex openrouter
   run_seat
   [ "$(cat "$CTL/fd3")" = closed ]
   seat codex ollama
@@ -838,6 +873,8 @@ OC_MSG='Your complete task and the full review context are in the attached file 
 }
 
 @test "timeout (reviewer_timeout_seconds=1, harness sleeps) -> SKIPPED timed out" {
+  # openrouter: an ollama seat's default cap is 1200 s, not reviewer_timeout_seconds
+  seat codex openrouter
   cfg_set settings.reviewer_timeout_seconds 1
   echo 10 >"$CTL/sleep"
   run_seat
@@ -847,7 +884,8 @@ OC_MSG='Your complete task and the full review context are in the attached file 
   [ -z "$(ls -A "$TMPDIR")" ]
 }
 
-@test "cap: opt.timeout_minutes x 60 wins over reviewer_timeout_seconds; default 600" {
+@test "cap (openrouter): opt.timeout_minutes x 60 wins over reviewer_timeout_seconds; default 600" {
+  seat codex openrouter
   cfg_set reviewer.custom.s1.opt.timeout_minutes 2
   run_seat
   [[ "$stderr" == *"cap_s=120"* ]] || false
@@ -858,6 +896,23 @@ OC_MSG='Your complete task and the full review context are in the attached file 
   cfg_set settings.reviewer_timeout_seconds ''
   run_seat
   [[ "$stderr" == *"cap_s=600"* ]] || false
+}
+
+@test "cap (ollama): default 1200 s regardless of reviewer_timeout_seconds; opt.timeout_minutes wins" {
+  for h in codex claude opencode; do
+    seat "$h" ollama
+    cfg_set reviewer.custom.s1.opt.timeout_minutes ''
+    cfg_set settings.reviewer_timeout_seconds 45
+    run_seat
+    [[ "$stderr" == *"provider=ollama cap_s=1200"* ]] || false
+    cfg_set reviewer.custom.s1.opt.timeout_minutes 3
+    run_seat
+    [[ "$stderr" == *"provider=ollama cap_s=180"* ]] || false
+  done
+  cfg_set reviewer.custom.s1.opt.timeout_minutes 0
+  run_seat
+  [[ "$stderr" == *"invalid timeout_minutes; using the 20-minute local default"* ]] || false
+  [[ "$stderr" == *"cap_s=1200"* ]] || false
 }
 
 @test "claude --max-turns: opt.max_turns, else settings.claude_max_turns, else 30" {

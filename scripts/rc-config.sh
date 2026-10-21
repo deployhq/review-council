@@ -572,8 +572,8 @@ printf 'pr_comments.bot_token_env=%s\n' "$_pc_tokenenv"
 # applies to the harnesses listed at its resolve below (set on another, it is
 # dropped with a note); free-form flags/env are ocr-only — every agent harness
 # has isolation-critical flags/env, so none of them gets a free-form surface.
-# Harness codex runs with provider ollama only. Of the enabled seats that ONLY
-# an untrusted layer defines, just the first (in slot order) is emitted.
+# Of the enabled seats that ONLY an untrusted layer defines, just the first (in
+# slot order) is emitted.
 # A seat that ONLY an untrusted layer defines and that sends code off
 # the machine gets a `confirm.<n>=` line: the orchestrator asks the human once
 # before running it (skills/run/SKILL.md, Step 0).
@@ -819,16 +819,6 @@ for _cs in $CS_ALL; do
     *) _source=committed ;;
   esac
 
-  # codex is Ollama-only: its read-only sandbox blocks writes, not reads (the
-  # model can read any file on this machine), and it cannot send OpenRouter's
-  # `data_collection: deny`. Checked before the committed-seat limit below, so
-  # a skipped seat never uses up the repo's one seat.
-  if [ "$_harness" = codex ] && [ "$_provider" != ollama ]; then
-    echo "rc-config: reviewer.custom.$_cs: harness codex supports provider ollama only (codex can read any file on this machine and cannot deny OpenRouter data collection); use harness claude or opencode for OpenRouter; seat skipped" >&2
-    IFS=','
-    continue
-  fi
-
   # At most ONE enabled seat that only the repo's committed config names runs
   # per review — otherwise a reviewed repo could field many (Ollama seats need
   # no confirm) and forge cross-family agreement between its own seats. The
@@ -977,7 +967,13 @@ for _cs in $CS_ALL; do
 
   if [ "$_needs_confirm" = true ]; then
     CS_CONFIRM=$((CS_CONFIRM + 1))
-    CS_CONF_OUT="${CS_CONF_OUT}confirm.$CS_CONFIRM=Seat '$_cs' is enabled only by the repo's committed config, and sends code to OpenRouter (model $_model), billed to your $_keyenv.
+    # codex's read-only sandbox blocks writes, not reads, and codex cannot send
+    # OpenRouter's `data_collection: deny` — say so in the one question.
+    _cs_why=""
+    if [ "$_harness" = codex ]; then
+      _cs_why=" Note: codex can read any file on this machine (its sandbox blocks writes, not reads) and cannot ask OpenRouter to deny data collection."
+    fi
+    CS_CONF_OUT="${CS_CONF_OUT}confirm.$CS_CONFIRM=Seat '$_cs' is enabled only by the repo's committed config, and sends code to OpenRouter (model $_model), billed to your $_keyenv.$_cs_why
 "
   fi
   IFS=','
