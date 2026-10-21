@@ -1300,17 +1300,26 @@ pr_comments:
   [[ "$stderr" != *"harness_options.flags ignored in the committed config.yml"* ]] || false
 }
 
-@test "custom: a committed codex+OpenRouter seat is skipped (no confirm); the claude seat after it gets confirm.1, with no codex note" {
-  printf 'reviewers:\n  custom:\n    cx:\n      harness: codex\n      model: qwen/x\n    cl:\n      harness: claude\n      model: qwen/y\n' >"$CFG/config.yml"
+@test "custom: a committed codex+OpenRouter seat gets confirm.1 with the codex note appended" {
+  printf 'reviewers:\n  custom:\n    cx:\n      harness: codex\n      model: qwen/x\n' >"$CFG/config.yml"
   run --separate-stderr "$SCRIPT" "$CFG"
   [ "$status" -eq 0 ]
-  has_line "reviewer.custom_slots=cl"
-  no_line_matching '^reviewer\.custom\.cx\.'
-  has_line "reviewer.custom.cl.needs_confirm=true"
-  has_line "confirm.1=Seat 'cl' is enabled only by the repo's committed config, and sends code to OpenRouter (model qwen/y), billed to your OPENROUTER_API_KEY."
+  has_line "reviewer.custom_slots=cx"
+  has_line "reviewer.custom.cx.harness=codex"
+  has_line "reviewer.custom.cx.provider=openrouter"
+  has_line "reviewer.custom.cx.api_key_env=OPENROUTER_API_KEY"
+  has_line "reviewer.custom.cx.needs_confirm=true"
+  has_line "confirm.1=Seat 'cx' is enabled only by the repo's committed config, and sends code to OpenRouter (model qwen/x), billed to your OPENROUTER_API_KEY. Note: codex can read any file on this machine (its sandbox blocks writes, not reads) and cannot ask OpenRouter to deny data collection."
   no_line_matching '^confirm\.2='
+  [[ "$stderr" != *"reviewer.custom.cx"* ]] || false
+}
+
+@test "custom: a committed claude+OpenRouter seat's confirm line has no codex note" {
+  printf 'reviewers:\n  custom:\n    cl:\n      harness: claude\n      model: qwen/y\n' >"$CFG/config.yml"
+  run --separate-stderr "$SCRIPT" "$CFG"
+  [ "$status" -eq 0 ]
+  has_line "confirm.1=Seat 'cl' is enabled only by the repo's committed config, and sends code to OpenRouter (model qwen/y), billed to your OPENROUTER_API_KEY."
   no_line_matching 'cannot ask OpenRouter'
-  [[ "$stderr" == *"rc-config: reviewer.custom.cx: harness codex supports provider ollama only"* ]] || false
 }
 
 @test "custom: a committed codex seat on Ollama gets no confirm line" {
@@ -1330,19 +1339,11 @@ pr_comments:
 }
 
 # ---------------------------------------------------------------------------
-# codex harness is Ollama-only; at most ONE committed-only seat per run
+# codex harness (ollama or OpenRouter); at most ONE committed-only seat per run
 # ---------------------------------------------------------------------------
 
-@test "custom: harness codex with provider openrouter (explicit) is skipped with a note" {
+@test "custom: harness codex with provider openrouter from a trusted layer is emitted with no confirm" {
   printf 'reviewers:\n  custom:\n    cx:\n      harness: codex\n      provider: openrouter\n      model: qwen/x\n' >"$CFG/config.local.yml"
-  run --separate-stderr "$SCRIPT" "$CFG"
-  [ "$status" -eq 0 ]
-  no_line_matching '^(# custom reviewers|reviewer\.custom|confirm\.)'
-  [[ "$stderr" == *"rc-config: reviewer.custom.cx: harness codex supports provider ollama only (codex can read any file on this machine and cannot deny OpenRouter data collection); use harness claude or opencode for OpenRouter; seat skipped"* ]] || false
-}
-
-@test "custom: harness codex with the DEFAULT provider (openrouter) is skipped, from any layer" {
-  printf 'reviewers:\n  custom:\n    cc:\n      harness: codex\n      model: qwen/x\n' >"$CFG/config.yml"
   user_cfg 'reviewers:
   custom:
     cu:
@@ -1351,9 +1352,17 @@ pr_comments:
 '
   run --separate-stderr "$SCRIPT" "$CFG"
   [ "$status" -eq 0 ]
-  no_line_matching '^(# custom reviewers|reviewer\.custom|confirm\.)'
-  [[ "$stderr" == *"rc-config: reviewer.custom.cu: harness codex supports provider ollama only"* ]] || false
-  [[ "$stderr" == *"rc-config: reviewer.custom.cc: harness codex supports provider ollama only"* ]] || false
+  has_line "reviewer.custom_slots=cx,cu"
+  has_line "reviewer.custom.cx.source=local"
+  has_line "reviewer.custom.cx.harness=codex"
+  has_line "reviewer.custom.cx.provider=openrouter"
+  has_line "reviewer.custom.cx.api_key_env=OPENROUTER_API_KEY"
+  has_line "reviewer.custom.cx.needs_confirm=false"
+  has_line "reviewer.custom.cu.source=user"
+  has_line "reviewer.custom.cu.provider=openrouter"
+  has_line "reviewer.custom.cu.needs_confirm=false"
+  no_line_matching '^confirm\.'
+  [[ "$stderr" != *"ollama only"* ]] || false
 }
 
 @test "custom: harness codex with provider ollama is still emitted" {
@@ -1366,12 +1375,13 @@ pr_comments:
   [[ "$stderr" != *"supports provider ollama only"* ]] || false
 }
 
-@test "custom: a skipped codex+OpenRouter seat does not use up the one committed seat" {
+@test "custom: a committed codex+OpenRouter seat uses up the one committed seat" {
   printf 'reviewers:\n  custom:\n    cx:\n      harness: codex\n      model: qwen/x\n    o:\n      harness: ocr\n      provider: ollama\n      model: qwen/y\n' >"$CFG/config.yml"
   run --separate-stderr "$SCRIPT" "$CFG"
   [ "$status" -eq 0 ]
-  has_line "reviewer.custom_slots=o"
-  [[ "$stderr" != *"only one seat from the repo's committed config"* ]] || false
+  has_line "reviewer.custom_slots=cx"
+  no_line_matching '^reviewer\.custom\.o\.'
+  [[ "$stderr" == *"rc-config: reviewer.custom.o: only one seat from the repo's committed config runs per review"* ]] || false
 }
 
 @test "custom: two committed Ollama seats -> only the first is emitted, the second is dropped with a note" {

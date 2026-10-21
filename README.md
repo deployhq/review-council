@@ -478,12 +478,12 @@ Bring your own models — Qwen, Kimi, GLM, DeepSeek, or a local Ollama model —
 
 | `harness` | What it is | Read-only boundary | Notes |
 |---|---|---|---|
-| `codex` | OpenAI's Codex CLI (`npm i -g @openai/codex`), no OpenAI account needed | the OS kernel sandbox (writes); reads are not confined | **Local Ollama models only.** Gets the council's prompt and a lens. |
+| `codex` | OpenAI's Codex CLI (`npm i -g @openai/codex`), no OpenAI account needed | the OS kernel sandbox (writes); reads are **not** confined | Gets the council's prompt and a lens. With OpenRouter, anything on your machine it reads can leave it, and it can't send `data_collection: deny` — prefer `claude` for OpenRouter. |
 | `claude` | Claude Code (already installed — it's the host) | only `Read`/`Grep`/`Glob` exist, confined to a snapshot of the repo | **The default for OpenRouter.** Gets the council's prompt and a lens; real turn limit (`max_turns`). |
-| `opencode` | opencode (`npm i -g opencode-ai@1.19.0`) | council-written deny-all config | Pinned to the tested version `1.19.0`. |
+| `opencode` | opencode (`npm i -g opencode-ai`) | council-written deny-all config | Version 1.19.0 or newer (guards re-tested on 1.19.3). |
 | `ocr` | Alibaba's OpenCodeReview (`npm i -g @alibaba-group/open-code-review`, plus `jq`) | fixed read-only tool set | Its own whole-diff review pipeline with a coverage line; no lens; slow. |
 
-**More harness examples** (`claude` and `opencode` take `provider: ollama` or `openrouter`; `codex` takes `ollama` only):
+**More harness examples** (every harness takes `provider: ollama` or `openrouter`):
 
 ```yaml
 reviewers:
@@ -495,7 +495,7 @@ reviewers:
       role: reviewer
       harness_options:
         max_turns: 40                   # default: settings.claude_max_turns
-    qwen-codex:                         # a local model through codex (codex seats are Ollama-only)
+    qwen-codex:                         # a local model through codex
       harness: codex
       provider: ollama
       model: qwen3.6:35b-a3b-coding-nvfp4
@@ -504,7 +504,7 @@ reviewers:
       provider: openrouter
       model: z-ai/glm-5
       harness_options:
-        timeout_minutes: 15             # default for codex/claude/opencode: settings.reviewer_timeout_seconds
+        timeout_minutes: 15             # default: 20 min for Ollama seats, settings.reviewer_timeout_seconds otherwise
 ```
 
 Several seats can run in one review. Two seats on the same vendor (two Kimi seats) count as **one** family, and seats never confirm each other's findings — that takes a native reviewer. A repo's committed config can add at most **one** seat per review. Every agent seat reviews a snapshot of the repo's **tracked** files (never `.env` or other untracked files), and an Ollama model must already be pulled.

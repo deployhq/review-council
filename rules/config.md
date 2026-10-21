@@ -227,9 +227,9 @@ run, with a note. `codex` and `opencode` do not report it (`model_check=argv`).
 
 ### Budget for a seat
 
-**`codex`, `claude`, `opencode`:** the cap is `harness_options.timeout_minutes`, else
-`settings.reviewer_timeout_seconds` (10 minutes by default) — the same limit as a native
-reviewer. Like every seat, they run on their own clock. **`ocr`:**
+**`codex`, `claude`, `opencode`:** the cap is `harness_options.timeout_minutes`, else **20
+minutes for an Ollama seat** (local models are slow on big prompts) and
+`settings.reviewer_timeout_seconds` (10 minutes by default) for an OpenRouter seat. Like every seat, they run on their own clock. **`ocr`:**
 
 `ocr` is usually the run's long pole, so its deadline comes from `settings.run_budget_seconds`,
 not `reviewer_timeout_seconds`: ⅓ of the budget is reserved for refutation and the judge, and
@@ -259,17 +259,19 @@ To give only this seat more time, set its `timeout_minutes`; there is no need to
   diff (a plan/document review skips it); the other harnesses review any target.
 - **Egress:** OpenRouter seats send review context to OpenRouter and the model's host, with
   `data_collection: deny` hard-coded on every request (never read from any config).
-  `codex` seats are **Ollama-only**: `codex` can read any file on the machine (its sandbox
-  blocks writes, not reads) and cannot send the `deny`. Ollama seats talk to `127.0.0.1:11434` only. Endpoints are council
+  **Except `codex`**: it cannot send the `deny`, and it can read any file on the machine (its
+  sandbox blocks writes, not reads), so with OpenRouter anything it reads can leave the
+  machine. Prefer `claude` or `opencode` for OpenRouter; a committed `codex` + OpenRouter seat's
+  confirm question says this. Ollama seats talk to `127.0.0.1:11434` only. Endpoints are council
   literals — there is no URL key.
 
 ### Which harness
 
 | `harness` | Read-only boundary | Takes the council prompt / lens | Best for |
 |---|---|---|---|
-| `codex` | **OS kernel** sandbox for writes (`--sandbox read-only`); reads are **not** confined | yes | **Ollama only.** The strongest write boundary; good for local models. |
+| `codex` | **OS kernel** sandbox for writes (`--sandbox read-only`); reads are **not** confined | yes | The strongest write boundary; best for local models. On OpenRouter: no `deny`, and reads are not confined. |
 | `claude` | tool list (`--tools=Read,Grep,Glob`) + `--restricted` (file tools confined to the snapshot) | yes | Any model behind an Anthropic-compatible endpoint (OpenRouter, Ollama); real turn limit (`max_turns`). |
-| `opencode` | council-written deny-by-default config (`external_directory: deny`) + two guards | yes | Pinned to the tested release (`1.19.0`); any other version is skipped. |
+| `opencode` | council-written deny-by-default config (`external_directory: deny`) + two guards | yes | Version 1.19.0 or newer; older versions are skipped. |
 | `ocr` | fixed four-tool set | no (own review pipeline, no lens) | Whole-diff review with a coverage manifest; slow. |
 
 Details and the evidence behind each boundary: `rules/providers.md` → Custom seats.
