@@ -1,0 +1,220 @@
+{
+  "_note": "Sanitized EXCERPT of real spike run 5 (ocr v1.12.13, qwen3.6:35b-a3b-coding-nvfp4 on local Ollama, 51 min). Paths genericized, content shortened, existing_code redacted, run_id/repository identity/item ids/fingerprints/hashes dropped. 4 of 9 comments kept, one per mapper case.",
+  "status": "complete",
+  "llm": {
+    "provider": "ollama",
+    "model": "qwen3.6:35b-a3b-coding-nvfp4"
+  },
+  "summary": {
+    "files_reviewed": 23,
+    "comments": 9,
+    "elapsed": "51m34s"
+  },
+  "message": "Review complete: 9 finding(s) across 23 selected item(s).",
+  "comments": [
+    {
+      "path": "docker/entrypoint.sh",
+      "start_line": 369,
+      "end_line": 377,
+      "severity": "high",
+      "category": "other",
+      "content": "When the domain is set, the endpoint is built by appending a fixed /v1/traces path to it. If the upstream OTLP path ever changes, every agent silently exports to a dead endpoint.",
+      "existing_code": "<redacted>"
+    },
+    {
+      "path": "docker/service/run",
+      "start_line": 27,
+      "end_line": 28,
+      "category": "maintainability",
+      "content": "The `||` + unconditional `exec` pattern on lines 27-28 is correct but slightly harder to reason about at a glance. Replacing it with an explicit if/then/else block makes the privilege-dropping intent visible.",
+      "existing_code": "<redacted>"
+    },
+    {
+      "path": "Makefile",
+      "start_line": 0,
+      "end_line": 0,
+      "category": "other",
+      "content": "`-e HEALTH=off` is added to some one-off make targets. Verify that every one-off container target that does not need health reporting has the same flag.",
+      "existing_code": "<redacted>"
+    },
+    {
+      "path": "dockerignore",
+      "start_line": 0,
+      "end_line": 0,
+      "category": "maintainability",
+      "content": "The ignore file uses a wildcard plus a negated *.py pattern to achieve the same effect as the explicit COPY list. This is redundant but not harmful.",
+      "existing_code": "<redacted>"
+    }
+  ],
+  "manifest": {
+    "schema_version": "ocr.run-manifest/v2",
+    "operation": "review",
+    "terminal_state": "complete",
+    "input": {
+      "mode": "range"
+    },
+    "execution": {
+      "ocr_version": "v1.12.13",
+      "provider": "ollama",
+      "model": "qwen3.6:35b-a3b-coding-nvfp4",
+      "configured_concurrency": 4
+    },
+    "coverage": {
+      "selected": [
+        {
+          "path": "scripts/check.sh"
+        },
+        {
+          "path": "config/agent-a.yaml"
+        },
+        {
+          "path": "compose.yaml"
+        },
+        {
+          "path": "src/health/settings.py"
+        },
+        {
+          "path": "src/health/runner.py"
+        },
+        {
+          "path": "docker/service/type"
+        },
+        {
+          "path": "docker/service/contents"
+        },
+        {
+          "path": "docker/service/run"
+        },
+        {
+          "path": "src/health/__init__.py"
+        },
+        {
+          "path": "src/health/classify.py"
+        },
+        {
+          "path": "docker/service/dependencies"
+        },
+        {
+          "path": "config/agent-b.yaml"
+        },
+        {
+          "path": "config/agent-c.yaml"
+        },
+        {
+          "path": "src/health/ping.py"
+        },
+        {
+          "path": "src/health/slots.py"
+        },
+        {
+          "path": ".dockerignore"
+        },
+        {
+          "path": "Makefile"
+        },
+        {
+          "path": "src/kit/model_env.py"
+        },
+        {
+          "path": "src/health/sentry.py"
+        },
+        {
+          "path": "docker/service/finish"
+        },
+        {
+          "path": "config/agent-d.yaml"
+        },
+        {
+          "path": "Dockerfile"
+        },
+        {
+          "path": "docker/entrypoint.sh"
+        }
+      ],
+      "completed": [
+        {
+          "path": "scripts/check.sh"
+        },
+        {
+          "path": "config/agent-a.yaml"
+        },
+        {
+          "path": "compose.yaml"
+        },
+        {
+          "path": "src/health/settings.py"
+        },
+        {
+          "path": "src/health/runner.py"
+        },
+        {
+          "path": "docker/service/type"
+        },
+        {
+          "path": "docker/service/contents"
+        },
+        {
+          "path": "docker/service/run"
+        },
+        {
+          "path": "src/health/__init__.py"
+        },
+        {
+          "path": "src/health/classify.py"
+        },
+        {
+          "path": "docker/service/dependencies"
+        },
+        {
+          "path": "config/agent-b.yaml"
+        },
+        {
+          "path": "config/agent-c.yaml"
+        },
+        {
+          "path": "src/health/ping.py"
+        },
+        {
+          "path": "src/health/slots.py"
+        },
+        {
+          "path": ".dockerignore"
+        },
+        {
+          "path": "Makefile"
+        },
+        {
+          "path": "src/kit/model_env.py"
+        },
+        {
+          "path": "src/health/sentry.py"
+        },
+        {
+          "path": "docker/service/finish"
+        },
+        {
+          "path": "config/agent-d.yaml"
+        },
+        {
+          "path": "Dockerfile"
+        },
+        {
+          "path": "docker/entrypoint.sh"
+        }
+      ],
+      "reused": [],
+      "failed": [],
+      "waived": []
+    },
+    "elapsed_ms": 3093821
+  },
+  "tool_calls": {
+    "total": 78,
+    "by_tool": {
+      "code_comment": 8,
+      "code_search": 11,
+      "file_read": 58,
+      "file_read_diff": 1
+    }
+  }
+}

@@ -13,7 +13,7 @@ Single-model code review has blind spots. Different models catch different thing
 - **Genuine disagreements** (a reviewer's counter-evidence refutes another's finding, or an unresolved conflict survives the judge) = documented as a dropped/refuted finding or a Dissenting Opinion, not just discarded
 - **Learns from your triage** — a human-confirmed capture gate after each report distills your skip decisions into persisted false-positive suppressions & conventions in a committed `learnings.md`, recalled automatically on future runs
 
-The result: fewer false positives, broader coverage, and a clear priority order. Review Council is orchestrated locally, inside a single Claude Code session, and by default only ever prints a report — it never pushes commits or posts to a PR on its own. Optionally (off by default) it can post a single review-digest comment to the PR after you confirm — see [Posting to PRs](#posting-to-prs). Note the data egress this implies: when Codex, Google, or Perplexity are enabled, the gathered review context (diff, file contents, etc.) is sent to those third-party tools/APIs — only Claude (the native subagent) stays fully local. Codex's own shell access during review is sandboxed read-only (`codex exec --sandbox read-only`) — it can read the repo but cannot write to it or reach the network.
+The result: fewer false positives, broader coverage, and a clear priority order. Review Council is orchestrated locally, inside a single Claude Code session, and by default only ever prints a report — it never pushes commits or posts to a PR on its own. Optionally (off by default) it can post a single review-digest comment to the PR after you confirm — see [Posting to PRs](#posting-to-prs). Note the data egress this implies: when Codex, Google, or Perplexity are enabled, the gathered review context (diff, file contents, etc.) is sent to those third-party tools/APIs — only Claude (the native subagent) stays fully local. An opt-in [custom reviewer seat](#custom-reviewer-seats-ocr) sends it to OpenRouter and the model's host (or nowhere, with a local Ollama model). Codex's own shell access during review is sandboxed read-only (`codex exec --sandbox read-only`) — it can read the repo but cannot write to it or reach the network.
 
 ## Quick Start
 
@@ -60,6 +60,7 @@ flowchart TD
     H --> J["Codex (CLI/MCP)<br/>Correctness + overlay"]
     H --> J2["Google — agy→gemini<br/>Correctness + overlay"]
     H --> J3["Perplexity (API)<br/>Dependency / CVE"]
+    H -.-> CS["Custom seat (opt-in)<br/>your model via ocr · no lens"]
 
     L{"Step 4: Refutation gate"}
     N["Step 5: Judge<br/>fingerprint, dedup, recalibrate,<br/>suppress (learnings), ledger"]
@@ -69,6 +70,7 @@ flowchart TD
     J --> K2
     J2 --> K2
     J3 --> K2
+    CS -.-> K2
 
     K2 -->|"All valid/clean"| L
     K2 -->|"Some failed"| K3["Retry (1x max)<br/>or ask user / degrade"]
@@ -120,7 +122,7 @@ flowchart TD
 
 **Well-formed check (Step 3.5).** After Round 1, each reviewer's response is checked for required sections and fields (the finding schema: `severity`, `confidence`, `location`, `symbol`, `concern`, `issue`, `why_it_matters`, `recommendation`, `how_to_verify`, `source`) — a structural check, not a truth check. Malformed responses are retried once; if still failing, the orchestrator asks whether to proceed with the remaining reviewers or abort. Set `settings.auto_retry: true` (env: `RC_AUTO_RETRY=true`) to skip the prompt (useful in CI).
 
-**Refutation pass (Step 4).** Gated on `settings.verify` (default on). Each candidate finding is routed to an isolated, different-family verifier — one that never sees the synthesis or any other reviewer's opinion, only the finding and the actual code — which returns **UPHELD** (positive supporting evidence), **REFUTED** (positive counter-evidence it's not a bug), or **INCONCLUSIVE** (can't decide; absence of proof is *never* REFUTED). Skipped entirely in solo-Claude mode, or once the run budget is spent — see [Verification & Badges](#verification--badges).
+**Refutation pass (Step 4).** Gated on `settings.verify` (default on). Each candidate finding is routed to an isolated, different-family verifier — one that never sees the synthesis or any other reviewer's opinion, only the finding and the actual code — which returns **UPHELD** (positive supporting evidence), **REFUTED** (positive counter-evidence it's not a bug), or **INCONCLUSIVE** (can't decide; absence of proof is *never* REFUTED). Skipped in solo-Claude mode (for the native findings — a distinct [custom seat](#custom-reviewer-seats-ocr)'s findings are still refuted by a fresh Claude verifier), or once the run budget is spent — see [Verification & Badges](#verification--badges).
 
 **Judge (Step 5).** A single active judge computes a canonical fingerprint per finding, deduplicates across models, and recalibrates severity/confidence: +1 tier when a finding was raised by ≥2 reviewer families *or* UPHELD by a different family, drop only when REFUTED with counter-evidence, keep-and-tag `[unverified]` when INCONCLUSIVE or unverified. A single-reviewer `critical` is never demoted for being unverified — it stays Critical, tagged `[1 reviewer · unverified]`. The judge also suppresses findings matching a learnings Suppression and emits a per-finding ledger before the prose report.
 
@@ -151,6 +153,7 @@ graph LR
 | **Codex** (OpenAI) | CLI (`codex exec`) / MCP fallback | `which codex` or MCP tool |
 | **Google** (Antigravity / Gemini) | CLI — `agy` preferred, `gemini` fallback | `which agy` or `which gemini` |
 | **Perplexity** | Sonar API (`curl`) | `PERPLEXITY_API_KEY` env var |
+| **Custom seat** (opt-in, your model) | `ocr` CLI via `scripts/rc-ocr.sh` | configured in `reviewers.custom` + `which ocr jq` (+ the OpenRouter key var) — see [Custom reviewer seats](#custom-reviewer-seats-ocr) |
 
 Minimum 2 reviewers needed for council mode (`settings.min_reviewers`, default 2). Claude and the dedicated Security reviewer are both native and always run, but they are the **same model family (Claude)** — council mode and the refutation pass need at least one reviewer from a **different family** (Codex, Google, or Perplexity) to cross-verify against. With only Claude-family reviewers (Claude + Security) available, the run proceeds in single-reviewer mode. Providers are auto-detected at runtime — no manual configuration needed.
 
@@ -187,12 +190,13 @@ Providers are auto-detected at runtime. Run `/review-council:setup` to check whi
 ### Optional dependencies
 
 - **[yq](https://github.com/mikefarah/yq) (mikefarah v4)** — enables the optional config file (`.review-council/config.yml`). Run `/review-council:setup` and, with your consent, it will install `yq` for you; or install it yourself with `brew install yq` (macOS) or see the [yq install guide](https://github.com/mikefarah/yq#install). **Without `yq`, config files are ignored and the plugin runs on built-in defaults + `RC_*` env overrides** — still fully functional. (Heads-up: a *different* Python tool is also named `yq`; Review Council needs **mikefarah/yq**, whose `yq --version` prints a `github.com/mikefarah/yq` URL.)
+- **[`ocr`](https://www.npmjs.com/package/@alibaba-group/open-code-review) + [`jq`](https://jqlang.org/)** — only for an opt-in [custom reviewer seat](#custom-reviewer-seats-ocr): `npm i -g @alibaba-group/open-code-review`. `/review-council:setup` reports both (print-only — it never installs them).
 - **[bats](https://github.com/bats-core/bats-core) + yq** — only for running the unit-test suite (`bats tests/unit/`); not needed to use the plugin.
 - **[Docker](https://www.docker.com/)** — optional, opt-in fallback for the static-analysis scan (Step 2.5): if a configured core scanner (`gitleaks`, `trufflehog`, `semgrep`, `osv-scanner`) isn't installed and Docker is running, the scan can run it from its official image instead — no local install needed. Set `RC_STATIC_DOCKER_TOOLS` (or confirm at the run-time prompt) to opt in; see [Static Analysis](#static-analysis-phase-2-step-25) → "Run a missing tool via Docker".
 
 ### Configuration
 
-Review Council works with **zero configuration**. Optionally, add a `.review-council/config.yml` to the repo to control the reviewer roster, review lenses, and run settings; a gitignored `.review-council/config.local.yml` holds per-machine overrides. Precedence is applied **per key**: **env > config.local.yml > config.yml > built-in default**. `/review-council:setup` can scaffold both files, and the full schema (including the `reviewers:` and `lenses:` blocks) is documented in [`rules/config.md`](rules/config.md). Config files are parsed with `yq` (see Optional dependencies above); without it the plugin falls back to defaults + the environment variables below.
+Review Council works with **zero configuration**. Optionally, add a `.review-council/config.yml` to the repo to control the reviewer roster, review lenses, and run settings; a gitignored `.review-council/config.local.yml` holds per-machine overrides. Precedence is applied **per key**: **env > config.local.yml > config.yml > built-in default**. `/review-council:setup` can scaffold both files, and the full schema (including the `reviewers:` and `lenses:` blocks) is documented in [`rules/config.md`](rules/config.md). Config files are parsed with `yq` (see Optional dependencies above); without it the plugin falls back to defaults + the environment variables below. Because a repo you review can commit its own `config.yml` — or even a `config.local.yml` — security-sensitive keys are honoured only from **trusted** places: an untracked `config.local.yml`, your environment, and (for [custom reviewer seats](#custom-reviewer-seats-ocr)) `~/.review-council/config.yml`.
 
 Each run setting (`settings.*`) is also tunable via its `RC_*` environment variable (env wins over both config files); the full list is in [`rules/config.md`](rules/config.md). All of them:
 
@@ -380,6 +384,8 @@ review-council/
 │   ├── rc-static-scan.sh      # Static-analysis runner (Phase 2)
 │   ├── rc-learn.sh            # learnings.md writer — Step 7 capture (Phase 3)
 │   ├── rc-post.sh             # PR review-digest posting engine — Step 6.6 (v0.10.0)
+│   ├── rc-ocr.sh              # Custom reviewer seat dispatch: isolated ocr run + JSON → §3.1 mapper
+│   ├── rc-lib-family.sh       # Model slug → family map (shared by rc-config.sh and rc-ocr.sh)
 │   ├── rc-lib-timeout.sh      # Shared timeout/watchdog helper
 │   └── sync-metadata.sh       # Propagates plugin.json's description to README/CLAUDE.md/marketplace.json
 ├── tests/
@@ -466,6 +472,79 @@ pr_comments:
 
 This reverses the report-only posture behind an explicit opt-in; the digest (findings + your decisions) is sent to GitHub when you post.
 
+## Custom reviewer seats (ocr)
+
+Bring your own model — Qwen, Kimi, GLM, DeepSeek, or a local Ollama model — as one extra Round-1 reviewer, with no plugin change. The seat borrows Alibaba's OpenCodeReview CLI (`ocr`) as its harness: `ocr` supplies the read-only tool loop and its review pipeline; the **model** is the reviewer. **Opt-in and off by default** — no seat exists until you configure one, and no model is ever chosen for you.
+
+Put it in your **user layer**, `~/.review-council/config.yml` (trusted, applies to every repo you review — or an *untracked* `.review-council/config.local.yml` for one repo):
+
+```yaml
+reviewers:
+  custom:
+    qwen-local:                         # a local model: nothing leaves your machine
+      harness: ocr
+      provider: ollama
+      model: qwen3.6:35b-a3b-coding-nvfp4
+      role: signal                      # default
+```
+
+```yaml
+reviewers:
+  custom:
+    kimi:                               # an OpenRouter model, billed to your key
+      harness: ocr
+      provider: openrouter
+      model: moonshotai/kimi-k2.7-code
+      role: reviewer
+      api_key_env: OPENROUTER_API_KEY   # the NAME of the env var holding the key (this is the default)
+      harness_options:
+        effort: medium                  # low (default) | medium | high — ocr's review rounds
+        timeout_minutes: 30             # default: derived from settings.run_budget_seconds
+        concurrency: 4
+        max_tokens_budget: 2000000
+        flags: ["--max-tools", "80"]    # extra ocr flags — trusted files only
+        env: { OCR_LLM_TIMEOUT: "600" } # extra ocr env — trusted files only
+```
+
+Install the harness with `npm i -g @alibaba-group/open-code-review` (plus `jq`). One seat runs per review; the first available one wins, and seats from your own files (user file, untracked `config.local.yml`) always come before a repo's committed seats. Full schema, guards and defaults: [`rules/config.md`](rules/config.md) → `reviewers.custom`.
+
+**`role`** decides how the council treats the seat:
+
+- **`signal`** (default) — its findings appear in a separate **"Extra signals (<slot> via ocr)"** section of the report. It never counts toward `min_reviewers`.
+- **`reviewer`** — its findings are merged into the main list. It counts toward `min_reviewers` only when its model is a **distinct** family and it covered the whole diff; a partial or skipped run demotes it to `signal` for that review.
+
+Either way the seat is a **finder only**: it never verifies (or refutes) anyone else's finding, gets no lens, and never lifts solo-Claude mode for the native reviewers. Its family comes from the model slug: `Qwen`, `Moonshot` (Kimi), `Zhipu` (GLM) and `DeepSeek` are **distinct** — their findings go through the refutation pass and can corroborate another family's. A Claude, GPT or Gemini model, or anything the map doesn't know, is allowed but **non-distinct**: its findings stay `[unverified]` and never count as a second family.
+
+**`harness_options`** — `effort`, `concurrency`, `max_tokens_budget` and `timeout_minutes` are validated and accepted from any config file. `flags` and `env` are free-form, so they are honoured only from trusted files (your user layer or an untracked `config.local.yml`); flags that would undo the seat's isolation (`--rule`, `--provider`, `--model`, `--from`/`--to`, `-o`, …) are never accepted.
+
+**Egress.**
+
+| `provider` | Where review context goes |
+|---|---|
+| `openrouter` | OpenRouter and the host serving the model. `data_collection: deny` is hard-coded on every request — it is not configurable and never read from any config. It governs training on your data, not where the code goes. |
+| `ollama` | Nowhere — `127.0.0.1:11434` only. |
+
+Endpoints are fixed in code (there is no URL key), the key value is read from your environment and never written anywhere, and each run uses a throwaway `HOME`, so your own `~/.opencodereview/` is never read or changed. The reviewed repo's own `ocr` rules are displaced by a neutral council rule file, checked before every run.
+
+**The human gate.** If a repo you review switches on a seat **only** through its committed `config.yml`, and that seat would send code to OpenRouter on your key, the review asks you once at the start and skips the seat unless you say yes. A committed `config.yml` can never set `api_key_env`, `flags` or `env`. (A `config.local.yml` that git tracks counts as committed.)
+
+**The coverage line.** `ocr` reviews the diff itself, and at the default budget it often runs out of time before every file is done. So whenever the seat ran — complete, partial, or with zero findings — the report prints what it actually covered, under the Pipeline line (and in the PR digest):
+
+```
+ocr · qwen (qwen/qwen3.8-max-0902): reviewed 14/23 selected files · 9 failed: provider (9)
+      · 20 of 43 changed files excluded before review · 1 comment dropped (path not reviewed) · 0 warnings
+```
+
+A file the seat did not review is not a file the council calls clean. For fuller coverage, raise `settings.run_budget_seconds` (the seat gets ⅔ of it, up to 180 minutes) or set the seat's `timeout_minutes` to give only that seat more time. The seat runs on its own clock: a slow seat makes the run longer, but never skips the double-check (refutation) of the other reviewers' findings.
+
+**Choosing a model (non-normative).** From our spikes on one 43-file diff:
+
+- **Qwen3.8-Max via OpenRouter** — the best precision, and the only model to find a new real bug; slow (one host, about 30 tok/s): 5/23 files in 16–26 min, 14/23 after 2 h 43 min; about $9.70 for three runs.
+- **`qwen3.6:35b-a3b` MoE on local Ollama** (M5 Pro, 48 GB) — fast, free, and the code never leaves the machine: 23/23 files in 51 min. Weak: about 1 partly-valid comment in 9.
+- **Kimi K2.7-code via OpenRouter** — untested; more hosts, about $4 a run estimated, and a distinct family.
+
+None met our go bar (full coverage in under ~10 min for under ~$2, with a verified new finding). Treat the seat's output as leads for the council to check — that is what `role: signal` is for.
+
 ## GitHub Actions (Roadmap)
 
 Review Council can be triggered from CI as a reusable GitHub Action workflow — similar to [claude-fix-pr](https://github.com/deployhq/claude-fix-pr).
@@ -491,7 +570,7 @@ This is planned for a future release.
 
 ## Adding New Reviewers (Extensibility)
 
-The architecture supports any model accessible via CLI or API:
+The architecture supports any model accessible via CLI or API. **To add a model without changing the plugin**, configure a [custom reviewer seat](#custom-reviewer-seats-ocr) instead — the rest of this section is about adding a new built-in provider.
 
 ```mermaid
 graph TB

@@ -1,0 +1,118 @@
+{
+  "_synthetic": true,
+  "_note": "SYNTHETIC partial run (no real failing run with completions was observed yet). failed[] item shape copied from a real ocr v1.12.13 run against an unreachable endpoint; the provider item is assumed.",
+  "status": "partial",
+  "message": "Review partial: 6 finding(s); 2 of 5 selected item(s) failed.",
+  "warnings": [
+    {
+      "type": "llm",
+      "file": "src/a.py",
+      "message": "retry"
+    }
+  ],
+  "comments": [
+    {
+      "path": "src/a.py",
+      "start_line": 10,
+      "end_line": 12,
+      "severity": "critical",
+      "category": "security",
+      "content": "SQL is built by string concatenation. An attacker controls the id parameter."
+    },
+    {
+      "path": "src/a.py",
+      "start_line": 20,
+      "end_line": 20,
+      "severity": "HIGH",
+      "category": "bug",
+      "content": "Off-by-one in the loop bound.",
+      "suggestion_code": "for i in range(n):\n    pass"
+    },
+    {
+      "path": "src/b.py",
+      "start_line": 5,
+      "end_line": 5,
+      "severity": "medium",
+      "category": "performance",
+      "content": "Quadratic scan over the list."
+    },
+    {
+      "path": "src/b.py",
+      "start_line": 7,
+      "end_line": 7,
+      "severity": "low",
+      "category": "Style Issue!",
+      "content": "Name is unclear."
+    },
+    {
+      "path": "src/c.py",
+      "start_line": 3,
+      "end_line": 4,
+      "severity": null,
+      "category": "other",
+      "content": "Null severity case."
+    },
+    {
+      "path": "src/c.py",
+      "start_line": 9,
+      "end_line": 9,
+      "severity": "blocker",
+      "category": "other",
+      "content": "Unknown severity word."
+    }
+  ],
+  "manifest": {
+    "schema_version": "ocr.run-manifest/v1",
+    "terminal_state": "partial",
+    "execution": {
+      "ocr_version": "v1.12.13",
+      "provider": "openrouter",
+      "model": "qwen/qwen3.8-max-0902"
+    },
+    "coverage": {
+      "selected": [
+        {
+          "path": "src/a.py"
+        },
+        {
+          "path": "src/b.py"
+        },
+        {
+          "path": "src/c.py"
+        },
+        {
+          "path": "src/d.py"
+        },
+        {
+          "path": "src/e.py"
+        }
+      ],
+      "completed": [
+        {
+          "path": "src/a.py"
+        },
+        {
+          "path": "src/b.py"
+        }
+      ],
+      "reused": [
+        {
+          "path": "src/c.py"
+        }
+      ],
+      "failed": [
+        {
+          "path": "src/d.py",
+          "classification": "provider",
+          "reason": "HTTP 402: insufficient credits"
+        },
+        {
+          "path": "src/e.py",
+          "classification": "timeout",
+          "reason": "LLM request timed out; configure OCR_LLM_TIMEOUT or provider timeout_sec"
+        }
+      ],
+      "waived": []
+    }
+  }
+}
