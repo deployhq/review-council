@@ -534,7 +534,7 @@ reviewers:
       api_key_env: OPENROUTER_API_KEY   # the NAME of the env var holding the key (this is the default)
       harness_options:
         effort: medium                  # low (default) | medium | high — ocr's review rounds
-        timeout_minutes: 30             # default: derived from settings.run_budget_seconds
+        timeout_minutes: 30             # default: 20 for Ollama, else derived from settings.run_budget_seconds
         concurrency: 4
         max_tokens_budget: 2000000
         flags: ["--max-tools", "80"]    # extra ocr flags — trusted files only
@@ -570,7 +570,7 @@ ocr · qwen (qwen/qwen3.8-max-0902): reviewed 14/23 selected files · 9 failed: 
       · 20 of 43 changed files excluded before review · 1 comment dropped (path not reviewed) · 0 warnings
 ```
 
-A file the seat did not review is not a file the council calls clean. For fuller coverage, raise `settings.run_budget_seconds` (the seat gets ⅔ of it, up to 180 minutes) or set the seat's `timeout_minutes` to give only that seat more time. The seat runs on its own clock: a slow seat makes the run longer, but never skips the double-check (refutation) of the other reviewers' findings.
+A file the seat did not review is not a file the council calls clean. For fuller coverage, set the seat's `timeout_minutes` to give only that seat more time, or — for an OpenRouter seat — raise `settings.run_budget_seconds` (the seat gets ⅔ of it, up to 180 minutes). An Ollama seat defaults to 20 minutes, multiplied by `ocr`'s rounds (`effort` medium ×2, high ×3). The seat runs on its own clock: a slow seat makes the run longer, but never skips the double-check (refutation) of the other reviewers' findings.
 
 **Choosing a model (non-normative).** From our spikes on one 43-file diff:
 
