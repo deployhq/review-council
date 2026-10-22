@@ -202,6 +202,12 @@ reviewers' findings; and **seats never corroborate each other** — agreement be
 alone (even two distinct families) is not cross-family corroboration; it needs a native
 reviewer. An `ocr` seat gets no lens; `codex`/`claude`/`opencode` seats get one.
 
+**Several local (Ollama) seats** share one Ollama server and run at the same time, so on a
+large diff they can starve each other — seen: an `ocr` signal reviewed 1 of 15 files while a
+`codex` reviewer seat held the GPU. Not handled yet; a likely follow-up is to run `reviewer`
+seats first and defer `signal` seats. Until then, prefer **one local model for every local
+seat** (Ollama loads it once).
+
 ### Family
 
 Computed by the reader from the model slug — never configured. Strip leading `~`, lowercase,
