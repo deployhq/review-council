@@ -568,7 +568,7 @@ The only values you interpolate are the reader-validated slot name, the `<dir>` 
 
 ### Custom seat agent (every harness)
 
-Each custom seat runs inside its **own `general-purpose` Agent**, dispatched in the Round-1 message like the other reviewers, so every seat shows up in the agent list with its status. The agent only launches the seat's script and waits; it never builds the command, reads config, or reads the review. Fill in the command exactly as its subsection's step 2 gives it (`rc-ocr.sh` for `ocr`, `rc-seat.sh` for the others) and give the agent this prompt:
+Each custom seat runs inside its **own `general-purpose` Agent**, dispatched in the Round-1 message like the other reviewers, so every seat shows up in the agent list with its status. Give that Agent call the description **`seat <slot>`** (e.g. `seat qwen-codex`), so a seat is told apart from the Codex and Google wrappers, which are `general-purpose` agents too. The agent only launches the seat's script and waits; it never builds the command, reads config, or reads the review. Fill in the command exactly as its subsection's step 2 gives it (`rc-ocr.sh` for `ocr`, `rc-seat.sh` for the others) and give the agent this prompt:
 
 > You are running the custom reviewer seat **`<slot>`** (`<model>` via `<harness>`) for a Review Council review. Run this command **once** with the Bash tool and **`run_in_background: true`** — the seat can run for longer than a foreground call allows:
 > ```bash
