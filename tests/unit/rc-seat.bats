@@ -1262,3 +1262,68 @@ OC_MSG='Your complete task and the full review context are in the attached file 
   [ "$(meta family)" = OpenAI ]
   [ "$(meta distinct)" = false ]
 }
+
+# ===========================================================================
+# Provider key in the answer (OpenRouter): the seat is SKIPPED, never used
+# ===========================================================================
+
+# A key-shaped fake (64 hex chars); not a credential. Assembled at run time so
+# the file never holds a literal that secret scanners take for a real key.
+FAKE_OR_KEY="sk-or-v1-$(printf '%s' 0123456789abcdef 00112233445566778899aabbccddeeff 0f1e2d3c4b5a6978)"
+
+# leak_seat <harness> <leak line>: OpenRouter seat whose answer carries <leak line>.
+leak_seat() {
+  seat "$1" openrouter
+  export OPENROUTER_API_KEY="$FAKE_OR_KEY"
+  { cat "$FIX/review-ok.md"; printf '\n%s\n' "$2"; } >"$CTL/answer"
+}
+
+@test "key check: an answer containing the key verbatim is SKIPPED and not written" {
+  leak_seat codex "env: OPENROUTER_API_KEY=$FAKE_OR_KEY"
+  run_seat
+  [ "$status" -eq 0 ]
+  [ "$output" = "SKIPPED: s1 (codex) unavailable — codex: answer contained the provider key" ]
+  refute_in "$OUTF" -qF "0123456789abcdef"
+}
+
+@test "key check: spaced-out, upper-cased and split key text is caught" {
+  spaced="$(printf '%s' "$FAKE_OR_KEY" | tr 'a-z' 'A-Z' | sed 's/./& /g')"
+  leak_seat codex "The key, one character at a time: $spaced"
+  run_seat
+  [ "$output" = "SKIPPED: s1 (codex) unavailable — codex: answer contained the provider key" ]
+}
+
+@test "key check: the key reversed is caught" {
+  rev="$(printf '%s' "$FAKE_OR_KEY" | awk '{ r = ""; for (i = length($0); i > 0; i--) r = r substr($0, i, 1); print r }')"
+  leak_seat codex "reversed: $rev"
+  run_seat
+  [ "$output" = "SKIPPED: s1 (codex) unavailable — codex: answer contained the provider key" ]
+}
+
+@test "key check: the key in base64 is caught" {
+  leak_seat codex "b64: $(printf '%s' "$FAKE_OR_KEY" | base64 | tr -d '\n')"
+  run_seat
+  [ "$output" = "SKIPPED: s1 (codex) unavailable — codex: answer contained the provider key" ]
+}
+
+@test "key check: other hex (a commit SHA, a short key fragment) is not a match" {
+  leak_seat codex "Introduced in 9f8e7d6c5b4a39281706f5e4d3c2b1a098765432; prefix 0123456789ab."
+  run_seat
+  [ "$(meta status)" = complete ]
+  [ "${lines[0]}" = "TOOL: s1 (qwen/qwen3-coder via codex)" ]
+}
+
+@test "key check: applies to every OpenRouter seat (claude)" {
+  leak_seat claude "$FAKE_OR_KEY"
+  run_seat
+  [ "$output" = "SKIPPED: s1 (claude) unavailable — claude: answer contained the provider key" ]
+}
+
+@test "key check: a failing base64 does not skip a clean answer" {
+  leak_seat codex "nothing secret here"
+  mkdir -p "$BATS_TEST_TMPDIR/nob64"
+  printf '#!/bin/sh\nexit 1\n' >"$BATS_TEST_TMPDIR/nob64/base64"
+  chmod +x "$BATS_TEST_TMPDIR/nob64/base64"
+  PATH="$BATS_TEST_TMPDIR/nob64:$PATH" run_seat
+  [ "$(meta status)" = complete ]
+}

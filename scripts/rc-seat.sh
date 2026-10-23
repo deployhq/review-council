@@ -664,12 +664,14 @@ else
     printf '%s\n' "$LAST_RC" >"$T/run.rc"
   )
 fi
-KEY=""
 RUN_RC="$(cat "$T/run.rc" 2>/dev/null || echo 1)"
 [ -n "$RUN_RC" ] || RUN_RC=1
 
 case "$RUN_RC" in
-  124 | 137 | 143) skip "timed out after ${CAP}s" ;;
+  124 | 137 | 143)
+    KEY=""
+    skip "timed out after ${CAP}s"
+    ;;
 esac
 
 # ---------------------------------------------------------------------------
@@ -756,6 +758,42 @@ case "$HARNESS" in
     "$JQ" -Rr 'select((try (fromjson | type) catch "text") != "object")' "$OUT" >>"$ERRTXT" 2>/dev/null
     ;;
 esac
+
+# Provider key in the answer: a prompt-injected model can read the key (codex
+# runs shell commands, and the key is in codex's own environment). Discard the
+# whole answer when it carries the key: plain, spaced, split or upper-cased
+# (any 16 of its hex characters in a row, after dropping everything else),
+# reversed, or base64. The key travels on stdin only, never argv or disk.
+if [ -n "$KEY" ]; then
+  tr -d ' \t\r\n' <"$ANSWER" >"$T/answer.flat"
+  # never an empty pattern list: BSD grep -f then matches every line
+  B64="$(printf '%s' "$KEY" | base64 2>/dev/null | tr -d '\n')"
+  if printf '%s\n' "$KEY" | awk -v f="$ANSWER" '
+      function hexonly(s) { s = tolower(s); gsub(/[^0-9a-f]/, "", s); return s }
+      NR == 1 { k = hexonly($0) }
+      END {
+        n = length(k) < 16 ? length(k) : 16
+        if (n < 8) exit 1
+        r = ""
+        for (i = length(k); i > 0; i--) r = r substr(k, i, 1)
+        m = 0
+        for (i = 1; i + n - 1 <= length(k); i++) { w[++m] = substr(k, i, n); w[++m] = substr(r, i, n) }
+        c = ""
+        while ((getline l < f) > 0) {
+          s = c hexonly(l)
+          for (j = 1; j <= m; j++) if (index(s, w[j])) exit 0
+          c = length(s) < n ? s : substr(s, length(s) - n + 2)
+        }
+        exit 1
+      }' ||
+    { [ -n "$B64" ] && printf '%s\n' "$B64" | grep -qF -f - "$T/answer.flat"; }; then
+    KEY=""
+    B64=""
+    skip "answer contained the provider key"
+  fi
+fi
+KEY=""
+B64=""
 
 # valid: non-empty AND heading-anchored Findings + Overall Assessment lines
 # (the same regexes as rc-invoke-provider.sh's classify OK-guard).
