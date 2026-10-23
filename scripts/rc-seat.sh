@@ -623,6 +623,10 @@ case "$HARNESS" in
       set -- "$@" -c "model_providers.openrouter={ name='OpenRouter', base_url='https://openrouter.ai/api/v1', wire_api='responses', env_key='OPENROUTER_API_KEY' }" \
         -c model_provider="openrouter"
     fi
+    # Strip *KEY*/*SECRET*/*TOKEN* vars from the commands codex spawns (its
+    # default forwards them), so a prompt-injected `env` cannot print the key;
+    # codex itself still reads OPENROUTER_API_KEY for its own requests.
+    set -- "$@" -c shell_environment_policy.ignore_default_excludes=false
     set -- "$@" --sandbox read-only --skip-git-repo-check -m "$MODEL" -o "$LAST"
     ;;
   claude)
