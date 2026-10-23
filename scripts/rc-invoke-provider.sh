@@ -56,6 +56,8 @@
 #                            retry never exceed one RC_REVIEWER_TIMEOUT.
 #   RC_GOOGLE_ADD_DIR        optional, agy-only: appends --add-dir "<val>".
 #   RC_GOOGLE_MODEL          optional, agy-only: appends --model "<val>".
+#   RC_ARGV_MAX_BYTES        TEST-ONLY: overrides the agy/gemini argv-size
+#                            threshold (default 120000; 900000 on Darwin).
 #
 # stdout: review mode — on success, "TOOL: <Label>" then the raw review text;
 #         on total failure, a single "SKIPPED: ..." line attributed to the
@@ -145,6 +147,80 @@ spent=0
 WORKDIR="$(mktemp -d "${TMPDIR:-/tmp}/rc-invoke.XXXXXX")"
 trap 'rm -rf "$WORKDIR"' EXIT
 
+# Probe mode has no prompt file, but codex reads its prompt from a FILE on
+# stdin (see build_and_run), so the trivial probe prompt is materialised here.
+if [ "$MODE" = probe ]; then
+  prompt_file="$WORKDIR/probe-prompt.txt"
+  printf '%s\n' "$prompt" >"$prompt_file"
+fi
+
+# ---------------------------------------------------------------------------
+# argv-size guard for the Google slot (agy / gemini)
+# ---------------------------------------------------------------------------
+# agy/gemini take the prompt as ONE -p argument. Linux caps a single argv
+# element at 128 KB (MAX_ARG_STRLEN) and fails the exec with E2BIG; real review
+# prompts are 200-300 KB, so on Linux (CI) the Google slot would always fail.
+# macOS has no per-argument cap (only the ~1 MB total ARG_MAX), which is why the
+# argv path works there today.
+#
+# The argv path is the ONLY one verified live, so it is kept byte-identical
+# whenever it is safe: prompt <= 120000 bytes on any OS (headroom under 128 KB),
+# or <= 900000 bytes on Darwin (headroom under ARG_MAX for env + other args).
+# Every realistic prompt on macOS therefore takes the unchanged path. Only a
+# prompt that WOULD hit E2BIG takes the large-prompt path in build_and_run.
+#
+# RC_ARGV_MAX_BYTES is a TEST-ONLY hook (tests/unit/rc-invoke-provider.bats):
+# it overrides the computed threshold so the large path can be exercised on
+# macOS. It is an env var (never read from config); a non-integer or absurdly
+# long value is ignored with a note, so it can never reach the arithmetic
+# below as anything but a short digit string.
+argv_max_bytes() {
+  _amb_v="${RC_ARGV_MAX_BYTES:-}"
+  if [ -n "$_amb_v" ]; then
+    case "$_amb_v" in
+      *[!0-9]*) ;;
+      *)
+        if [ "${#_amb_v}" -le 9 ]; then
+          echo "$_amb_v"
+          return 0
+        fi
+        ;;
+    esac
+    echo "note: ignoring invalid RC_ARGV_MAX_BYTES" >&2
+  fi
+  if [ "$(uname -s 2>/dev/null || true)" = Darwin ]; then
+    echo 900000
+  else
+    echo 120000
+  fi
+}
+PROMPT_BYTES="$(wc -c <"$prompt_file" | tr -d ' ')"
+LARGE_PROMPT=0
+if [ "$PROMPT_BYTES" -gt "$(argv_max_bytes)" ]; then
+  LARGE_PROMPT=1
+fi
+
+# Fixed -p messages for the large-prompt path (constants; the only variable
+# part is agy's prompt-file path, which this script itself generated under the
+# mktemp'd $WORKDIR — never anything from the prompt or from config).
+AGY_FILE_PROMPT_HEAD='Your complete task, including all instructions and the full review context, is in the file '
+AGY_FILE_PROMPT_TAIL=' . Read the WHOLE file before answering (read it in chunks if it is too large to read at once; do not stop at the first chunk), then follow the instructions in it exactly. The output format required by that file is the only output wanted.'
+GEMINI_STDIN_PROMPT='Follow the instructions in the input above exactly.'
+
+# agy_prompt_dir: materialise the prompt as a private file for agy's large
+# path, print the DIRECTORY (for --add-dir). Idempotent: a retry / second call
+# reuses it. $WORKDIR is mktemp -d (mode 700); the dir + file are tightened to
+# 700/600 explicitly anyway. Removed by the EXIT trap with $WORKDIR.
+agy_prompt_dir() {
+  _apd_dir="$WORKDIR/agy-prompt"
+  if [ ! -f "$_apd_dir/prompt.txt" ]; then
+    (umask 077 && mkdir -p "$_apd_dir" && cp "$prompt_file" "$_apd_dir/prompt.txt")
+    chmod 700 "$_apd_dir"
+    chmod 600 "$_apd_dir/prompt.txt"
+  fi
+  printf '%s\n' "$_apd_dir"
+}
+
 # Per-invocation cap model (per rules/orchestration.md + rules/providers.md):
 # every CLI invocation gets its own FULL `RC_REVIEWER_TIMEOUT` cap — the primary
 # first call and the gemini fallback each get a fresh full budget. The ONLY
@@ -203,20 +279,42 @@ label_for() {
 
 # build_and_run <resolved-bin> <cap-seconds> <out-file>
 # Builds the argv for the resolved binary by basename, then hands off to
-# run_capped. The prompt is passed as a single -p argument built via `set --`
-# (never `eval`), so spaces/newlines in the prompt survive intact.
+# run_capped. agy/gemini: the prompt is passed as a single -p argument built
+# via `set --` (never `eval`), so spaces/newlines in the prompt survive intact
+# — NB they carry the whole prompt on argv, so a prompt over the argv-size
+# guard (Linux MAX_ARG_STRLEN, 128 KB) switches them to a file (agy) / stdin
+# (gemini) instead; see LARGE_PROMPT. codex: the prompt is fed
+# on STDIN from the prompt file, never on argv (see the codex profile below).
 build_and_run() {
   _bar_bin="$1"
   _bar_cap="$2"
   _bar_out="$3"
   _bar_bn="$(basename "$_bar_bin")"
+  # LAST_MSG_FILE: the codex `-o` final-message file for THIS invocation, or ""
+  # for every other profile. Reset per call so a stale codex path never leaks
+  # into an agy/gemini attempt. Read by invoke_once after classify.
+  LAST_MSG_FILE=""
 
   case "$_bar_bn" in
     *agy*)
       # --print-timeout MUST carry the "s" unit suffix — a bare integer is
       # rejected by agy ("missing unit in duration"). This exact bug is why
       # this script exists; see the print-timeout-unit-suffix test.
-      set -- "$_bar_bin" -p "$prompt" --print-timeout "${_bar_cap}s" --dangerously-skip-permissions
+      #
+      # LARGE_PROMPT (see the argv-size guard): agy does NOT read stdin (an
+      # empty -p with the prompt on stdin fails "empty prompt", verified), so
+      # the prompt goes into a private file whose dir is granted via --add-dir
+      # and a short fixed -p tells agy to read it. UNVERIFIED LIVE: agy's quota
+      # was exhausted when this was written, so only the fakes in the bats
+      # suite exercise it — which is why small prompts never take this path.
+      if [ "$LARGE_PROMPT" = 1 ]; then
+        _bar_pdir="$(agy_prompt_dir)"
+        set -- "$_bar_bin" -p "${AGY_FILE_PROMPT_HEAD}${_bar_pdir}/prompt.txt${AGY_FILE_PROMPT_TAIL}" \
+          --print-timeout "${_bar_cap}s" --dangerously-skip-permissions \
+          --add-dir "$_bar_pdir"
+      else
+        set -- "$_bar_bin" -p "$prompt" --print-timeout "${_bar_cap}s" --dangerously-skip-permissions
+      fi
       if [ -n "${RC_GOOGLE_ADD_DIR:-}" ]; then
         set -- "$@" --add-dir "$RC_GOOGLE_ADD_DIR"
       fi
@@ -225,7 +323,19 @@ build_and_run() {
       fi
       ;;
     *gemini*)
-      set -- "$_bar_bin" -p "$prompt" --skip-trust
+      # LARGE_PROMPT: `gemini -p` is "Appended to input on stdin (if any)" per
+      # its --help, so the prompt is fed on STDIN through the same fixed
+      # /bin/sh shim as codex (file path is the shim's $1, never interpolated;
+      # `exec` keeps the pid so run_capped's TERM/KILL still lands on gemini)
+      # with a short fixed -p. UNVERIFIED LIVE: gemini could not authenticate
+      # on the account this was written on — small prompts stay on argv.
+      if [ "$LARGE_PROMPT" = 1 ]; then
+        # shellcheck disable=SC2016 # $1/$@ expand in the inner shell, on purpose
+        set -- /bin/sh -c 'f=$1; shift; exec "$@" <"$f"' sh "$prompt_file" \
+          "$_bar_bin" -p "$GEMINI_STDIN_PROMPT" --skip-trust
+      else
+        set -- "$_bar_bin" -p "$prompt" --skip-trust
+      fi
       ;;
     *codex*)
       # Frozen non-interactive Codex profile, pinned against `codex exec --help`
@@ -233,8 +343,11 @@ build_and_run() {
       #   1. `exec` is the non-interactive subcommand (interactive `codex` would
       #      hang forever with no TTY). `exec` has no --ask-for-approval flag —
       #      it never prompts — so no "bypass approvals" knob is needed.
-      #   2. The prompt is a POSITIONAL arg — for `codex exec`, `-p` is
-      #      `--profile`, NOT the prompt (unlike agy/gemini). It goes last.
+      #   2. The prompt is NOT on argv: with no positional prompt `codex exec`
+      #      reads it from STDIN, which is redirected from <prompt-file>. A
+      #      200–300 KB review prompt as ONE argv element breaks Linux's 128 KB
+      #      per-argument limit (MAX_ARG_STRLEN → E2BIG). (Never `-p` either:
+      #      for `codex exec`, `-p` is `--profile`, unlike agy/gemini.)
       #   3. `--sandbox read-only` is LEAST PRIVILEGE for a reviewer: the model's
       #      shell commands can read the repo but cannot write or reach the
       #      network. A code reviewer only reads, so this is sufficient — and we
@@ -246,13 +359,37 @@ build_and_run() {
       # `--skip-git-repo-check` is defensive (lets the review run even outside a
       # git repo). If Codex's CLI surface changes, re-pin from `codex exec
       # --help` and update the codex-profile-argv test in lockstep.
-      #   4. `codex exec` DRAINS stdin even with a positional prompt ("If stdin
-      #      is piped and a prompt is also provided, stdin is appended as a
-      #      <stdin> block"), so it hangs forever on an inherited never-EOF
-      #      stdin. run_capped (rc-lib-timeout.sh) closes the child's stdin
-      #      (</dev/null) for exactly this reason; agy/gemini share the trait.
-      #      See tests/unit/rc-lib-timeout.bats.
-      set -- "$_bar_bin" exec --sandbox read-only --skip-git-repo-check "$prompt"
+      #   4. `codex exec` reads stdin to EOF, so an inherited never-EOF stdin
+      #      would hang it. run_capped (rc-lib-timeout.sh) runs every child
+      #      with </dev/null for exactly that reason (agy/gemini share the
+      #      trait; see tests/unit/rc-lib-timeout.bats) — so codex is launched
+      #      through a fixed `/bin/sh -c` shim that re-points ITS stdin at the
+      #      prompt file and `exec`s codex (same pid, so run_capped's TERM/KILL
+      #      still lands on codex itself). The file path is the shim's $1,
+      #      never interpolated into the shim text.
+      #   5. `-o <file>` (`--output-last-message`) makes codex write ONLY the
+      #      final agent message to <file>. The merged stdout+stderr transcript
+      #      (prompt echo, every tool call, reasoning) still lands in the
+      #      out-file and is classified FIRST — the AUTH/QUOTA/RATE_LIMIT/
+      #      OVERLOAD phrases live there, and TIMEOUT comes from the exit code.
+      #      invoke_once then prefers the `-o` file when it is non-empty AND
+      #      itself classifies OK: the transcript is huge (265 KB seen live) and
+      #      its prompt echo carries the very Findings/Overall Assessment
+      #      headings the OK-guard keys on, so a failed model could pass as OK.
+      #      When the `-o` file is empty/missing (codex 0.152.1: "Warning: no
+      #      last agent message; wrote empty content to <file>" — both when the
+      #      model answered in the transcript AND on every hard failure), the
+      #      transcript's OK can be the prompt echo alone. So codex's OWN error
+      #      lines (`^(ERROR|Error|error)[: ]`, as rc-seat.sh does) are
+      #      classified on their own first: an AUTH/QUOTA/RATE_LIMIT/OVERLOAD
+      #      there wins (e.g. "ERROR: unexpected status 401 Unauthorized");
+      #      otherwise it falls back to the transcript's class and output. The
+      #      file sits beside the attempt file under $WORKDIR (removed by the
+      #      EXIT trap).
+      LAST_MSG_FILE="${_bar_out}.last"
+      # shellcheck disable=SC2016 # $1/$@ expand in the inner shell, on purpose
+      set -- /bin/sh -c 'f=$1; shift; exec "$@" <"$f"' sh "$prompt_file" \
+        "$_bar_bin" exec --sandbox read-only --skip-git-repo-check -o "$LAST_MSG_FILE"
       ;;
     *)
       set -- "$_bar_bin" -p "$prompt"
@@ -308,6 +445,12 @@ QUOTA_PATTERN='exhausted your daily quota|terminalquotaerror|individual quota re
 # carrying one is hard.
 RATE_LIMIT_PATTERN='429|rate limit|rate_limit_exceeded|too many requests|retry.after'
 OVERLOAD_PATTERN='503|high demand'
+# Codex-only AUTH extension, applied ONLY to codex's own extracted error lines
+# (see invoke_once), never to a whole output: codex reports a bad/missing key as
+# "ERROR: unexpected status 401 Unauthorized", which AUTH_PATTERN (deliberately
+# free of bare status codes, see above) does not match. Same regex as
+# rc-seat.sh's codex auth check.
+CODEX_ERR_AUTH_PATTERN='(^|[^0-9])401([^0-9]|$)|invalid[ _-]?api[ _-]?key|unauthori[sz]ed|authentication[ _-]?(failed|error)'
 
 # Hard ceiling for ANY backoff. Nothing legitimate throttles for longer than an
 # hour, and RC_REVIEWER_TIMEOUT (default 600s) already bounds the useful range —
@@ -488,6 +631,48 @@ invoke_once() {
   spent=$((spent + _io_el))
 
   classify "$LAST_RC" "$_io_out"
+
+  # Codex only (LAST_MSG_FILE is "" for every other profile): the transcript is
+  # classified above, exactly as before, so hard-fail phrases and TIMEOUT keep
+  # their meaning. If the `-o` final message is non-empty and is itself a valid
+  # RESULT (review headings or refutation verdicts — the same OK test), return
+  # it instead of the transcript (an empty/missing `-o`: see below). A
+  # non-empty `-o` that is NOT a valid result is the model's real (bad)
+  # answer: a transcript "OK" can then
+  # only come from the echoed prompt's own headings, so it becomes EMPTY;
+  # a transcript hard-fail (AUTH/QUOTA/…) keeps its class. TIMEOUT stays.
+  #
+  # An EMPTY/missing `-o` is also what codex leaves on a hard failure, and then
+  # the transcript can classify OK on the prompt echo alone. So classify only
+  # codex's OWN error lines (`^(ERROR|Error|error)[: ]`, as rc-seat.sh does —
+  # the rest of the transcript is the echo): an AUTH (incl. HTTP 401) / QUOTA /
+  # RATE_LIMIT / OVERLOAD there wins. Anything else keeps the transcript's class
+  # and output (an empty `-o` beside a genuinely answered transcript). _io_out
+  # stays the transcript either way — retry_after_of reads Retry-After from it.
+  if [ "$CLASS" != TIMEOUT ] && [ -n "$LAST_MSG_FILE" ] && [ -s "$LAST_MSG_FILE" ]; then
+    _io_tclass="$CLASS"
+    classify "$LAST_RC" "$LAST_MSG_FILE"
+    if [ "$CLASS" = OK ]; then
+      _io_out="$LAST_MSG_FILE"
+    elif [ "$_io_tclass" = OK ]; then
+      CLASS=EMPTY
+    else
+      CLASS="$_io_tclass"
+    fi
+  elif [ "$CLASS" != TIMEOUT ] && [ -n "$LAST_MSG_FILE" ]; then
+    _io_tclass="$CLASS"
+    _io_err="$(mktemp "$WORKDIR/errlines.XXXXXX")"
+    grep -E '^(ERROR|Error|error)[: ]' "$_io_out" >"$_io_err" 2>/dev/null || :
+    if grep -qiE "$CODEX_ERR_AUTH_PATTERN" "$_io_err" 2>/dev/null; then
+      CLASS=AUTH
+    else
+      classify "$LAST_RC" "$_io_err"
+      case "$CLASS" in
+        AUTH | QUOTA | RATE_LIMIT | OVERLOAD) : ;;
+        *) CLASS="$_io_tclass" ;;
+      esac
+    fi
+  fi
 
   INVOKE_CLASS="$CLASS"
   INVOKE_ELAPSED="$_io_el"

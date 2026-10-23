@@ -43,6 +43,10 @@ setup() {
   #   AGY_PROMPT_OUT -> the exact value of the arg following -p, written raw
   #                     (byte-for-byte) so a test can prove the prompt arrived
   #                     as a SINGLE intact argument (no word-split/newline-mangle)
+  #   AGY_STDIN_OUT  -> this call's stdin, written raw
+  #   AGY_ADDDIR_OUT -> each --add-dir value (one per line); plus "<file>.ls"
+  #                     (ls -ld/ls -l of each existing dir) and "<file>.files/"
+  #                     (a copy of the files inside it, taken mid-run)
   cat >"$FAKEDIR/agy" <<'AGY_EOF'
 #!/usr/bin/env sh
 call_n=1
@@ -68,6 +72,29 @@ if [ -n "${AGY_PROMPT_OUT:-}" ]; then
     if [ "$_prev" = "-p" ]; then
       printf '%s' "$a" >"$AGY_PROMPT_OUT"
       break
+    fi
+    _prev="$a"
+  done
+fi
+
+if [ -n "${AGY_STDIN_OUT:-}" ]; then
+  cat >"$AGY_STDIN_OUT"
+fi
+
+if [ -n "${AGY_ADDDIR_OUT:-}" ]; then
+  # For each --add-dir value: record the path, its listing (modes), and copy
+  # the files inside it to "$AGY_ADDDIR_OUT.files/" — the script's private
+  # prompt dir is removed by its EXIT trap, so it must be snapshotted here.
+  _prev=""
+  for a in "$@"; do
+    if [ "$_prev" = "--add-dir" ]; then
+      printf '%s\n' "$a" >>"$AGY_ADDDIR_OUT"
+      if [ -d "$a" ]; then
+        ls -ld "$a" >>"$AGY_ADDDIR_OUT.ls"
+        ls -l "$a" >>"$AGY_ADDDIR_OUT.ls"
+        mkdir -p "$AGY_ADDDIR_OUT.files"
+        cp "$a"/* "$AGY_ADDDIR_OUT.files/"
+      fi
     fi
     _prev="$a"
   done
@@ -192,6 +219,8 @@ AGY_EOF
   # --- fake gemini ------------------------------------------------------
   # Same mode vocabulary as agy, plus "dasher" for the Workspace-ineligible
   # auth flavor (still classified as AUTH by the script under test).
+  # Bookkeeping: GEM_CALLS / GEM_ARGS as agy; GEM_STDIN_OUT -> this call's
+  # stdin, raw; GEM_PROMPT_OUT -> the raw value of the arg following -p.
   cat >"$FAKEDIR/gemini" <<'GEM_EOF'
 #!/usr/bin/env sh
 call_n=1
@@ -206,6 +235,22 @@ if [ -n "${GEM_ARGS:-}" ]; then
     for a in "$@"; do printf '%s ' "$a"; done
     printf '\n'
   } >>"$GEM_ARGS"
+fi
+
+if [ -n "${GEM_STDIN_OUT:-}" ]; then
+  cat >"$GEM_STDIN_OUT"
+fi
+
+if [ -n "${GEM_PROMPT_OUT:-}" ]; then
+  # The exact value of the arg following -p, written raw (byte-for-byte).
+  _prev=""
+  for a in "$@"; do
+    if [ "$_prev" = "-p" ]; then
+      printf '%s' "$a" >"$GEM_PROMPT_OUT"
+      break
+    fi
+    _prev="$a"
+  done
 fi
 
 case "$call_n" in
@@ -248,9 +293,11 @@ GEM_EOF
   # --- fake codex -------------------------------------------------------
   # Codex has NO CLI fallback, so it is invoked as
   #   rc-invoke-provider.sh <codex> "" <prompt-file>.
-  # The prompt reaches `codex exec` as a POSITIONAL arg (for codex, -p is
-  # --profile, not the prompt), so unlike agy/gemini this fake ignores -p and
-  # just records its full argv for the codex-profile-argv assertion.
+  # The prompt reaches `codex exec` on STDIN, never argv (a 200–300 KB argv
+  # element breaks Linux's 128 KB per-argument limit; and for codex, -p is
+  # --profile, not the prompt), so unlike agy/gemini this fake ignores -p,
+  # records its full argv for the codex-profile-argv assertion, and can record
+  # its stdin.
   # Modes (CDX_MODE, or CDX_MODE_1 / CDX_MODE_2 to vary per call):
   #   ok          -> valid review, exit 0
   #   empty       -> nothing, exit 0
@@ -258,9 +305,29 @@ GEM_EOF
   #   auth        -> auth error, exit 1
   #   quota       -> quota error, exit 1
   #   timeout     -> sleep $CDX_SLEEP (default 999s) to force a wrapper kill
+  #   noisy       -> a real-codex-shaped merged TRANSCRIPT, exit 0: banner, the
+  #                  echoed prompt (which carries "### Findings" / "### Overall
+  #                  Assessment" heading lines, so it classifies OK on its own),
+  #                  tool calls and reasoning chatter
+  #   noisy-401   -> the `noisy` banner + heading-bearing prompt echo, then
+  #                  codex's own "ERROR: unexpected status 401 Unauthorized"
+  #                  line, exit 1 (a dead codex that echoes the OK headings)
+  #   noisy-429   -> same, ending "ERROR: exceeded retry limit, last status:
+  #                  429 Too Many Requests", exit 1
+  #   rubric-echo -> transcript echoing the refutation rubric ("Allowed: UPHELD |
+  #                  REFUTED | INCONCLUSIVE") + chatter, NO real verdict line, exit 0
+  # `-o <file>` (--output-last-message) is honoured: the fake writes the final
+  # message there per CDX_LAST (set only if exported by the test):
+  #   unset    -> in `ok` mode mirror the review into <file>; other modes write
+  #               nothing (the file is never created)
+  #   review   -> a review DIFFERENT from any transcript body (provable source)
+  #   verdicts -> refutation verdict lines ("<id> | UPHELD — ...")
+  #   empty    -> create <file> empty (codex 0.152.1's "no last agent message")
   # Bookkeeping (set only if the env var is exported by the test):
   #   CDX_CALLS -> one "call" line appended per invocation (call counting)
   #   CDX_ARGS  -> one space-joined line of this call's argv appended
+  #   CDX_STDIN_OUT -> this call's stdin, written raw (byte-for-byte), so a
+  #                test can prove the prompt arrived intact on stdin
   cat >"$FAKEDIR/codex" <<'CDX_EOF'
 #!/usr/bin/env sh
 call_n=1
@@ -277,11 +344,68 @@ if [ -n "${CDX_ARGS:-}" ]; then
   } >>"$CDX_ARGS"
 fi
 
+if [ -n "${CDX_STDIN_OUT:-}" ]; then
+  cat >"$CDX_STDIN_OUT"
+fi
+
+# -o <file>: where `codex exec --output-last-message` writes the final message.
+last_file=""
+_prev=""
+for a in "$@"; do
+  if [ "$_prev" = "-o" ]; then
+    last_file="$a"
+    break
+  fi
+  _prev="$a"
+done
+
 case "$call_n" in
   1) mode="${CDX_MODE_1:-${CDX_MODE:-ok}}" ;;
   2) mode="${CDX_MODE_2:-${CDX_MODE:-ok}}" ;;
   *) mode="${CDX_MODE:-ok}" ;;
 esac
+
+if [ -n "$last_file" ]; then
+  case "${CDX_LAST:-}" in
+    review)
+      cat >"$last_file" <<'LAST_EOF'
+Findings:
+- [P1] Final answer via -o: missing null check in parse().
+
+What's Good:
+- Clear naming.
+
+Overall Assessment: One real bug; otherwise fine.
+LAST_EOF
+      ;;
+    verdicts)
+      cat >"$last_file" <<'LAST_EOF'
+F1 | UPHELD — src/app.rb:12 dereferences nil when the header is absent.
+F2 | REFUTED — src/app.rb:40 already guards the empty case.
+LAST_EOF
+      ;;
+    junk)
+      printf 'Sorry, I could not complete the review.\n' >"$last_file"
+      ;;
+    empty)
+      : >"$last_file"
+      echo "Warning: no last agent message; wrote empty content to $last_file" >&2
+      ;;
+    '')
+      if [ "$mode" = ok ]; then
+        cat >"$last_file" <<'LAST_EOF'
+Findings:
+- [P2] Example finding from codex.
+
+What's Good:
+- Reasonable structure.
+
+Overall Assessment: Looks fine.
+LAST_EOF
+      fi
+      ;;
+  esac
+fi
 
 case "$mode" in
   ok)
@@ -294,6 +418,61 @@ What's Good:
 
 Overall Assessment: Looks fine.
 REVIEW_EOF
+    exit 0
+    ;;
+  noisy)
+    cat <<'NOISY_EOF'
+OpenAI Codex v0.152.1 (research preview)
+--------
+workdir: /repo
+sandbox: read-only
+--------
+user
+Review this diff. Respond with:
+### Findings
+### Overall Assessment
+
+thinking
+CHATTER-REASONING: let me inspect the parser first.
+exec
+CHATTER-TOOLCALL: bash -lc 'sed -n 1,80p src/app.rb'
+ succeeded in 12ms:
+CHATTER-TOOLOUT: def parse(h) h[:x].strip end
+NOISY_EOF
+    exit 0
+    ;;
+  noisy-401 | noisy-429)
+    # A DEAD codex whose transcript still echoes the heading-bearing prompt
+    # (so the transcript alone classifies OK), then codex's own hard-fail line.
+    cat <<'NOISY_EOF'
+OpenAI Codex v0.152.1 (research preview)
+--------
+workdir: /repo
+sandbox: read-only
+--------
+user
+Review this diff. Respond with:
+### Findings
+### Overall Assessment
+
+NOISY_EOF
+    if [ "$mode" = noisy-401 ]; then
+      echo "ERROR: unexpected status 401 Unauthorized: Missing bearer or basic authentication in header" >&2
+    else
+      echo "ERROR: exceeded retry limit, last status: 429 Too Many Requests" >&2
+    fi
+    exit 1
+    ;;
+  rubric-echo)
+    cat <<'NOISY_EOF'
+OpenAI Codex v0.152.1 (research preview)
+user
+For each finding return one line. Allowed: UPHELD | REFUTED | INCONCLUSIVE
+thinking
+CHATTER-REASONING: checking src/app.rb:12.
+exec
+CHATTER-TOOLCALL: bash -lc 'sed -n 1,60p src/app.rb'
+NOISY_EOF
     exit 0
     ;;
   empty)
@@ -775,22 +954,59 @@ call_count() {
   ! echo "$output" | grep -q 'fallback:'
 }
 
-@test "codex-profile-argv: frozen 'codex exec' argv (subcommand + read-only sandbox, positional prompt)" {
-  CDX_MODE=ok run --separate-stderr "$SCRIPT" "$CODEX" "" "$PROMPT_FILE"
+@test "codex-profile-argv: frozen 'codex exec' argv (subcommand + read-only sandbox), prompt on stdin not argv" {
+  CDX_STDIN_OUT="$BATS_TEST_TMPDIR/cdx_stdin" CDX_MODE=ok \
+    run --separate-stderr "$SCRIPT" "$CODEX" "" "$PROMPT_FILE"
   echo "status=$status"
   [ "$status" -eq 0 ]
   [ -f "$CDX_ARGS" ]
   echo "codex argv: $(cat "$CDX_ARGS")"
   # Frozen shape: the non-interactive `exec` subcommand, then the least-privilege
   # read-only sandbox, pinned against `codex exec --help`.
-  grep -qF -- 'exec --sandbox read-only --skip-git-repo-check' "$CDX_ARGS"
+  grep -qF -- 'exec --sandbox read-only --skip-git-repo-check -o ' "$CDX_ARGS"
   # Least privilege: the reviewer must NOT run with the "EXTREMELY DANGEROUS"
   # no-sandbox flag.
   ! grep -qF -- 'dangerously-bypass' "$CDX_ARGS"
-  # The prompt is a POSITIONAL arg for codex (NOT after -p) — prove it arrived.
-  grep -qF -- 'Please review this change' "$CDX_ARGS"
+  # The prompt is NOT on argv (Linux caps one argument at 128 KB): the argv
+  # ends with the -o file, and the prompt arrives byte-for-byte on stdin.
+  # (`if`, not a bare `!`: a negated command mid-test never fails a bats test)
+  if grep -qF -- 'Please review this change' "$CDX_ARGS"; then
+    echo "prompt found on codex argv" >&2
+    false
+  fi
+  grep -qE -- '-o [^ ]+\.last $' "$CDX_ARGS"
+  cmp -s "$BATS_TEST_TMPDIR/cdx_stdin" "$PROMPT_FILE"
   # And codex must NOT be handed a -p flag (that is --profile for codex exec).
   ! grep -qE -- '(^| )-p( |$)' "$CDX_ARGS"
+}
+
+@test "codex-prompt-stdin: a 1.5 MB prompt with shell metacharacters reaches codex intact on stdin; nothing executes" {
+  {
+    # shellcheck disable=SC2016 # $(...) / backticks are literal prompt text on purpose
+    printf -- '--dangerously-bypass-approvals-and-sandbox\n$(touch %s/pwned) `touch %s/pwned2` "dq" '"'"'sq'"'"' ; | &\n' \
+      "$BATS_TEST_TMPDIR" "$BATS_TEST_TMPDIR"
+    head -c 1500000 /dev/zero | tr '\0' 'a'
+    printf '\nEND-TOKEN\n\n'
+  } >"$PROMPT_FILE"
+  CDX_STDIN_OUT="$BATS_TEST_TMPDIR/cdx_stdin" CDX_MODE=ok \
+    run --separate-stderr "$SCRIPT" "$CODEX" "" "$PROMPT_FILE"
+  echo "status=$status stderr=<<$stderr>>"
+  [ "$status" -eq 0 ]
+  cmp -s "$BATS_TEST_TMPDIR/cdx_stdin" "$PROMPT_FILE"
+  [ "$(wc -c <"$CDX_ARGS" | tr -d ' ')" -lt 4096 ]
+  [ ! -e "$BATS_TEST_TMPDIR/pwned" ]
+  [ ! -e "$BATS_TEST_TMPDIR/pwned2" ]
+}
+
+@test "codex-probe-stdin: --probe feeds the trivial probe prompt to codex on stdin" {
+  CDX_STDIN_OUT="$BATS_TEST_TMPDIR/cdx_stdin" CDX_MODE=ok run "$SCRIPT" --probe "$CODEX" ""
+  [ "$status" -eq 0 ]
+  [ "$output" = "HEALTHY" ]
+  [ "$(cat "$BATS_TEST_TMPDIR/cdx_stdin")" = ping ]
+  if grep -qE -- '(^| )ping( |$)' "$CDX_ARGS"; then
+    echo "probe prompt found on codex argv" >&2
+    false
+  fi
 }
 
 @test "codex-fast-empty-retry: codex empty-fast -> exactly one retry (shared state machine)" {
@@ -1060,4 +1276,298 @@ call_count() {
   echo "status=$status"
   echo "stderr=<<$stderr>>"
   [ "$status" -eq 2 ]
+}
+
+# ---------------------------------------------------------------------------
+# Codex `-o` (--output-last-message): return ONLY the final agent message.
+#
+# Plain `codex exec` stdout+stderr is the whole merged transcript — prompt echo,
+# every tool call, reasoning (265 KB seen live). Worse, the echoed prompt carries
+# the Findings / Overall Assessment headings, so a failed model could classify
+# OK on the echo alone. The transcript is still classified first (hard-fail
+# phrases + TIMEOUT live there); a non-empty, itself-OK `-o` file then wins.
+# ---------------------------------------------------------------------------
+
+@test "codex-last-message: noisy transcript + valid -o review -> ONLY the -o body is returned" {
+  CDX_MODE=noisy CDX_LAST=review \
+    run --separate-stderr "$SCRIPT" "$CODEX" "" "$PROMPT_FILE"
+  echo "status=$status"
+  echo "output=<<$output>>"
+  [ "$status" -eq 0 ]
+  _expected="$(printf '%s\n' 'TOOL: Codex' 'Findings:' \
+    '- [P1] Final answer via -o: missing null check in parse().' '' \
+    "What's Good:" '- Clear naming.' '' \
+    'Overall Assessment: One real bug; otherwise fine.')"
+  [ "$output" = "$_expected" ]
+  # None of the transcript (banner, prompt echo, tool chatter) leaks through.
+  ! printf '%s\n' "$output" | grep -qF 'CHATTER-' || false
+  ! printf '%s\n' "$output" | grep -qF 'OpenAI Codex v' || false
+  ! printf '%s\n' "$output" | grep -qF '### Findings' || false
+}
+
+@test "codex-last-message: -o carrying refutation verdict lines is used (Step-4 shape)" {
+  # The transcript only echoes the rubric enumeration (no real "<id> | VERDICT"
+  # line), so on its own it is not a valid RESULT; the -o verdicts must win.
+  CDX_MODE=rubric-echo CDX_LAST=verdicts \
+    run --separate-stderr "$SCRIPT" "$CODEX" "" "$PROMPT_FILE"
+  echo "status=$status"
+  echo "output=<<$output>>"
+  [ "$status" -eq 0 ]
+  _expected="$(printf '%s\n' 'TOOL: Codex' \
+    'F1 | UPHELD — src/app.rb:12 dereferences nil when the header is absent.' \
+    'F2 | REFUTED — src/app.rb:40 already guards the empty case.')"
+  [ "$output" = "$_expected" ]
+  ! printf '%s\n' "$output" | grep -qF 'CHATTER-' || false
+  ! printf '%s\n' "$output" | grep -qF 'Allowed:' || false
+}
+
+@test "codex-last-message: empty -o + valid transcript -> falls back to the transcript (today's behaviour)" {
+  # codex 0.152.1 can write an EMPTY -o file ("no last agent message") even
+  # though the model answered in the transcript. Fallback guard: unchanged path.
+  CDX_MODE=noisy CDX_LAST=empty \
+    run --separate-stderr "$SCRIPT" "$CODEX" "" "$PROMPT_FILE"
+  echo "status=$status"
+  echo "output=<<$output>>"
+  [ "$status" -eq 0 ]
+  case "$output" in
+  "TOOL: Codex"*) : ;;
+  *) echo "expected TOOL: Codex from the transcript fallback" && return 1 ;;
+  esac
+  printf '%s\n' "$output" | grep -qF 'CHATTER-TOOLCALL'
+  printf '%s\n' "$output" | grep -qF '### Overall Assessment'
+  [ "$(call_count "$CDX_CALLS")" -eq 1 ]
+}
+
+@test "codex-last-message: auth phrase in transcript + empty -o -> SKIPPED with the auth reason" {
+  CDX_MODE=auth CDX_LAST=empty \
+    run --separate-stderr "$SCRIPT" "$CODEX" "" "$PROMPT_FILE"
+  echo "status=$status"
+  echo "output=<<$output>>"
+  [ "$status" -eq 1 ]
+  [ "$output" = "SKIPPED: Codex unavailable — codex: auth failure" ]
+}
+
+@test "codex-last-message: argv passes -o <file under the run WORKDIR> as the last flag (no positional prompt)" {
+  CDX_MODE=ok run --separate-stderr "$SCRIPT" "$CODEX" "" "$PROMPT_FILE"
+  echo "status=$status"
+  echo "codex argv: $(cat "$CDX_ARGS")"
+  [ "$status" -eq 0 ]
+  # `-o` + its path end the argv: the prompt arrives on stdin, not after it.
+  grep -qE -- ' -o [^ ]+ $' "$CDX_ARGS"
+  # The path lives under the script's private mktemp WORKDIR.
+  grep -qE -- ' -o [^ ]*rc-invoke\.[^ /]+/[^ ]+ ' "$CDX_ARGS"
+}
+
+@test "codex-last-message: a non-empty but invalid -o is never rescued by the echoed prompt's headings" {
+  # The transcript passes the OK test only because it echoes the prompt's own
+  # "### Findings"/"### Overall Assessment" headings; the model's real answer
+  # (-o) is not a review. That must not be returned as a valid Codex review.
+  CDX_MODE=noisy CDX_LAST=junk \
+    run --separate-stderr "$SCRIPT" "$CODEX" "" "$PROMPT_FILE"
+  echo "output=<<$output>>"
+  [ "$status" -eq 1 ]
+  case "$output" in
+  "SKIPPED: Codex unavailable"*) : ;;
+  *) echo "expected SKIPPED, got a review" && return 1 ;;
+  esac
+}
+
+# A hard failure leaves the `-o` file EMPTY ("no last agent message"), yet the
+# transcript still echoes the prompt's "### Findings"/"### Overall Assessment"
+# headings and so classifies OK on its own. codex's own ERROR lines must then
+# decide: a dead Codex is a SKIPPED, never `TOOL: Codex` + a prompt echo.
+
+@test "codex-last-message: echoed headings + ERROR 401 + empty -o -> SKIPPED auth failure (no retry)" {
+  CDX_MODE=noisy-401 CDX_LAST=empty \
+    run --separate-stderr "$SCRIPT" "$CODEX" "" "$PROMPT_FILE"
+  echo "status=$status"
+  echo "output=<<$output>>"
+  [ "$status" -eq 1 ]
+  [ "$output" = "SKIPPED: Codex unavailable — codex: auth failure" ]
+  # hard = terminal: exactly ONE call
+  [ "$(call_count "$CDX_CALLS")" -eq 1 ]
+}
+
+@test "codex-last-message: echoed headings + ERROR 429 + empty -o -> soft 'rate limited' (one retry)" {
+  RC_REVIEWER_TIMEOUT=6 RC_RATE_LIMIT_BACKOFF=0 CDX_MODE=noisy-429 CDX_LAST=empty \
+    run --separate-stderr "$SCRIPT" "$CODEX" "" "$PROMPT_FILE"
+  echo "status=$status"
+  echo "output=<<$output>>"
+  [ "$status" -eq 1 ]
+  [ "$output" = "SKIPPED: Codex unavailable — codex: rate limited on retry" ]
+  ! printf '%s\n' "$output" | grep -qF 'quota exhausted' || false
+  # soft = retryable: the throttled try + exactly one retry
+  [ "$(call_count "$CDX_CALLS")" -eq 2 ]
+}
+
+@test "codex-last-message: transcript hard-fail + VALID non-empty -o -> the -o review wins" {
+  # A valid final answer beats transcript noise, even an ERROR line.
+  CDX_MODE=noisy-401 CDX_LAST=review \
+    run --separate-stderr "$SCRIPT" "$CODEX" "" "$PROMPT_FILE"
+  echo "status=$status"
+  echo "output=<<$output>>"
+  [ "$status" -eq 0 ]
+  _expected="$(printf '%s\n' 'TOOL: Codex' 'Findings:' \
+    '- [P1] Final answer via -o: missing null check in parse().' '' \
+    "What's Good:" '- Clear naming.' '' \
+    'Overall Assessment: One real bug; otherwise fine.')"
+  [ "$output" = "$_expected" ]
+}
+
+# ---------------------------------------------------------------------------
+# Large-prompt path (argv-size guard). Linux caps ONE argv element at 128 KB
+# (MAX_ARG_STRLEN -> E2BIG), so a prompt over the threshold must NOT ride on
+# -p. RC_ARGV_MAX_BYTES is the script's TEST-ONLY hook that forces the Linux
+# threshold (120000) on this macOS runner; on Ubuntu CI it equals the default.
+# ---------------------------------------------------------------------------
+
+# make_prompt <file> <pad-bytes>: a prompt whose first line is full of shell
+# metacharacters that would create $PWNED if anything ever eval'd it, padded
+# with <pad-bytes> 'a's, ending in a newline.
+make_prompt() {
+  {
+    printf 'Review: $(touch %s) `touch %s` ; touch %s | & * ? "q" '"'"'s'"'"' $HOME\n' \
+      "$PWNED" "$PWNED" "$PWNED"
+    head -c "$2" /dev/zero | tr '\0' 'a'
+    printf '\nReport your Findings.\n'
+  } >"$1"
+}
+
+@test "argv-guard small: 10 KB prompt keeps today's argv path for agy (-p = prompt, no --add-dir, no stdin)" {
+  PWNED="$BATS_TEST_TMPDIR/pwned"
+  SMALL="$BATS_TEST_TMPDIR/small.txt"
+  make_prompt "$SMALL" 10000
+  CAP="$BATS_TEST_TMPDIR/cap_p"
+  STDIN="$BATS_TEST_TMPDIR/cap_stdin"
+  ADD="$BATS_TEST_TMPDIR/cap_add"
+  AGY_MODE=ok AGY_PROMPT_OUT="$CAP" AGY_STDIN_OUT="$STDIN" AGY_ADDDIR_OUT="$ADD" \
+    RC_ARGV_MAX_BYTES=120000 run --separate-stderr "$SCRIPT" "$AGY" "$GEMINI" "$SMALL"
+  echo "status=$status"
+  [ "$status" -eq 0 ]
+  # -p carries the prompt (command substitution strips the trailing newline).
+  [[ "$(cat "$CAP")" == "$(cat "$SMALL")" ]] || false
+  [ ! -s "$STDIN" ]
+  [ ! -e "$ADD" ]
+  [ ! -e "$PWNED" ]
+}
+
+@test "argv-guard small: 10 KB prompt keeps today's argv path for gemini (-p = prompt, no stdin)" {
+  PWNED="$BATS_TEST_TMPDIR/pwned"
+  SMALL="$BATS_TEST_TMPDIR/small.txt"
+  make_prompt "$SMALL" 10000
+  CAP="$BATS_TEST_TMPDIR/cap_p"
+  STDIN="$BATS_TEST_TMPDIR/cap_stdin"
+  AGY_MODE=auth GEM_MODE=ok GEM_PROMPT_OUT="$CAP" GEM_STDIN_OUT="$STDIN" \
+    RC_ARGV_MAX_BYTES=120000 run --separate-stderr "$SCRIPT" "$AGY" "$GEMINI" "$SMALL"
+  echo "status=$status"
+  echo "output=<<$output>>"
+  [ "$status" -eq 0 ]
+  [[ "$output" == "TOOL: Gemini"* ]] || false
+  [[ "$(cat "$CAP")" == "$(cat "$SMALL")" ]] || false
+  [ ! -s "$STDIN" ]
+  grep -qF -- '--skip-trust' "$GEM_ARGS"
+  [ ! -e "$PWNED" ]
+}
+
+@test "argv-guard default: without the hook, a 300 KB prompt on Darwin stays on argv (<= 900000)" {
+  [ "$(uname -s)" = Darwin ] || skip "Darwin-only threshold"
+  PWNED="$BATS_TEST_TMPDIR/pwned"
+  BIG="$BATS_TEST_TMPDIR/big.txt"
+  make_prompt "$BIG" 300000
+  CAP="$BATS_TEST_TMPDIR/cap_p"
+  ADD="$BATS_TEST_TMPDIR/cap_add"
+  AGY_MODE=ok AGY_PROMPT_OUT="$CAP" AGY_ADDDIR_OUT="$ADD" \
+    run --separate-stderr "$SCRIPT" "$AGY" "$GEMINI" "$BIG"
+  echo "status=$status"
+  [ "$status" -eq 0 ]
+  [[ "$(cat "$CAP")" == "$(cat "$BIG")" ]] || false
+  [ ! -e "$ADD" ]
+}
+
+@test "argv-guard large: 300 KB prompt -> agy gets a short fixed -p + --add-dir to a private dir holding the exact prompt" {
+  PWNED="$BATS_TEST_TMPDIR/pwned"
+  BIG="$BATS_TEST_TMPDIR/big.txt"
+  make_prompt "$BIG" 300000
+  CAP="$BATS_TEST_TMPDIR/cap_p"
+  STDIN="$BATS_TEST_TMPDIR/cap_stdin"
+  ADD="$BATS_TEST_TMPDIR/cap_add"
+  USERDIR="$BATS_TEST_TMPDIR/user-add-dir"
+  mkdir -p "$USERDIR"
+  AGY_MODE=ok AGY_PROMPT_OUT="$CAP" AGY_STDIN_OUT="$STDIN" AGY_ADDDIR_OUT="$ADD" \
+    RC_GOOGLE_ADD_DIR="$USERDIR" RC_GOOGLE_MODEL=some-model \
+    RC_ARGV_MAX_BYTES=120000 run --separate-stderr "$SCRIPT" "$AGY" "$GEMINI" "$BIG"
+  echo "status=$status"
+  echo "p=<<$(cat "$CAP")>>"
+  echo "add=<<$(cat "$ADD")>>"
+  [ "$status" -eq 0 ]
+  [[ "$output" == "TOOL: Antigravity"* ]] || false
+  # -p is the short constant, naming the absolute prompt-file path.
+  [ "$(wc -c <"$CAP" | tr -d ' ')" -lt 1000 ]
+  [[ "$(cat "$CAP")" == "Your complete task, including all instructions and the full review context, is in the file /"* ]] || false
+  [[ "$(cat "$CAP")" == *"Read the WHOLE file before answering"* ]] || false
+  ! grep -q 'aaaaaaaa' "$CAP" || false
+  # Two --add-dir values: the private prompt dir first, then RC_GOOGLE_ADD_DIR.
+  [ "$(wc -l <"$ADD" | tr -d ' ')" -eq 2 ]
+  pdir="$(sed -n 1p "$ADD")"
+  [ "$(sed -n 2p "$ADD")" = "$USERDIR" ]
+  [[ "$(cat "$CAP")" == *"$pdir/prompt.txt ."* ]] || false
+  # The private file held the EXACT prompt bytes, mode 600, in a 700 dir.
+  cmp -s "$ADD.files/prompt.txt" "$BIG"
+  grep -qE '^drwx------' "$ADD.ls"
+  grep -qE '^-rw-------.* prompt\.txt$' "$ADD.ls"
+  # Other agy flags kept; nothing on stdin; private dir cleaned up on exit.
+  grep -qE -- '--print-timeout [0-9]+s' "$AGY_ARGS"
+  grep -qF -- '--dangerously-skip-permissions' "$AGY_ARGS"
+  grep -qF -- '--model some-model' "$AGY_ARGS"
+  [ ! -s "$STDIN" ]
+  [ ! -e "$pdir" ]
+  [ ! -e "$PWNED" ]
+}
+
+@test "argv-guard large: agy auth-fails -> gemini fallback gets a short fixed -p and the exact prompt on stdin" {
+  PWNED="$BATS_TEST_TMPDIR/pwned"
+  BIG="$BATS_TEST_TMPDIR/big.txt"
+  make_prompt "$BIG" 300000
+  CAP="$BATS_TEST_TMPDIR/cap_p"
+  STDIN="$BATS_TEST_TMPDIR/cap_stdin"
+  AGY_MODE=auth GEM_MODE=ok GEM_PROMPT_OUT="$CAP" GEM_STDIN_OUT="$STDIN" \
+    RC_ARGV_MAX_BYTES=120000 run --separate-stderr "$SCRIPT" "$AGY" "$GEMINI" "$BIG"
+  echo "status=$status"
+  echo "output=<<$output>>"
+  echo "p=<<$(cat "$CAP")>>"
+  [ "$status" -eq 0 ]
+  [[ "$output" == "TOOL: Gemini"* ]] || false
+  [ "$(call_count "$AGY_CALLS")" -eq 1 ]
+  [ "$(call_count "$GEM_CALLS")" -eq 1 ]
+  [ "$(cat "$CAP")" = "Follow the instructions in the input above exactly." ]
+  cmp -s "$STDIN" "$BIG"
+  grep -qF -- '--skip-trust' "$GEM_ARGS"
+  ! grep -q 'aaaaaaaa' "$GEM_ARGS" || false
+  [ ! -e "$PWNED" ]
+}
+
+@test "argv-guard large: agy fast-empty retry reuses the private prompt file" {
+  PWNED="$BATS_TEST_TMPDIR/pwned"
+  BIG="$BATS_TEST_TMPDIR/big.txt"
+  make_prompt "$BIG" 300000
+  ADD="$BATS_TEST_TMPDIR/cap_add"
+  AGY_MODE_1=empty AGY_MODE_2=ok AGY_ADDDIR_OUT="$ADD" \
+    RC_ARGV_MAX_BYTES=120000 run --separate-stderr "$SCRIPT" "$AGY" "$GEMINI" "$BIG"
+  echo "status=$status"
+  [ "$status" -eq 0 ]
+  [[ "$output" == "TOOL: Antigravity"* ]] || false
+  [ "$(call_count "$AGY_CALLS")" -eq 2 ]
+  [ "$(sed -n 1p "$ADD")" = "$(sed -n 2p "$ADD")" ]
+  cmp -s "$ADD.files/prompt.txt" "$BIG"
+  [ ! -e "$PWNED" ]
+}
+
+@test "argv-guard: a non-integer RC_ARGV_MAX_BYTES is ignored with a note (default threshold applies)" {
+  AGY_MODE=ok RC_ARGV_MAX_BYTES='1;touch x' \
+    run --separate-stderr "$SCRIPT" "$AGY" "$GEMINI" "$PROMPT_FILE"
+  echo "status=$status"
+  echo "stderr=<<$stderr>>"
+  [ "$status" -eq 0 ]
+  [[ "$stderr" == *"ignoring invalid RC_ARGV_MAX_BYTES"* ]] || false
+  grep -qF 'Please review this change' "$AGY_ARGS"
 }
