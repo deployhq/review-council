@@ -481,16 +481,21 @@ T="$(mktemp -d "${TMPDIR:-/tmp}/rc-ocr-home.XXXXXX")" || T=""
 chmod 700 "$T"
 
 # stash_snapshot: SNAP=<sha of a `git stash create` snapshot>, or empty when
-# there is nothing to snapshot. A git failure (exit != 0, e.g. a held
-# index.lock) is SKIPPED with git's own last stderr line — never mistaken for
-# "no changes". `git stash create` writes objects and refreshes the index
-# file, but creates and moves no ref and touches no working-tree file.
+# there is nothing to snapshot. A git failure (exit != 0) is SKIPPED with
+# git's own last stderr line — never mistaken for "no changes". `git stash
+# create` writes objects and refreshes the index, but creates and moves no ref
+# and touches no working-tree file. It refreshes a private COPY of the index
+# (GIT_INDEX_FILE), never the live one: two seats snapshotting one repo at
+# once raced on index.lock, and the loser exited 1 with no stderr at all.
 SNAP=""
 stash_snapshot() {
+  _idx="$(git rev-parse --path-format=absolute --git-path index 2>/dev/null)" || _idx=""
+  { [ -n "$_idx" ] && cp "$_idx" "$T/index" 2>/dev/null; } || skip "cannot copy the git index"
   SNAP="$(GIT_AUTHOR_NAME=review-council GIT_AUTHOR_EMAIL=review-council@localhost \
     GIT_COMMITTER_NAME=review-council GIT_COMMITTER_EMAIL=review-council@localhost \
-    git stash create 2>"$T/stash.err")"
+    GIT_INDEX_FILE="$T/index" git stash create 2>"$T/stash.err")"
   _src=$?
+  rm -f "$T/index" # $T is ocr's HOME: the copy goes before ocr starts
   if [ "$_src" -ne 0 ]; then
     _why="$(last_log_line "$T/stash.err")"
     skip "git stash create failed: ${_why:-exit $_src}"

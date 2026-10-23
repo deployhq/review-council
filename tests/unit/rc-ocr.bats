@@ -571,14 +571,28 @@ EOF
 
 @test "--worktree: a failing git stash create is reported as such, not as 'no tracked changes'" {
   printf 'c\n' >>a.sh
-  : >.git/index.lock # stash create must write the index: this makes it fail
+  chmod -R a-w .git/objects # stash create must write objects: this makes it fail
   run_ocr --worktree
-  rm -f .git/index.lock
+  chmod -R u+w .git/objects
   [ "$status" -eq 0 ]
   [[ "$output" == "SKIPPED: qwen (ocr) unavailable — ocr: git stash create failed: "* ]] || false # bash 3.2: a bare [[ ]] mid-test never fails
   [ "$(printf '%s\n' "$output" | wc -l)" -eq 1 ]
   [ "$(meta status)" = skipped ]
   [ ! -e "$CTL/calls" ]
+}
+
+@test "--worktree: a held index.lock (another git snapshotting at once) does not fail the snapshot, and the live index is never written" {
+  printf 'c\n' >>a.sh
+  sleep 1 && touch a.sh # stale stat info: a refresh must rewrite the index
+  : >.git/index.lock
+  ix_before="$(cksum <.git/index)"
+  run_ocr --worktree
+  [ -e .git/index.lock ]
+  rm -f .git/index.lock
+  [ "${lines[0]}" = "TOOL: qwen (ocr)" ]
+  snap="$(grep -A1 -x -- '--to' "$CTL/review.argv" | tail -n 1)"
+  git show "$snap:a.sh" | grep -qx c
+  [ "$(cksum <.git/index)" = "$ix_before" ]
 }
 
 @test "--staged reviews the INDEX only (HEAD..stash^2): unstaged edits never reach ocr" {
@@ -622,9 +636,9 @@ EOF
 @test "--staged: a failing git stash create is reported as such" {
   printf 'c\n' >>a.sh
   git add a.sh
-  : >.git/index.lock
+  chmod -R a-w .git/objects
   run_ocr --staged
-  rm -f .git/index.lock
+  chmod -R u+w .git/objects
   [[ "$output" == "SKIPPED: qwen (ocr) unavailable — ocr: git stash create failed: "* ]] || false # bash 3.2: a bare [[ ]] mid-test never fails
   [ ! -e "$CTL/calls" ]
 }
