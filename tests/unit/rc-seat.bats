@@ -276,18 +276,20 @@ OC_MSG='Your complete task and the full review context are in the attached file 
 # Argv per harness × provider (exact)
 # ===========================================================================
 
-@test "codex + ollama: exact argv (--oss, read-only sandbox, -o in the private dir)" {
+@test "codex + ollama: exact argv (--oss, KEY vars kept from shell commands, read-only sandbox, -o in the private dir)" {
   run_seat
   [ "$status" -eq 0 ]
   [ "${lines[0]}" = "TOOL: s1 (qwen3.6:35b-a3b-coding-nvfp4 via codex)" ]
   priv="$(dirname "$(cat "$CTL/home")")"
-  argv_is exec --oss --local-provider ollama --sandbox read-only --skip-git-repo-check \
+  argv_is exec --oss --local-provider ollama \
+    -c shell_environment_policy.ignore_default_excludes=false \
+    --sandbox read-only --skip-git-repo-check \
     -m qwen3.6:35b-a3b-coding-nvfp4 -o "$priv/last.txt"
   stdin_is_prompt
   [ "$(envval CODEX_HOME)" = "$priv/codex" ]
 }
 
-@test "codex + openrouter: exact argv (inline provider, -c model_provider), key exported as OPENROUTER_API_KEY" {
+@test "codex + openrouter: exact argv (inline provider, -c model_provider, KEY vars kept from shell commands), key exported as OPENROUTER_API_KEY" {
   seat codex openrouter
   RC_OLLAMA_TAGS_URL="file://$BATS_TEST_TMPDIR/no-such-tags.json" run_seat
   [ "$status" -eq 0 ]
@@ -296,6 +298,7 @@ OC_MSG='Your complete task and the full review context are in the attached file 
   argv_is exec \
     -c "model_providers.openrouter={ name='OpenRouter', base_url='https://openrouter.ai/api/v1', wire_api='responses', env_key='OPENROUTER_API_KEY' }" \
     -c model_provider=openrouter \
+    -c shell_environment_policy.ignore_default_excludes=false \
     --sandbox read-only --skip-git-repo-check -m qwen/qwen3-coder -o "$priv/last.txt"
   stdin_is_prompt
   [ "$(cat "$CTL/pwd")" = "$(cat "$CTL/priv_real")/repo" ]
