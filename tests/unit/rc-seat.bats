@@ -1175,17 +1175,39 @@ OC_MSG='Your complete task and the full review context are in the attached file 
 
 @test "snapshot: a failing git stash create -> SKIPPED 'could not snapshot the repo: <git's line>'" {
   printf 'edit\n' >>"$REPO/m.py"
-  : >"$REPO/.git/index.lock"
+  chmod -R a-w "$REPO/.git/objects" # stash create must write objects
   run_seat
-  # git's own wording differs by version (macOS: "error: could not write
-  # index"; Ubuntu's git words the index.lock failure differently), so assert
-  # the script's prefix plus a non-empty git line, not git's exact text.
+  chmod -R u+w "$REPO/.git/objects"
+  # git's own wording differs by version, so assert the script's prefix plus
+  # a non-empty git line, not git's exact text.
   case "$output" in
   "SKIPPED: s1 (codex) unavailable — codex: could not snapshot the repo: "?*) : ;;
   *) echo "unexpected: $output" && return 1 ;;
   esac
   [ ! -e "$CTL/calls" ]
+}
+
+@test "snapshot: a git failure with no stderr -> SKIPPED with the exit code" {
+  mkdir -p "$BATS_TEST_TMPDIR/bin"
+  REAL_GIT="$(command -v git)"
+  printf '#!/bin/sh\ncase " $* " in *" stash create "*) exit 3 ;; esac\nexec "%s" "$@"\n' "$REAL_GIT" >"$BATS_TEST_TMPDIR/bin/git"
+  chmod +x "$BATS_TEST_TMPDIR/bin/git"
+  PATH="$BATS_TEST_TMPDIR/bin:$PATH" run_seat
+  [ "$output" = "SKIPPED: s1 (codex) unavailable — codex: could not snapshot the repo: git stash create failed (exit 3)" ]
+  [ ! -e "$CTL/calls" ]
+}
+
+@test "snapshot: a held index.lock (another seat snapshotting at once) does not fail it, and the live index is never written" {
+  printf 'def add(a, b):\n    return a + b  # fixed\n' >"$REPO/m.py"
+  sleep 1 && touch "$REPO/m.py" # stale stat info: a refresh must rewrite the index
+  : >"$REPO/.git/index.lock"
+  ix_before="$(cksum <"$REPO/.git/index")"
+  run_seat
+  [ -e "$REPO/.git/index.lock" ]
   rm -f "$REPO/.git/index.lock"
+  [ "$(meta status)" = complete ]
+  grep -qF 'a + b  # fixed' "$CTL/m.py"
+  [ "$(cksum <"$REPO/.git/index")" = "$ix_before" ]
 }
 
 @test "relative result and prompt paths resolve against the caller's cwd" {

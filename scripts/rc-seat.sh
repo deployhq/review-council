@@ -463,26 +463,34 @@ chmod 600 "$PROMPT_COPY"
 # (staged + unstaged edits to tracked files), never the live checkout — so an
 # untracked .env or a gitignored file is simply not there to be read. `git
 # stash create` makes a dangling commit (no ref, no stash entry, no working
-# tree change); empty output = no tracked changes → HEAD. `git archive` is
-# run from the top level (from a subdir it would archive only that subdir), to
-# a file so its exit status is not hidden behind tar's. No .git in the copy.
+# tree change); empty output = no tracked changes → HEAD. It refreshes a
+# private COPY of the index (GIT_INDEX_FILE), never the live one: two seats
+# snapshotting one repo at once raced on index.lock, and the loser exited 1
+# with no stderr at all. `git archive` is run from the top level (from a
+# subdir it would archive only that subdir), to a file so its exit status is
+# not hidden behind tar's. No .git in the copy.
 # ---------------------------------------------------------------------------
-# snap_fail <what> <stderr-file>: SKIPPED with git's own last stderr line.
+# snap_fail <what> <stderr-file> <exit>: SKIPPED with git's own last stderr
+# line, or "<what> failed (exit <n>)" when it wrote none.
 snap_fail() {
   _why=""
   [ -s "$2" ] && _why="$(one_line "$(grep -v '^[[:space:]]*$' "$2" | tail -n 1)" | cut -c1-200)"
-  skip "could not snapshot the repo: ${_why:-$1 failed}"
+  skip "could not snapshot the repo: ${_why:-$1 failed (exit $3)}"
 }
 git -C "$ROOT" rev-parse -q --verify 'HEAD^{commit}' >/dev/null 2>&1 ||
   skip "could not snapshot the repo: no HEAD commit"
+_idx="$(git -C "$ROOT" rev-parse --path-format=absolute --git-path index 2>/dev/null)" || _idx=""
+{ [ -n "$_idx" ] && cp "$_idx" "$T/index" 2>/dev/null; } ||
+  skip "could not snapshot the repo: cannot copy the git index"
 SNAP="$(GIT_AUTHOR_NAME=review-council GIT_AUTHOR_EMAIL=review-council@localhost \
   GIT_COMMITTER_NAME=review-council GIT_COMMITTER_EMAIL=review-council@localhost \
-  git -C "$ROOT" stash create 2>"$T/snap.err")" || snap_fail "git stash create" "$T/snap.err"
+  GIT_INDEX_FILE="$T/index" git -C "$ROOT" stash create 2>"$T/snap.err")" ||
+  snap_fail "git stash create" "$T/snap.err" $?
 [ -n "$SNAP" ] || SNAP=HEAD
 git -C "$ROOT" archive --format=tar "$SNAP" >"$T/snap.tar" 2>"$T/snap.err" ||
-  snap_fail "git archive" "$T/snap.err"
-tar -xf "$T/snap.tar" -C "$T/repo" 2>"$T/snap.err" || snap_fail "tar" "$T/snap.err"
-rm -f "$T/snap.tar" "$T/snap.err"
+  snap_fail "git archive" "$T/snap.err" $?
+tar -xf "$T/snap.tar" -C "$T/repo" 2>"$T/snap.err" || snap_fail "tar" "$T/snap.err" $?
+rm -f "$T/snap.tar" "$T/snap.err" "$T/index"
 
 # opencode: its read tool is confined to its cwd (external_directory: deny), so
 # the prompt copy goes INTO the snapshot. Whatever the repo tracks under that
