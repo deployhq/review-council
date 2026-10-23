@@ -478,7 +478,7 @@ Bring your own models — Qwen, Kimi, GLM, DeepSeek, or a local Ollama model —
 
 | `harness` | What it is | Read-only boundary | Notes |
 |---|---|---|---|
-| `codex` | OpenAI's Codex CLI (`npm i -g @openai/codex`), no OpenAI account needed | the OS kernel sandbox (writes); reads are **not** confined | Gets the council's prompt and a lens. With OpenRouter, anything on your machine it reads can leave it, and it can't send `data_collection: deny` — prefer `claude` for OpenRouter. |
+| `codex` | OpenAI's Codex CLI (`npm i -g @openai/codex`), no OpenAI account needed | the OS kernel sandbox (writes); reads are **not** confined | Gets the council's prompt and a lens. With OpenRouter, anything on your machine it reads can leave it — its own key included — and it can't send `data_collection: deny`. Prefer `claude` for OpenRouter, or use a [dedicated key](#custom-reviewer-seats). |
 | `claude` | Claude Code (already installed — it's the host) | only `Read`/`Grep`/`Glob` exist, confined to a snapshot of the repo | **The default for OpenRouter.** Gets the council's prompt and a lens; real turn limit (`max_turns`). |
 | `opencode` | opencode (`npm i -g opencode-ai`) | council-written deny-all config | Version 1.19.0 or newer (guards re-tested on 1.19.3). |
 | `ocr` | Alibaba's OpenCodeReview (`npm i -g @alibaba-group/open-code-review`, plus `jq`) | fixed read-only tool set | Its own whole-diff review pipeline with a coverage line; no lens; slow. |
@@ -562,6 +562,8 @@ Either way the seat is a **finder only**: it never verifies (or refutes) anyone 
 Endpoints are fixed in code (there is no URL key), the key value is read from your environment and never written anywhere, and each run uses a throwaway `HOME`, so your own `~/.opencodereview/` is never read or changed. The reviewed repo's own `ocr` rules are displaced by a neutral council rule file, checked before every run.
 
 **The human gate.** If a repo you review switches on a seat **only** through its committed `config.yml`, and that seat would send code to OpenRouter on your key, the review asks you once at the start and skips the seat unless you say yes. A committed `config.yml` can never set `api_key_env`, `flags` or `env`. (A `config.local.yml` that git tracks counts as committed.)
+
+**Use a dedicated OpenRouter key.** A `codex` seat runs shell commands, and codex holds the key in its own environment, so a repo with planted instructions can get the model to read it. The seat's answer is thrown away (`SKIPPED: … answer contained the provider key`) if it contains the key — plain, spaced out, reversed or base64 — but a determined injection can still encode it some other way, and the model host sees whatever the tools read. So give review-council its own key, not your main one: in OpenRouter's key settings set a **credit limit** (with a daily or weekly reset) and an **expiry**, and attach a **guardrail** that allows only the models you use and requires Zero Data Retention. Then point seats at it, e.g. `api_key_env: OPENROUTER_REVIEW_KEY`.
 
 **The coverage line.** `ocr` reviews the diff itself, and at the default budget it often runs out of time before every file is done. So whenever the seat ran — complete, partial, or with zero findings — the report prints what it actually covered, under the Pipeline line (and in the PR digest):
 

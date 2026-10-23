@@ -141,7 +141,7 @@ command line, or in the `ocr` config file the council writes.
 | `provider` | `openrouter` | `openrouter` \| `ollama`, for every harness. Invalid → seat dropped. |
 | `model` | *(empty → seat off)* | required; the `modelslug` charset (`^[A-Za-z0-9~@][A-Za-z0-9._:~@/-]{0,127}$`, no leading `-`). Decides the family. |
 | `role` | `signal` | `signal` \| `reviewer` — see [Role](#role). |
-| `api_key_env` | `OPENROUTER_API_KEY` (OpenRouter); empty (Ollama) | **Trusted layers only.** A POSIX identifier (`envname`), re-checked by the dispatch script. Ignored for Ollama. |
+| `api_key_env` | `OPENROUTER_API_KEY` (OpenRouter); empty (Ollama) | **Trusted layers only.** A POSIX identifier (`envname`), re-checked by the dispatch script. Ignored for Ollama. Point it at a dedicated, limited key (README → "Use a dedicated OpenRouter key"). |
 | `harness_options.effort` | `low` | **`ocr` only.** `low` \| `medium` \| `high` — `ocr`'s review rounds (1/2/3). |
 | `harness_options.concurrency` | *(ocr's own)* | **`ocr` only.** integer 1–32 |
 | `harness_options.max_tokens_budget` | `0` (= ocr's default) | **`ocr` only.** positive integer, at most 9 digits; `ocr` stops and publishes partial results when it is spent. |
