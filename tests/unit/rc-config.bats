@@ -980,6 +980,43 @@ YML
   [[ "$stderr" == *"ignored in the git-tracked config.local.yml"* ]] || false
 }
 
+@test "custom: git failing INSIDE a repo (exit 128, e.g. dubious ownership) -> config.local.yml untrusted, fail closed" {
+  git -C "$BATS_TEST_TMPDIR" init -q repo
+  R="$BATS_TEST_TMPDIR/repo/.review-council"
+  mkdir -p "$R"
+  printf 'reviewers:\n  custom:\n    q:\n      harness: ocr\n      model: qwen/x\n      api_key_env: AWS_SECRET_ACCESS_KEY\n' >"$R/config.local.yml"
+  printf '[[[\n' >"$BATS_TEST_TMPDIR/repo/.git/config" # git now refuses the repo
+  run --separate-stderr "$SCRIPT" "$R"
+  [ "$status" -eq 0 ]
+  has_line "reviewer.custom.q.source=committed"
+  has_line "reviewer.custom.q.api_key_env=OPENROUTER_API_KEY"
+  [[ "$stderr" == *"cannot tell whether git tracks"* ]] || false
+}
+
+@test "custom: git not installed inside a repo -> config.local.yml untrusted, fail closed" {
+  git -C "$BATS_TEST_TMPDIR" init -q repo
+  R="$BATS_TEST_TMPDIR/repo/.review-council"
+  mkdir -p "$R" "$BATS_TEST_TMPDIR/bin"
+  printf 'reviewers:\n  custom:\n    q:\n      harness: ocr\n      model: qwen/x\n      api_key_env: AWS_SECRET_ACCESS_KEY\n' >"$R/config.local.yml"
+  printf '#!/bin/sh\nexit 127\n' >"$BATS_TEST_TMPDIR/bin/git"
+  chmod +x "$BATS_TEST_TMPDIR/bin/git"
+  PATH="$BATS_TEST_TMPDIR/bin:$PATH" run --separate-stderr "$SCRIPT" "$R"
+  [ "$status" -eq 0 ]
+  has_line "reviewer.custom.q.source=committed"
+  has_line "reviewer.custom.q.api_key_env=OPENROUTER_API_KEY"
+}
+
+@test "custom: config.local.yml outside any git repo stays trusted, even when git errors there" {
+  mkdir -p "$BATS_TEST_TMPDIR/bin"
+  printf 'reviewers:\n  custom:\n    q:\n      harness: ocr\n      model: qwen/x\n      api_key_env: MY_KEY\n' >"$CFG/config.local.yml"
+  printf '#!/bin/sh\nexit 128\n' >"$BATS_TEST_TMPDIR/bin/git"
+  chmod +x "$BATS_TEST_TMPDIR/bin/git"
+  PATH="$BATS_TEST_TMPDIR/bin:$PATH" run --separate-stderr "$SCRIPT" "$CFG"
+  [ "$status" -eq 0 ]
+  has_line "reviewer.custom.q.source=local"
+  has_line "reviewer.custom.q.api_key_env=MY_KEY"
+}
+
 @test "custom: an untracked config.local.yml inside a git repo stays trusted" {
   git -C "$BATS_TEST_TMPDIR" init -q repo
   R="$BATS_TEST_TMPDIR/repo/.review-council"

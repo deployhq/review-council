@@ -95,7 +95,7 @@ over_ok="$(layer_ok "$over_file")"
 # not track it. Being gitignored is a convention, not a boundary — a reviewed
 # repo can simply commit a config.local.yml — so a tracked one is treated as
 # untrusted for the security-sensitive keys (resolve_over, custom seats). Its
-# ordinary keys still apply, exactly as before. No git / not a repo -> untracked.
+# ordinary keys still apply, exactly as before. Not inside a repo -> untracked.
 #
 # The tracked check is CASE-INSENSITIVE (`:(icase)` pathspec magic): on a
 # case-folding FS (macOS default) a committed `Config.Local.yml` is the file we
@@ -103,13 +103,31 @@ over_ok="$(layer_ok "$over_file")"
 # untracked -> trusted. Fail closed: tracked under ANY casing -> untrusted.
 # GIT_LITERAL_PATHSPECS is pinned off: inherited as 1 it would disable the
 # magic, match nothing, and fail OPEN.
+#
+# Only git's own "not tracked" (exit 1) trusts the file. Any other failure
+# (dubious ownership, a broken repo, git missing) trusts it only when no
+# directory above holds a .git, i.e. it is really not a repo; inside one, a
+# git that cannot answer fails closed.
 over_trusted=0
 if [ "$over_ok" -eq 1 ]; then
-  over_trusted=1
-  if GIT_LITERAL_PATHSPECS=0 git -C "$(dirname "$over_file")" ls-files --error-unmatch -- ":(icase)$(basename "$over_file")" >/dev/null 2>&1; then
-    over_trusted=0
-    echo "rc-config: $over_file is tracked by git — treated as untrusted (like config.yml) for security-sensitive keys" >&2
-  fi
+  _od="$(dirname "$over_file")"
+  _gs=0
+  GIT_LITERAL_PATHSPECS=0 git -C "$_od" ls-files --error-unmatch -- ":(icase)$(basename "$over_file")" >/dev/null 2>&1 || _gs=$?
+  case "$_gs" in
+    0) echo "rc-config: $over_file is tracked by git — treated as untrusted (like config.yml) for security-sensitive keys" >&2 ;;
+    1) over_trusted=1 ;;
+    *)
+      _od="$(cd "$_od" 2>/dev/null && pwd -P)" || _od=""
+      while [ -n "$_od" ] && [ ! -e "$_od/.git" ]; do
+        [ "$_od" = / ] && _od="" || _od="$(dirname "$_od")"
+      done
+      if [ -z "$_od" ]; then
+        over_trusted=1
+      else
+        echo "rc-config: cannot tell whether git tracks $over_file — treated as untrusted (like config.yml) for security-sensitive keys" >&2
+      fi
+      ;;
+  esac
 fi
 
 # The user layer — ~/.review-council/config.yml — lives outside every repo, so
