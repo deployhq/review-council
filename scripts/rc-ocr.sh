@@ -366,7 +366,11 @@ fi
 TIMEOUT_MIN="$(cfg "$P.opt.timeout_minutes")"
 if [ -n "$TIMEOUT_MIN" ]; then
   if ! is_uint "$TIMEOUT_MIN" || [ "$TIMEOUT_MIN" -lt 1 ]; then
-    note "invalid timeout_minutes; deriving from run budget"
+    if [ "$PROVIDER" = ollama ]; then
+      note "invalid timeout_minutes; using the 30-minute local default"
+    else
+      note "invalid timeout_minutes; deriving from run budget"
+    fi
     TIMEOUT_MIN=""
   fi
 fi
@@ -423,9 +427,13 @@ fi
 # Budget: ocr's --timeout is minutes and is multiplied by effort rounds
 # (verified: internal/agent/agent.go — timeout × Template.ReviewRounds()).
 # ---------------------------------------------------------------------------
+# A local (ollama) seat with no timeout_minutes gets 30 minutes — local models
+# are slow; an OpenRouter seat derives its deadline from the run budget.
 RESERVE=$((RUN_BUDGET / 3))
 if [ -n "$TIMEOUT_MIN" ]; then
   DEADLINE_MIN="$TIMEOUT_MIN"
+elif [ "$PROVIDER" = ollama ]; then
+  DEADLINE_MIN=30
 else
   DEADLINE_MIN=$(((RUN_BUDGET - RESERVE) / 60))
   [ "$DEADLINE_MIN" -ge 1 ] || DEADLINE_MIN=1

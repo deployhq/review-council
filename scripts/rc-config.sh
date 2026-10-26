@@ -586,7 +586,13 @@ printf 'pr_comments.bot_token_env=%s\n' "$_pc_tokenenv"
 # Typed keys resolve across all four. Keys that select a secret or shape the
 # harness's argv/env freely — api_key_env, harness_options.flags/env — are read
 # from the trusted layers only; set in an untrusted layer they are ignored with
-# a note. A seat that ONLY an untrusted layer defines and that sends code off
+# a note. Harnesses: ocr | codex | claude | opencode. Each typed harness option
+# applies to the harnesses listed at its resolve below (set on another, it is
+# dropped with a note); free-form flags/env are ocr-only — every agent harness
+# has isolation-critical flags/env, so none of them gets a free-form surface.
+# Of the enabled seats that ONLY an untrusted layer defines, just the first (in
+# slot order) is emitted.
+# A seat that ONLY an untrusted layer defines and that sends code off
 # the machine gets a `confirm.<n>=` line: the orchestrator asks the human once
 # before running it (skills/run/SKILL.md, Step 0).
 #
@@ -702,6 +708,32 @@ cs_resolve() {
   printf '%s' "$_cr_val"
 }
 
+# cs_set_anywhere <slot> <subpath>: does ANY usable layer (trusted or not) set
+# <subpath> for <slot>?
+cs_set_anywhere() {
+  for _ca_layer in base overu user over; do
+    cs_layer_on "$_ca_layer" || continue
+    _ca_tag="$("$YQ_BIN" ".reviewers.custom[\"$1\"]$2 | tag" "$(cs_layer_file "$_ca_layer")" 2>/dev/null)" || continue
+    [ "$_ca_tag" = "!!null" ] || return 0
+  done
+  return 1
+}
+
+# cs_opt <slot> <harness> <option> <default> <kind> <applies-to>: a typed
+# harness option (safe from any layer). Resolved only when <harness> is
+# <applies-to> or <applies-to> is `all`; otherwise it is never validated, only
+# noted once if set, and returns 1 so the caller emits no opt line for it.
+cs_opt() {
+  if [ "$6" = all ] || [ "$2" = "$6" ]; then
+    cs_resolve "$1" ".harness_options.$3" "$4" "$5" 0
+    return 0
+  fi
+  if cs_set_anywhere "$1" ".harness_options.$3"; then
+    echo "rc-config: reviewer.custom.$1.harness_options.$3 applies only to harness $6; ignored" >&2
+  fi
+  return 1
+}
+
 # cs_names <layer>: the valid slot names a layer defines, one per line, in
 # document order. Invalid names are noted and dropped HERE, before any of them
 # can reach a yq expression.
@@ -750,9 +782,10 @@ cs_note_untrusted() {
 
 # Enumerate: union of every layer's valid names, TRUSTED layers first (over,
 # user, then overu, base), document order within a layer; a name takes the
-# position of its first appearance in that order. The order matters: the
-# orchestrator's one-seat cap takes the first available entry of
-# reviewer.custom_slots, so a committed seat must never displace a trusted one.
+# position of its first appearance in that order. The order matters: every
+# trusted seat is emitted, but of the seats only the committed config names,
+# just the first enabled one in this order runs (the rest are dropped below),
+# and reviewer.custom_slots lists trusted seats before it.
 CS_ALL=""
 if [ "$yq_present" -eq 1 ]; then
   for _cs_layer in over user overu base; do
@@ -770,15 +803,16 @@ CS_OUT=""
 CS_SLOTS=""
 CS_CONFIRM=0
 CS_CONF_OUT=""
+CS_COMMITTED_TAKEN=0
 
 _cs_old_ifs="$IFS"
 IFS=','
 set -f
 for _cs in $CS_ALL; do
   IFS="$_cs_old_ifs"
-  _harness="$(cs_resolve "$_cs" .harness "" enum:ocr 0)"
+  _harness="$(cs_resolve "$_cs" .harness "" enum:ocr,codex,claude,opencode 0)"
   if [ -z "$_harness" ]; then
-    echo "rc-config: reviewer.custom.$_cs: no valid harness (PR 1 supports: ocr); seat skipped" >&2
+    echo "rc-config: reviewer.custom.$_cs: no valid harness (supported: ocr, codex, claude, opencode); seat skipped" >&2
     IFS=','
     continue
   fi
@@ -803,6 +837,20 @@ for _cs in $CS_ALL; do
     *) _source=committed ;;
   esac
 
+  # At most ONE enabled seat that only the repo's committed config names runs
+  # per review — otherwise a reviewed repo could field many (Ollama seats need
+  # no confirm) and forge cross-family agreement between its own seats. The
+  # first in slot order (trusted-first) is kept; the rest emit nothing. A
+  # disabled seat never runs, so it does not use up the slot.
+  if [ "$_source" = committed ] && [ "$_enabled" = true ]; then
+    if [ "$CS_COMMITTED_TAKEN" -eq 1 ]; then
+      echo "rc-config: reviewer.custom.$_cs: only one seat from the repo's committed config runs per review; seat skipped (enable it in ~/.review-council/config.yml or an untracked config.local.yml to run it)" >&2
+      IFS=','
+      continue
+    fi
+    CS_COMMITTED_TAKEN=1
+  fi
+
   if [ "$_provider" = "ollama" ]; then
     _keyenv=""
   else
@@ -810,11 +858,16 @@ for _cs in $CS_ALL; do
     [ -n "$_keyenv" ] || _keyenv=OPENROUTER_API_KEY
   fi
 
-  # Typed harness options: safe from any layer.
-  _effort="$(cs_resolve "$_cs" .harness_options.effort low enum:low,medium,high 0)"
-  _conc="$(cs_resolve "$_cs" .harness_options.concurrency "" posint_le:32 0)"
-  _mtb="$(cs_resolve "$_cs" .harness_options.max_tokens_budget 0 uint9 0)"
-  _tmin="$(cs_resolve "$_cs" .harness_options.timeout_minutes "" posint_le:180 0)"
+  # Typed harness options: safe from any layer, each only for the harness(es)
+  # it applies to — an opt line is emitted only for an applicable option.
+  _opt_lines=""
+  _cs_optl() { _opt_lines="${_opt_lines}reviewer.custom.$_cs.opt.$1=$2
+"; }
+  if _v="$(cs_opt "$_cs" "$_harness" effort low enum:low,medium,high ocr)"; then _cs_optl effort "$_v"; fi
+  if _v="$(cs_opt "$_cs" "$_harness" concurrency "" posint_le:32 ocr)"; then _cs_optl concurrency "$_v"; fi
+  if _v="$(cs_opt "$_cs" "$_harness" max_tokens_budget 0 uint9 ocr)"; then _cs_optl max_tokens_budget "$_v"; fi
+  if _v="$(cs_opt "$_cs" "$_harness" timeout_minutes "" posint_le:180 all)"; then _cs_optl timeout_minutes "$_v"; fi
+  if _v="$(cs_opt "$_cs" "$_harness" max_turns "" posint_le:200 claude)"; then _cs_optl max_turns "$_v"; fi
 
   # The human gate: a seat that only the reviewed repo's config switches on,
   # and that sends code off this machine on the operator's key. Emitted per
@@ -839,16 +892,29 @@ for _cs in $CS_ALL; do
   _slot_line "reviewer.custom.$_cs.api_key_env=$_keyenv"
   _slot_line "reviewer.custom.$_cs.family=$_family"
   _slot_line "reviewer.custom.$_cs.distinct=$_distinct"
-  _slot_line "reviewer.custom.$_cs.opt.effort=$_effort"
-  _slot_line "reviewer.custom.$_cs.opt.concurrency=$_conc"
-  _slot_line "reviewer.custom.$_cs.opt.max_tokens_budget=$_mtb"
-  _slot_line "reviewer.custom.$_cs.opt.timeout_minutes=$_tmin"
+  _slot_lines="$_slot_lines$_opt_lines"
+
+  # Free-form flags/env are ocr-only. For an agent harness they are ignored
+  # from EVERY layer — one note per key, and not the "set it in a trusted
+  # layer" advice, which would be wrong for these harnesses.
+  _ff_ocr=1
+  if [ "$_harness" != ocr ]; then
+    _ff_ocr=0
+    for _ff_k in flags env; do
+      if cs_set_anywhere "$_cs" ".harness_options.$_ff_k"; then
+        echo "rc-config: reviewer.custom.$_cs.harness_options.$_ff_k: free-form flags/env are supported only for harness ocr; ignored" >&2
+      fi
+    done
+  fi
 
   # Free-form flags: trusted layers only; the highest trusted layer that sets
   # the list wins wholesale. One bad or reserved token drops the whole list
   # (fail closed — a half-applied flag list could shift a value onto a flag).
-  cs_note_untrusted "$_cs" .harness_options.flags
-  _fl_layer="$(cs_trusted_layer_with "$_cs" .harness_options.flags)"
+  _fl_layer=""
+  if [ "$_ff_ocr" -eq 1 ]; then
+    cs_note_untrusted "$_cs" .harness_options.flags
+    _fl_layer="$(cs_trusted_layer_with "$_cs" .harness_options.flags)"
+  fi
   if [ -n "$_fl_layer" ]; then
     _fl_f="$(cs_layer_file "$_fl_layer")"
     _fl_p=".reviewers.custom[\"$_cs\"].harness_options.flags"
@@ -884,8 +950,11 @@ for _cs in $CS_ALL; do
 
   # Free-form env: trusted layers only; highest trusted layer wins wholesale;
   # each entry validated on its own (a bad entry is dropped, others kept).
-  cs_note_untrusted "$_cs" .harness_options.env
-  _ev_layer="$(cs_trusted_layer_with "$_cs" .harness_options.env)"
+  _ev_layer=""
+  if [ "$_ff_ocr" -eq 1 ]; then
+    cs_note_untrusted "$_cs" .harness_options.env
+    _ev_layer="$(cs_trusted_layer_with "$_cs" .harness_options.env)"
+  fi
   if [ -n "$_ev_layer" ]; then
     _ev_f="$(cs_layer_file "$_ev_layer")"
     _ev_p=".reviewers.custom[\"$_cs\"].harness_options.env"
@@ -916,7 +985,13 @@ for _cs in $CS_ALL; do
 
   if [ "$_needs_confirm" = true ]; then
     CS_CONFIRM=$((CS_CONFIRM + 1))
-    CS_CONF_OUT="${CS_CONF_OUT}confirm.$CS_CONFIRM=Seat '$_cs' is enabled only by the repo's committed config, and sends code to OpenRouter (model $_model), billed to your $_keyenv.
+    # codex's read-only sandbox blocks writes, not reads, and codex cannot send
+    # OpenRouter's `data_collection: deny` — say so in the one question.
+    _cs_why=""
+    if [ "$_harness" = codex ]; then
+      _cs_why=" Note: codex can read any file on this machine (its sandbox blocks writes, not reads) and cannot ask OpenRouter to deny data collection."
+    fi
+    CS_CONF_OUT="${CS_CONF_OUT}confirm.$CS_CONFIRM=Seat '$_cs' is enabled only by the repo's committed config, and sends code to OpenRouter (model $_model), billed to your $_keyenv.$_cs_why
 "
   fi
   IFS=','
