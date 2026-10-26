@@ -876,7 +876,7 @@ OC_MSG='Your complete task and the full review context are in the attached file 
 }
 
 @test "timeout (reviewer_timeout_seconds=1, harness sleeps) -> SKIPPED timed out" {
-  # openrouter: an ollama seat's default cap is 1200 s, not reviewer_timeout_seconds
+  # openrouter: an ollama seat's default cap is 1800 s, not reviewer_timeout_seconds
   seat codex openrouter
   cfg_set settings.reviewer_timeout_seconds 1
   echo 10 >"$CTL/sleep"
@@ -901,21 +901,21 @@ OC_MSG='Your complete task and the full review context are in the attached file 
   [[ "$stderr" == *"cap_s=600"* ]] || false
 }
 
-@test "cap (ollama): default 1200 s regardless of reviewer_timeout_seconds; opt.timeout_minutes wins" {
+@test "cap (ollama): default 1800 s regardless of reviewer_timeout_seconds; opt.timeout_minutes wins" {
   for h in codex claude opencode; do
     seat "$h" ollama
     cfg_set reviewer.custom.s1.opt.timeout_minutes ''
     cfg_set settings.reviewer_timeout_seconds 45
     run_seat
-    [[ "$stderr" == *"provider=ollama cap_s=1200"* ]] || false
+    [[ "$stderr" == *"provider=ollama cap_s=1800"* ]] || false
     cfg_set reviewer.custom.s1.opt.timeout_minutes 3
     run_seat
     [[ "$stderr" == *"provider=ollama cap_s=180"* ]] || false
   done
   cfg_set reviewer.custom.s1.opt.timeout_minutes 0
   run_seat
-  [[ "$stderr" == *"invalid timeout_minutes; using the 20-minute local default"* ]] || false
-  [[ "$stderr" == *"cap_s=1200"* ]] || false
+  [[ "$stderr" == *"invalid timeout_minutes; using the 30-minute local default"* ]] || false
+  [[ "$stderr" == *"cap_s=1800"* ]] || false
 }
 
 @test "claude --max-turns: opt.max_turns, else settings.claude_max_turns, else 30" {

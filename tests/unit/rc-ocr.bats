@@ -329,7 +329,7 @@ run_ocr() {
   printf '124' >"$CTL/review_rc"
   run_ocr --range "$BASE" "$HEAD_SHA"
   [ "$status" -eq 0 ]
-  [[ "$output" == "SKIPPED: qwen (ocr) unavailable — ocr: timeout (killed at the 1290s hard cap; no output)" ]] || false
+  [[ "$output" == "SKIPPED: qwen (ocr) unavailable — ocr: timeout (killed at the 1890s hard cap; no output)" ]] || false
   [ "$(printf '%s\n' "$stderr" | grep -c '^ELAPSED: ')" -eq 1 ]
 }
 
@@ -487,7 +487,7 @@ reviewer.custom.qwen.flag.2=80
 EOF
   run_ocr --range "$BASE" "$HEAD_SHA"
   argv="$(tr '\n' ' ' <"$CTL/review.argv")"
-  [[ "$argv" == "review --format json --audience agent -o "*" --rule "*"/rule.json --repo $(cd "$REPO" && pwd -P) --provider ollama --model qwen3.6:35b-a3b-coding-nvfp4 --effort low --timeout 20 --from $BASE --to $HEAD_SHA --max-tools 80 " ]] || false
+  [[ "$argv" == "review --format json --audience agent -o "*" --rule "*"/rule.json --repo $(cd "$REPO" && pwd -P) --provider ollama --model qwen3.6:35b-a3b-coding-nvfp4 --effort low --timeout 30 --from $BASE --to $HEAD_SHA --max-tools 80 " ]] || false
   refute_in "$CTL/review.argv" -qx -- '--concurrency'
   refute_in "$CTL/review.argv" -qx -- '--max-tokens-budget'
 }
@@ -844,30 +844,30 @@ EOF
   [[ "$stderr" == *"deadline_min=1 rounds=1 hard_cap_s=150 llm_timeout_s=60 "* ]] || false
 }
 
-@test "budget (ollama): no timeout_minutes -> 20 min deadline, whatever the run budget" {
+@test "budget (ollama): no timeout_minutes -> 30 min deadline, whatever the run budget" {
   for b in 600 30 100000; do
     cfg_set settings.run_budget_seconds "$b"
     run_ocr --range "$BASE" "$HEAD_SHA"
-    [[ "$stderr" == *"budget deadline_min=20 rounds=1 hard_cap_s=1290 llm_timeout_s=600 effort=low"* ]] || false
-    grep -A1 -x -- '--timeout' "$CTL/review.argv" | grep -qx 20
+    [[ "$stderr" == *"budget deadline_min=30 rounds=1 hard_cap_s=1890 llm_timeout_s=600 effort=low"* ]] || false
+    grep -A1 -x -- '--timeout' "$CTL/review.argv" | grep -qx 30
   done
   cfg_set reviewer.custom.qwen.opt.effort high
   run_ocr --range "$BASE" "$HEAD_SHA"
-  [[ "$stderr" == *"deadline_min=20 rounds=3 hard_cap_s=3690 "* ]] || false
+  [[ "$stderr" == *"deadline_min=30 rounds=3 hard_cap_s=5490 "* ]] || false
 }
 
-@test "budget (ollama): an explicit timeout_minutes wins over the 20 min default" {
+@test "budget (ollama): an explicit timeout_minutes wins over the 30 min default" {
   cfg_set reviewer.custom.qwen.opt.timeout_minutes 5
   run_ocr --range "$BASE" "$HEAD_SHA"
   [[ "$stderr" == *"deadline_min=5 rounds=1 hard_cap_s=390 llm_timeout_s=300 "* ]] || false
   grep -A1 -x -- '--timeout' "$CTL/review.argv" | grep -qx 5
 }
 
-@test "budget (ollama): an invalid timeout_minutes falls back to the 20 min default with a note" {
+@test "budget (ollama): an invalid timeout_minutes falls back to the 30 min default with a note" {
   cfg_set reviewer.custom.qwen.opt.timeout_minutes 0
   run_ocr --range "$BASE" "$HEAD_SHA"
-  [[ "$stderr" == *"invalid timeout_minutes; using the 20-minute local default"* ]] || false
-  [[ "$stderr" == *"deadline_min=20 rounds=1 hard_cap_s=1290 "* ]] || false
+  [[ "$stderr" == *"invalid timeout_minutes; using the 30-minute local default"* ]] || false
+  [[ "$stderr" == *"deadline_min=30 rounds=1 hard_cap_s=1890 "* ]] || false
 }
 
 @test "budget: trusted env OCR_LLM_TIMEOUT overrides the derived per-request timeout" {

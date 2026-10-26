@@ -351,7 +351,7 @@ if [ "$PROVIDER" = openrouter ]; then
   valid_envname "$API_KEY_ENV" || skip "invalid api_key_env"
 fi
 
-# Hard cap (seconds): opt.timeout_minutes × 60, else 20 minutes for a local
+# Hard cap (seconds): opt.timeout_minutes × 60, else 30 minutes for a local
 # (ollama) seat — local models are slow — else the shared reviewer timeout.
 CAP=""
 TIMEOUT_MIN="$(cfg "$P.opt.timeout_minutes")"
@@ -360,14 +360,14 @@ if [ -n "$TIMEOUT_MIN" ]; then
     CAP=$((TIMEOUT_MIN * 60))
   else
     if [ "$PROVIDER" = ollama ]; then
-      note "invalid timeout_minutes; using the 20-minute local default"
+      note "invalid timeout_minutes; using the 30-minute local default"
     else
       note "invalid timeout_minutes; using settings.reviewer_timeout_seconds"
     fi
   fi
 fi
 if [ -z "$CAP" ] && [ "$PROVIDER" = ollama ]; then
-  CAP=1200
+  CAP=1800
 fi
 if [ -z "$CAP" ]; then
   CAP="$(cfg settings.reviewer_timeout_seconds)"

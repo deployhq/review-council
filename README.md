@@ -504,7 +504,7 @@ reviewers:
       provider: openrouter
       model: z-ai/glm-5
       harness_options:
-        timeout_minutes: 15             # default: 20 min for Ollama seats, settings.reviewer_timeout_seconds otherwise
+        timeout_minutes: 15             # default: 30 min for Ollama seats, settings.reviewer_timeout_seconds otherwise
 ```
 
 Several seats can run in one review. Two seats on the same vendor (two Kimi seats) count as **one** family, and seats never confirm each other's findings — that takes a native reviewer. A repo's committed config can add at most **one** seat per review. Every agent seat reviews a snapshot of the repo's **tracked** files (never `.env` or other untracked files), and an Ollama model must already be pulled.
@@ -572,13 +572,13 @@ ocr · qwen (qwen/qwen3.8-max-0902): reviewed 14/23 selected files · 9 failed: 
       · 20 of 43 changed files excluded before review · 1 comment dropped (path not reviewed) · 0 warnings
 ```
 
-A file the seat did not review is not a file the council calls clean. For fuller coverage, set the seat's `timeout_minutes` to give only that seat more time, or — for an OpenRouter seat — raise `settings.run_budget_seconds` (the seat gets ⅔ of it, up to 180 minutes). An Ollama seat defaults to 20 minutes, multiplied by `ocr`'s rounds (`effort` medium ×2, high ×3). The seat runs on its own clock: a slow seat makes the run longer, but never skips the double-check (refutation) of the other reviewers' findings.
+A file the seat did not review is not a file the council calls clean. For fuller coverage, set the seat's `timeout_minutes` to give only that seat more time, or — for an OpenRouter seat — raise `settings.run_budget_seconds` (the seat gets ⅔ of it, up to 180 minutes). An Ollama seat defaults to 30 minutes, multiplied by `ocr`'s rounds (`effort` medium ×2, high ×3). The seat runs on its own clock: a slow seat makes the run longer, but never skips the double-check (refutation) of the other reviewers' findings.
 
 **Choosing a model (non-normative).** From our spikes on one 43-file diff:
 
 - **Qwen3.8-Max via OpenRouter** — the best precision, and the only model to find a new real bug; slow (one host, about 30 tok/s): 5/23 files in 16–26 min, 14/23 after 2 h 43 min; about $9.70 for three runs.
 - **`qwen3.6:35b-a3b` MoE on local Ollama** (M5 Pro, 48 GB) — fast, free, and the code never leaves the machine: 23/23 files in 51 min. Weak: about 1 partly-valid comment in 9.
-- **As a `codex` seat on local Ollama** (a 379 KB, 42-file PR prompt): the `qwen3.6:35b-a3b` MoE returned a full review in about 8 minutes; the dense `qwen3.8:27b` timed out at the 20-minute default without one. For local seats, prefer the MoE.
+- **As a `codex` seat on local Ollama** (a 379 KB, 42-file PR prompt): the `qwen3.6:35b-a3b` MoE returned a full review in about 8 minutes; the dense `qwen3.8:27b` timed out at the 20-minute cap (the default then) without one; on a 631 KB prompt (~174k tokens) it took 21 minutes just to read the prompt. For local seats, prefer the MoE.
 - **Kimi K2.7-code via OpenRouter** — untested; more hosts, about $4 a run estimated, and a distinct family.
 
 None met our go bar (full coverage in under ~10 min for under ~$2, with a verified new finding). Treat the seat's output as leads for the council to check — that is what `role: signal` is for.

@@ -145,7 +145,7 @@ command line, or in the `ocr` config file the council writes.
 | `harness_options.effort` | `low` | **`ocr` only.** `low` \| `medium` \| `high` — `ocr`'s review rounds (1/2/3). |
 | `harness_options.concurrency` | *(ocr's own)* | **`ocr` only.** integer 1–32 |
 | `harness_options.max_tokens_budget` | `0` (= ocr's default) | **`ocr` only.** positive integer, at most 9 digits; `ocr` stops and publishes partial results when it is spent. |
-| `harness_options.timeout_minutes` | Ollama seat: 20 minutes (every harness; `ocr` multiplies it by its rounds); OpenRouter `ocr`: derived from the run budget; other OpenRouter seats: `settings.reviewer_timeout_seconds` | integer 1–180, every harness — see [Budget](#budget-for-a-seat). |
+| `harness_options.timeout_minutes` | Ollama seat: 30 minutes (every harness; `ocr` multiplies it by its rounds); OpenRouter `ocr`: derived from the run budget; other OpenRouter seats: `settings.reviewer_timeout_seconds` | integer 1–180, every harness — see [Budget](#budget-for-a-seat). |
 | `harness_options.max_turns` | `settings.claude_max_turns` | **`claude` only.** integer 1–200 — Claude Code's `--max-turns`. |
 | `harness_options.flags` | *(none)* | **`ocr` only, trusted layers only.** A YAML list of extra `ocr review` argv tokens. Each token: letters, digits, `._:/@=,+%-` and the glob characters `*`/`?`, ≤ 256 chars; it reaches `ocr` as one quoted argv element, never through a command line. |
 | `harness_options.env` | *(none)* | **`ocr` only, trusted layers only.** A map `NAME: value` added to `ocr`'s environment. `NAME` is a POSIX identifier; values may not contain control characters. |
@@ -237,8 +237,8 @@ run, with a note. `codex` and `opencode` do not report it (`model_check=argv`).
 minutes for an Ollama seat** (local models are slow on big prompts) and
 `settings.reviewer_timeout_seconds` (10 minutes by default) for an OpenRouter seat. Like every seat, they run on their own clock. **`ocr`:**
 
-An **Ollama** `ocr` seat with no `timeout_minutes` gets **20 minutes**, like the other
-harnesses — multiplied by its rounds, so 20, 40 or 60 minutes (plus 90 s grace) for `effort`
+An **Ollama** `ocr` seat with no `timeout_minutes` gets **30 minutes**, like the other
+harnesses — multiplied by its rounds, so 30, 60 or 90 minutes (plus 90 s grace) for `effort`
 low, medium or high. An **OpenRouter** `ocr` seat is usually the run's long pole, so its
 deadline comes from `settings.run_budget_seconds`, not `reviewer_timeout_seconds`: ⅓ of the budget is reserved for refutation and the judge, and
 `deadline_min = max(1, floor((run_budget_seconds − reserve) / 60))`, clamped to 180 — 6 minutes
