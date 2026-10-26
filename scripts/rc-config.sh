@@ -91,6 +91,50 @@ layer_ok() {
 base_ok="$(layer_ok "$base_file")"
 over_ok="$(layer_ok "$over_file")"
 
+# over_trusted: config.local.yml is TRUSTED (operator-owned) only while git does
+# not track it. Being gitignored is a convention, not a boundary — a reviewed
+# repo can simply commit a config.local.yml — so a tracked one is treated as
+# untrusted for the security-sensitive keys (resolve_over, custom seats). Its
+# ordinary keys still apply, exactly as before. Not inside a repo -> untracked.
+#
+# The tracked check is CASE-INSENSITIVE (`:(icase)` pathspec magic): on a
+# case-folding FS (macOS default) a committed `Config.Local.yml` is the file we
+# just opened as config.local.yml, yet a case-sensitive ls-files would call it
+# untracked -> trusted. Fail closed: tracked under ANY casing -> untrusted.
+# GIT_LITERAL_PATHSPECS is pinned off: inherited as 1 it would disable the
+# magic, match nothing, and fail OPEN.
+#
+# Only git's own "not tracked" (exit 1) trusts the file. Any other failure
+# (dubious ownership, a broken repo, git missing) trusts it only when no
+# directory above holds a .git, i.e. it is really not a repo; inside one, a
+# git that cannot answer fails closed.
+over_trusted=0
+if [ "$over_ok" -eq 1 ]; then
+  _od="$(dirname "$over_file")"
+  _gs=0
+  GIT_LITERAL_PATHSPECS=0 git -C "$_od" ls-files --error-unmatch -- ":(icase)$(basename "$over_file")" >/dev/null 2>&1 || _gs=$?
+  case "$_gs" in
+    0) echo "rc-config: $over_file is tracked by git — treated as untrusted (like config.yml) for security-sensitive keys" >&2 ;;
+    1) over_trusted=1 ;;
+    *)
+      _od="$(cd "$_od" 2>/dev/null && pwd -P)" || _od=""
+      while [ -n "$_od" ] && [ ! -e "$_od/.git" ]; do
+        [ "$_od" = / ] && _od="" || _od="$(dirname "$_od")"
+      done
+      if [ -z "$_od" ]; then
+        over_trusted=1
+      else
+        echo "rc-config: cannot tell whether git tracks $over_file — treated as untrusted (like config.yml) for security-sensitive keys" >&2
+      fi
+      ;;
+  esac
+fi
+
+# The user layer — ~/.review-council/config.yml — lives outside every repo, so
+# the reviewed repo cannot write it: TRUSTED. Read ONLY for reviewers.custom.
+user_file="${RC_USER_CONFIG:-${HOME:-/nonexistent}/.review-council/config.yml}"
+user_ok="$(layer_ok "$user_file")"
+
 # ---------------------------------------------------------------------------
 # Small helpers
 # ---------------------------------------------------------------------------
@@ -170,11 +214,38 @@ valid_envname() {
   return 0
 }
 
-# valid_kind <val> <kind>: bool|posint|str|modelslug|envname
+# valid_uint <val>: a non-negative integer (all digits; 0 allowed), ≤ 12 digits.
+valid_uint() {
+  case "$1" in
+    '' | *[!0-9]*) return 1 ;;
+  esac
+  [ "${#1}" -le 12 ]
+}
+
+# valid_enum <val> <comma-separated allowed values>: literal `=` comparisons in
+# a loop, so a value carrying glob metacharacters can never pattern-match.
+valid_enum() {
+  _ve_v="$1"
+  _ve_rest="$2,"
+  while [ -n "$_ve_rest" ]; do
+    _ve_item="${_ve_rest%%,*}"
+    _ve_rest="${_ve_rest#*,}"
+    [ "$_ve_v" = "$_ve_item" ] && return 0
+  done
+  return 1
+}
+
+# valid_kind <val> <kind>: bool|posint|uint|uint9|posint_le:<max>|enum:<a,b,..>|str|modelslug|envname
 valid_kind() {
   case "$2" in
     bool) valid_bool "$1" ;;
     posint) valid_posint "$1" ;;
+    uint) valid_uint "$1" ;;
+    # ≤ 9 digits: the cap scripts/rc-ocr.sh's is_uint enforces (max_tokens_budget),
+    # so a value the reader emits is never one the runner rejects.
+    uint9) valid_uint "$1" && [ "${#1}" -le 9 ] ;;
+    posint_le:*) valid_posint "$1" && [ "${#1}" -le 6 ] && [ "$1" -le "${2#posint_le:}" ] ;;
+    enum:*) valid_enum "$1" "${2#enum:}" ;;
     str) valid_str "$1" ;;
     modelslug) valid_modelslug "$1" ;;
     envname) valid_envname "$1" ;;
@@ -231,7 +302,10 @@ resolve_over() {
   if [ "$base_ok" -eq 1 ] && get_raw "$base_file" "$_ro_path" >/dev/null 2>&1; then
     echo "rc-config: $_ro_key ignored in the committed config.yml (untrusted); set it in config.local.yml or via its env override" >&2
   fi
-  if [ "$over_ok" -eq 1 ]; then
+  if [ "$over_ok" -eq 1 ] && [ "$over_trusted" -eq 0 ] && get_raw "$over_file" "$_ro_path" >/dev/null 2>&1; then
+    echo "rc-config: $_ro_key ignored in the git-tracked config.local.yml (untrusted); untrack it or use its env override" >&2
+  fi
+  if [ "$over_trusted" -eq 1 ]; then
     if _ro_raw="$(get_raw "$over_file" "$_ro_path")"; then
       if valid_kind "$_ro_raw" "$_ro_kind"; then
         _ro_val="$_ro_raw"
@@ -497,5 +571,364 @@ if [ -n "$_pc_env" ]; then
   fi
 fi
 printf 'pr_comments.bot_token_env=%s\n' "$_pc_tokenenv"
+
+# ---------------------------------------------------------------------------
+# Custom reviewer seats — reviewers.custom.<name>.* (files only, no env).
+#
+# Emitted ONLY when at least one valid seat survives: with no `custom:` block in
+# any layer, not one byte of this section appears (config invariance).
+#
+# Four layers, lowest -> highest precedence:
+#   base   .review-council/config.yml             UNTRUSTED (the reviewed repo)
+#   overu  .review-council/config.local.yml, when git TRACKS it   UNTRUSTED
+#   user   ~/.review-council/config.yml           trusted (outside every repo)
+#   over   .review-council/config.local.yml, untracked            trusted
+# Typed keys resolve across all four. Keys that select a secret or shape the
+# harness's argv/env freely — api_key_env, harness_options.flags/env — are read
+# from the trusted layers only; set in an untrusted layer they are ignored with
+# a note. A seat that ONLY an untrusted layer defines and that sends code off
+# the machine gets a `confirm.<n>=` line: the orchestrator asks the human once
+# before running it (skills/run/SKILL.md, Step 0).
+#
+# Ordering is part of the guard: names are DISCOVERED by `yq keys`, so each is
+# validated against ^[A-Za-z0-9_-]{1,32}$ BEFORE it is ever interpolated into a
+# yq expression or an emitted key.
+# ---------------------------------------------------------------------------
+
+# shellcheck source-path=SCRIPTDIR source=rc-lib-family.sh
+. "$(dirname "$0")/rc-lib-family.sh"
+
+cs_layer_file() {
+  case "$1" in
+    base) printf '%s' "$base_file" ;;
+    overu | over) printf '%s' "$over_file" ;;
+    user) printf '%s' "$user_file" ;;
+  esac
+}
+
+# cs_layer_on <layer>: is this layer usable in its trust role?
+cs_layer_on() {
+  case "$1" in
+    base) [ "$base_ok" -eq 1 ] ;;
+    overu) [ "$over_ok" -eq 1 ] && [ "$over_trusted" -eq 0 ] ;;
+    user) [ "$user_ok" -eq 1 ] ;;
+    over) [ "$over_trusted" -eq 1 ] ;;
+  esac
+}
+
+cs_layer_trusted() {
+  case "$1" in
+    user | over) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+cs_layer_label() {
+  case "$1" in
+    base) printf 'the committed config.yml' ;;
+    overu) printf 'the git-tracked config.local.yml' ;;
+    user) printf '%s' "$user_file" ;;
+    over) printf 'config.local.yml' ;;
+  esac
+}
+
+valid_slotname() {
+  [ "${#1}" -ge 1 ] && [ "${#1}" -le 32 ] || return 1
+  case "$1" in
+    *[!A-Za-z0-9_-]*) return 1 ;;
+  esac
+  return 0
+}
+
+# A free-form harness flag token (trusted layers only): no shell metacharacters
+# or control characters (glob `*`/`?` allowed, for --exclude patterns), bounded
+# length. Reaches the harness argv as ONE quoted element, never a command line.
+valid_flagtoken() {
+  [ "${#1}" -ge 1 ] && [ "${#1}" -le 256 ] || return 1
+  case "$1" in
+    *[!A-Za-z0-9._:/@=,+%*?-]*) return 1 ;;
+  esac
+  return 0
+}
+
+# Flags that would undo the seat's isolation or its output contract. Never
+# settable, from any layer. Mirrors scripts/rc-ocr.sh's reserved_flag EXACTLY,
+# so the reader is never laxer than the runner: the long forms bare or with
+# `=value`, and ANY single-dash token touching -c -f -o -p (a shorthand cluster
+# such as -cv, or an attached value such as -o/x or -p1).
+reserved_flag() {
+  case "$1" in
+    --rule | --rule=* | --repo | --repo=* | --from | --from=* | --to | --to=* | \
+      --commit | --commit=* | --tools | --tools=* | --provider | --provider=* | \
+      --model | --model=* | --output | --output=* | --format | --format=* | \
+      --audience | --audience=* | --resume | --resume=* | --preview | --preview=*)
+      return 0
+      ;;
+    --*) return 1 ;;
+    -*[cfop]*) return 0 ;;
+  esac
+  return 1
+}
+
+# A seat's env extras may not touch the isolation (HOME, PATH, TMPDIR), the
+# update switch, or any provider key.
+reserved_env() {
+  case "$1" in
+    HOME | PATH | TMPDIR | OCR_NO_UPDATE | OPENROUTER_API_KEY | "$2") return 0 ;;
+  esac
+  return 1
+}
+
+# cs_resolve <slot> <subpath> <default> <kind> <trusted-only:0|1>: per-key,
+# layered like resolve(); an invalid value never overrides a lower valid one.
+cs_resolve() {
+  _cr_slot="$1"
+  _cr_path=".reviewers.custom[\"$1\"]$2"
+  _cr_val="$3"
+  _cr_key="reviewer.custom.$1$2"
+  for _cr_layer in base overu user over; do
+    cs_layer_on "$_cr_layer" || continue
+    _cr_raw="$(get_raw "$(cs_layer_file "$_cr_layer")" "$_cr_path")" || continue
+    if [ "$5" -eq 1 ] && ! cs_layer_trusted "$_cr_layer"; then
+      echo "rc-config: $_cr_key ignored in $(cs_layer_label "$_cr_layer") (untrusted); set it in ~/.review-council/config.yml or an untracked config.local.yml" >&2
+      continue
+    fi
+    if valid_kind "$_cr_raw" "$4"; then
+      _cr_val="$_cr_raw"
+    else
+      note_bad "$_cr_key" "$_cr_raw"
+    fi
+  done
+  printf '%s' "$_cr_val"
+}
+
+# cs_names <layer>: the valid slot names a layer defines, one per line, in
+# document order. Invalid names are noted and dropped HERE, before any of them
+# can reach a yq expression.
+cs_names() {
+  _cn_f="$(cs_layer_file "$1")"
+  _cn_tag="$("$YQ_BIN" '.reviewers.custom | tag' "$_cn_f" 2>/dev/null)" || return 0
+  case "$_cn_tag" in
+    '!!null') return 0 ;;
+    '!!map') ;;
+    *)
+      echo "rc-config: reviewers.custom in $(cs_layer_label "$1") is not a map; ignored" >&2
+      return 0
+      ;;
+  esac
+  "$YQ_BIN" '.reviewers.custom | keys | .[]' "$_cn_f" 2>/dev/null | while IFS= read -r _cn_n; do
+    if valid_slotname "$_cn_n"; then
+      printf '%s\n' "$_cn_n"
+    else
+      echo "rc-config: reviewers.custom: invalid seat name '$_cn_n' (allowed: A-Z a-z 0-9 _ -, max 32); dropped" >&2
+    fi
+  done
+}
+
+# cs_trusted_layer_with <slot> <subpath>: prints the highest-precedence TRUSTED
+# layer that sets <subpath> for <slot> (or nothing).
+cs_trusted_layer_with() {
+  _ct_hit=""
+  for _ct_layer in user over; do
+    cs_layer_on "$_ct_layer" || continue
+    _ct_tag="$("$YQ_BIN" ".reviewers.custom[\"$1\"]$2 | tag" "$(cs_layer_file "$_ct_layer")" 2>/dev/null)" || continue
+    [ "$_ct_tag" = "!!null" ] || _ct_hit="$_ct_layer"
+  done
+  printf '%s' "$_ct_hit"
+}
+
+# cs_note_untrusted <slot> <subpath>: note when an untrusted layer sets a
+# trusted-only key (ignored).
+cs_note_untrusted() {
+  for _cu_layer in base overu; do
+    cs_layer_on "$_cu_layer" || continue
+    _cu_tag="$("$YQ_BIN" ".reviewers.custom[\"$1\"]$2 | tag" "$(cs_layer_file "$_cu_layer")" 2>/dev/null)" || continue
+    [ "$_cu_tag" = "!!null" ] && continue
+    echo "rc-config: reviewer.custom.$1$2 ignored in $(cs_layer_label "$_cu_layer") (untrusted); set it in ~/.review-council/config.yml or an untracked config.local.yml" >&2
+  done
+}
+
+# Enumerate: union of every layer's valid names, TRUSTED layers first (over,
+# user, then overu, base), document order within a layer; a name takes the
+# position of its first appearance in that order. The order matters: the
+# orchestrator's one-seat cap takes the first available entry of
+# reviewer.custom_slots, so a committed seat must never displace a trusted one.
+CS_ALL=""
+if [ "$yq_present" -eq 1 ]; then
+  for _cs_layer in over user overu base; do
+    cs_layer_on "$_cs_layer" || continue
+    for _cs_n in $(cs_names "$_cs_layer"); do
+      case ",$CS_ALL," in
+        *",$_cs_n,"*) ;;
+        *) CS_ALL="${CS_ALL:+$CS_ALL,}$_cs_n" ;;
+      esac
+    done
+  done
+fi
+
+CS_OUT=""
+CS_SLOTS=""
+CS_CONFIRM=0
+CS_CONF_OUT=""
+
+_cs_old_ifs="$IFS"
+IFS=','
+set -f
+for _cs in $CS_ALL; do
+  IFS="$_cs_old_ifs"
+  _harness="$(cs_resolve "$_cs" .harness "" enum:ocr 0)"
+  if [ -z "$_harness" ]; then
+    echo "rc-config: reviewer.custom.$_cs: no valid harness (PR 1 supports: ocr); seat skipped" >&2
+    IFS=','
+    continue
+  fi
+  _model="$(cs_resolve "$_cs" .model "" modelslug 0)"
+  if [ -z "$_model" ]; then
+    echo "rc-config: reviewer.custom.$_cs: no valid model; seat skipped" >&2
+    IFS=','
+    continue
+  fi
+  _enabled="$(cs_resolve "$_cs" .enabled true bool 0)"
+  _provider="$(cs_resolve "$_cs" .provider openrouter enum:openrouter,ollama 0)"
+  _role="$(cs_resolve "$_cs" .role signal enum:signal,reviewer 0)"
+  _family="$(rc_family "$_model")"
+  if rc_family_distinct "$_family"; then _distinct=true; else _distinct=false; fi
+
+  # source: which trust tier named the seat. "committed" iff NO trusted layer
+  # mentions it at all — then nobody who owns this machine opted in.
+  _source="$(cs_trusted_layer_with "$_cs" "")"
+  case "$_source" in
+    over) _source=local ;;
+    user) _source=user ;;
+    *) _source=committed ;;
+  esac
+
+  if [ "$_provider" = "ollama" ]; then
+    _keyenv=""
+  else
+    _keyenv="$(cs_resolve "$_cs" .api_key_env OPENROUTER_API_KEY envname 1)"
+    [ -n "$_keyenv" ] || _keyenv=OPENROUTER_API_KEY
+  fi
+
+  # Typed harness options: safe from any layer.
+  _effort="$(cs_resolve "$_cs" .harness_options.effort low enum:low,medium,high 0)"
+  _conc="$(cs_resolve "$_cs" .harness_options.concurrency "" posint_le:32 0)"
+  _mtb="$(cs_resolve "$_cs" .harness_options.max_tokens_budget 0 uint9 0)"
+  _tmin="$(cs_resolve "$_cs" .harness_options.timeout_minutes "" posint_le:180 0)"
+
+  # The human gate: a seat that only the reviewed repo's config switches on,
+  # and that sends code off this machine on the operator's key. Emitted per
+  # seat (needs_confirm) for the script-side confirm lock, and as a confirm.<n>
+  # line for the orchestrator's one question.
+  if [ "$_enabled" = true ] && [ "$_source" = committed ] && [ "$_provider" != ollama ]; then
+    _needs_confirm=true
+  else
+    _needs_confirm=false
+  fi
+
+  _slot_lines=""
+  _slot_line() { _slot_lines="$_slot_lines$1
+"; }
+  _slot_line "reviewer.custom.$_cs.enabled=$_enabled"
+  _slot_line "reviewer.custom.$_cs.source=$_source"
+  _slot_line "reviewer.custom.$_cs.needs_confirm=$_needs_confirm"
+  _slot_line "reviewer.custom.$_cs.harness=$_harness"
+  _slot_line "reviewer.custom.$_cs.provider=$_provider"
+  _slot_line "reviewer.custom.$_cs.model=$_model"
+  _slot_line "reviewer.custom.$_cs.role=$_role"
+  _slot_line "reviewer.custom.$_cs.api_key_env=$_keyenv"
+  _slot_line "reviewer.custom.$_cs.family=$_family"
+  _slot_line "reviewer.custom.$_cs.distinct=$_distinct"
+  _slot_line "reviewer.custom.$_cs.opt.effort=$_effort"
+  _slot_line "reviewer.custom.$_cs.opt.concurrency=$_conc"
+  _slot_line "reviewer.custom.$_cs.opt.max_tokens_budget=$_mtb"
+  _slot_line "reviewer.custom.$_cs.opt.timeout_minutes=$_tmin"
+
+  # Free-form flags: trusted layers only; the highest trusted layer that sets
+  # the list wins wholesale. One bad or reserved token drops the whole list
+  # (fail closed — a half-applied flag list could shift a value onto a flag).
+  cs_note_untrusted "$_cs" .harness_options.flags
+  _fl_layer="$(cs_trusted_layer_with "$_cs" .harness_options.flags)"
+  if [ -n "$_fl_layer" ]; then
+    _fl_f="$(cs_layer_file "$_fl_layer")"
+    _fl_p=".reviewers.custom[\"$_cs\"].harness_options.flags"
+    if [ "$("$YQ_BIN" "$_fl_p | tag" "$_fl_f" 2>/dev/null)" != "!!seq" ]; then
+      echo "rc-config: reviewer.custom.$_cs.harness_options.flags: not a list; ignored" >&2
+    else
+      _fl_n="$("$YQ_BIN" "$_fl_p | length" "$_fl_f" 2>/dev/null)" || _fl_n=0
+      valid_uint "$_fl_n" || _fl_n=0
+      _fl_i=0
+      _fl_lines=""
+      _fl_bad=""
+      while [ "$_fl_i" -lt "$_fl_n" ]; do
+        _fl_tok="$(get_raw "$_fl_f" "${_fl_p}[$_fl_i]")" || _fl_tok=""
+        if ! valid_flagtoken "$_fl_tok"; then
+          _fl_bad="invalid token '$_fl_tok'"
+          break
+        fi
+        if reserved_flag "$_fl_tok"; then
+          _fl_bad="'$_fl_tok' is reserved by the council (it would undo the seat's isolation)"
+          break
+        fi
+        _fl_i=$((_fl_i + 1))
+        _fl_lines="${_fl_lines}reviewer.custom.$_cs.flag.$_fl_i=$_fl_tok
+"
+      done
+      if [ -n "$_fl_bad" ]; then
+        echo "rc-config: reviewer.custom.$_cs.harness_options.flags: $_fl_bad; whole list ignored" >&2
+      else
+        _slot_lines="$_slot_lines$_fl_lines"
+      fi
+    fi
+  fi
+
+  # Free-form env: trusted layers only; highest trusted layer wins wholesale;
+  # each entry validated on its own (a bad entry is dropped, others kept).
+  cs_note_untrusted "$_cs" .harness_options.env
+  _ev_layer="$(cs_trusted_layer_with "$_cs" .harness_options.env)"
+  if [ -n "$_ev_layer" ]; then
+    _ev_f="$(cs_layer_file "$_ev_layer")"
+    _ev_p=".reviewers.custom[\"$_cs\"].harness_options.env"
+    if [ "$("$YQ_BIN" "$_ev_p | tag" "$_ev_f" 2>/dev/null)" != "!!map" ]; then
+      echo "rc-config: reviewer.custom.$_cs.harness_options.env: not a map; ignored" >&2
+    else
+      for _ev_k in $("$YQ_BIN" "$_ev_p | keys | .[]" "$_ev_f" 2>/dev/null); do
+        if [ -z "$_ev_k" ] || ! valid_envname "$_ev_k"; then
+          echo "rc-config: reviewer.custom.$_cs.harness_options.env: invalid name '$_ev_k'; dropped" >&2
+          continue
+        fi
+        if reserved_env "$_ev_k" "$_keyenv"; then
+          echo "rc-config: reviewer.custom.$_cs.harness_options.env: '$_ev_k' is reserved by the council; dropped" >&2
+          continue
+        fi
+        _ev_v="$(get_raw "$_ev_f" "${_ev_p}[\"$_ev_k\"]")" || continue
+        if ! valid_str "$_ev_v" || [ "${#_ev_v}" -gt 1024 ]; then
+          echo "rc-config: reviewer.custom.$_cs.harness_options.env.$_ev_k: invalid value; dropped" >&2
+          continue
+        fi
+        _slot_line "reviewer.custom.$_cs.env.$_ev_k=$_ev_v"
+      done
+    fi
+  fi
+
+  CS_OUT="$CS_OUT$_slot_lines"
+  CS_SLOTS="${CS_SLOTS:+$CS_SLOTS,}$_cs"
+
+  if [ "$_needs_confirm" = true ]; then
+    CS_CONFIRM=$((CS_CONFIRM + 1))
+    CS_CONF_OUT="${CS_CONF_OUT}confirm.$CS_CONFIRM=Seat '$_cs' is enabled only by the repo's committed config, and sends code to OpenRouter (model $_model), billed to your $_keyenv.
+"
+  fi
+  IFS=','
+done
+set +f
+IFS="$_cs_old_ifs"
+
+if [ -n "$CS_SLOTS" ]; then
+  echo "# custom reviewers"
+  printf 'reviewer.custom_slots=%s\n' "$CS_SLOTS"
+  printf '%s' "$CS_OUT"
+  printf '%s' "$CS_CONF_OUT"
+fi
 
 exit 0

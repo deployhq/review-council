@@ -114,6 +114,10 @@ Return one line per finding:
 
 This pass is **isolated per verifier**: each verifier sees only the findings routed to it, plus the baseline context — never the full council output. The orchestrator batches all findings routed to a given family into **one** fresh subagent (see Step 4). A verdict is only valid from a fresh Agent spawn; a finding with no spawn is `[unverified]`, not refuted.
 
+## Custom seats (`ocr`) — mapper-built output
+
+A custom reviewer seat (`reviewers.custom`, harness `ocr`) is **not** sent this template: `ocr` runs its own review prompts, and the council pins them neutral (`rules/providers.md` → Custom seat). Its §3.1 output is **built by a deterministic jq mapper** in `scripts/rc-ocr.sh` from `ocr`'s JSON — the same idea as the tool-origin findings in `rules/static-analysis.md`. The structural fields are fixed templates (`confidence: low`, `concern: ocr-<category>`, `source: <slot>`, a fixed `how_to_verify`, `What's Good: N/A — ocr does not report positives.`); `ocr`'s own text is carried only as fenced, control-character-stripped **data**. It is never retried or re-prompted, and it is never sent the Refutation Template — a custom seat is finder-only.
+
 ## Adding New Providers
 
 When adding a new model provider, the delegation format stays the same. Only the transport changes. See `rules/providers.md` for the full provider registry with detection, CLI invocation, MCP fallback, and env requirements for each provider.
