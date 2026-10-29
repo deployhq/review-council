@@ -47,10 +47,28 @@ on:
         description: Run the static-analysis step (Step 2.5) and install its tools (RC_STATIC_ANALYSIS).
         type: boolean
         default: true
+      # Claude authentication: EITHER the ANTHROPIC_API_KEY secret OR these
+      # Workload Identity Federation inputs (not secrets) — exactly one.
+      anthropic_federation_rule_id:
+        description: Federation rule ID (fdrl_...). Set with the organization and service account IDs to authenticate Claude without an API key.
+        type: string
+        default: ''
+      anthropic_organization_id:
+        description: Anthropic organization ID (UUID), for federation.
+        type: string
+        default: ''
+      anthropic_service_account_id:
+        description: Service account ID (svac_...) the federation rule targets.
+        type: string
+        default: ''
+      anthropic_workspace_id:
+        description: Optional workspace ID (wrkspc_...); only needed when the federation rule covers more than one workspace.
+        type: string
+        default: ''
     secrets:
       ANTHROPIC_API_KEY:
-        description: Anthropic API key for the orchestrating Claude Code session and the native Claude reviewers.
-        required: true
+        description: Anthropic API key for Claude. Leave unset when using federation (the anthropic_* inputs).
+        required: false
       OPENAI_API_KEY:
         description: Optional. Enables the Codex reviewer (exported to Codex as CODEX_API_KEY).
         required: false
@@ -65,7 +83,7 @@ on:
         required: false
 
 # No workflow-level grant: each job declares the minimum it needs. The union
-# (contents: read, pull-requests: write, issues: write) is what the caller
+# (contents: read, pull-requests: write, issues: write, id-token: write) is what the caller
 # must grant.
 permissions: {}
 
@@ -121,9 +139,30 @@ jobs:
           COMMENT_ID: ${{ github.event.comment.id }}
           COMMENTER: ${{ github.event.comment.user.login }}
           RUN_BUDGET: ${{ inputs.run_budget_seconds }}
+          HAS_KEY: ${{ secrets.ANTHROPIC_API_KEY != '' }}
+          FED_RULE: ${{ inputs.anthropic_federation_rule_id }}
+          FED_ORG: ${{ inputs.anthropic_organization_id }}
+          FED_SA: ${{ inputs.anthropic_service_account_id }}
         run: |
           set -euo pipefail
           skip() { echo "Skipping: $1"; echo "proceed=false" >> "$GITHUB_OUTPUT"; exit 0; }
+
+          # Claude auth: exactly one of the API key or the federation inputs.
+          # A misconfigured caller fails here, before any spend.
+          fed_set=0
+          [ -n "$FED_RULE$FED_ORG$FED_SA" ] && fed_set=1
+          if [ "$fed_set" = 1 ] && { [ -z "$FED_RULE" ] || [ -z "$FED_ORG" ] || [ -z "$FED_SA" ]; }; then
+            echo "::error::Federation needs anthropic_federation_rule_id, anthropic_organization_id and anthropic_service_account_id together."
+            exit 1
+          fi
+          if [ "$HAS_KEY" = true ] && [ "$fed_set" = 1 ]; then
+            echo "::error::Set either the ANTHROPIC_API_KEY secret or the anthropic_* federation inputs, not both."
+            exit 1
+          fi
+          if [ "$HAS_KEY" != true ] && [ "$fed_set" = 0 ]; then
+            echo "::error::No Claude credentials: set the ANTHROPIC_API_KEY secret or the anthropic_* federation inputs."
+            exit 1
+          fi
 
           case "$PR_NUMBER" in ''|*[!0-9]*) skip "no PR number on this event" ;; esac
 
@@ -174,6 +213,10 @@ jobs:
       contents: read
       pull-requests: write  # post/update the review digest
       issues: write         # the digest is an issue comment on the PR
+      # Federation: mint GitHub OIDC tokens for the Anthropic exchange. Job
+      # permissions are static, so it is requested in both auth modes; the
+      # request variables are stripped from Claude's environment either way.
+      id-token: write
     # Taken only after the gate passed, so only an authorised trigger can
     # cancel (supersede) a review in progress for the same PR.
     concurrency:
@@ -322,13 +365,62 @@ jobs:
           RC_PR_BOT_TOKEN: ${{ secrets.PR_BOT_TOKEN }}
           RC_PR_BOT_TOKEN_ENV: RC_PR_BOT_TOKEN
           PR_NUMBER: ${{ needs.gate.outputs.pr_number }}
+          ANTHROPIC_FEDERATION_RULE_ID: ${{ inputs.anthropic_federation_rule_id }}
+          ANTHROPIC_ORGANIZATION_ID: ${{ inputs.anthropic_organization_id }}
+          ANTHROPIC_SERVICE_ACCOUNT_ID: ${{ inputs.anthropic_service_account_id }}
+          ANTHROPIC_WORKSPACE_ID: ${{ inputs.anthropic_workspace_id }}
         run: |
           set -uo pipefail
-          # Unset empty optional keys so providers detect "not set", not "set to ''".
-          for v in CODEX_API_KEY OPENROUTER_API_KEY PERPLEXITY_API_KEY; do
+          # Unset empty optional values so they read as "not set", not "set to ''"
+          # (an empty credential variable can still win its precedence slot).
+          for v in ANTHROPIC_API_KEY CODEX_API_KEY OPENROUTER_API_KEY PERPLEXITY_API_KEY \
+                   ANTHROPIC_FEDERATION_RULE_ID ANTHROPIC_ORGANIZATION_ID \
+                   ANTHROPIC_SERVICE_ACCOUNT_ID ANTHROPIC_WORKSPACE_ID; do
             [ -n "${!v:-}" ] || unset "$v"
           done
           [ -n "${RC_PR_BOT_TOKEN:-}" ] || unset RC_PR_BOT_TOKEN RC_PR_BOT_TOKEN_ENV
+
+          # Keep the OIDC request credentials out of Claude's environment; only
+          # the refresh loop below (federation mode) holds a copy.
+          oidc_url="${ACTIONS_ID_TOKEN_REQUEST_URL:-}"
+          oidc_tok="${ACTIONS_ID_TOKEN_REQUEST_TOKEN:-}"
+          unset ACTIONS_ID_TOKEN_REQUEST_URL ACTIONS_ID_TOKEN_REQUEST_TOKEN
+
+          if [ -n "${ANTHROPIC_FEDERATION_RULE_ID:-}" ]; then
+            # Workload Identity Federation. Claude Code exchanges the JWT in
+            # ANTHROPIC_IDENTITY_TOKEN_FILE itself and re-reads the file on each
+            # refresh. GitHub JWTs live ~5 min and each can be exchanged once,
+            # so keep a fresh one in the file (atomic rename) every 60s.
+            # Not --bare: bare mode ignores federation variables.
+            unset ANTHROPIC_API_KEY
+            if [ -z "$oidc_url" ] || [ -z "$oidc_tok" ]; then
+              echo "::error::No GitHub OIDC token available. Grant 'id-token: write' in the calling workflow."
+              exit 1
+            fi
+            export ANTHROPIC_IDENTITY_TOKEN_FILE="$RUNNER_TEMP/anthropic-oidc.jwt"
+            fetch_jwt() {
+              curl -fsS -H "Authorization: Bearer $oidc_tok" \
+                "$oidc_url&audience=https://api.anthropic.com" \
+                | jq -er .value > "$ANTHROPIC_IDENTITY_TOKEN_FILE.tmp" \
+                && mv -f "$ANTHROPIC_IDENTITY_TOKEN_FILE.tmp" "$ANTHROPIC_IDENTITY_TOKEN_FILE"
+            }
+            # The first token must exist before Claude starts: a missing file
+            # makes it wait instead of failing.
+            if ! fetch_jwt; then
+              echo "::error::Could not fetch a GitHub OIDC token for the Anthropic exchange."
+              exit 1
+            fi
+            ( while sleep 60; do fetch_jwt || echo "::warning::OIDC token refresh failed"; done ) &
+            refresher=$!
+            trap 'kill "$refresher" 2>/dev/null' EXIT
+            echo "Claude auth: Workload Identity Federation"
+          else
+            unset ANTHROPIC_FEDERATION_RULE_ID ANTHROPIC_ORGANIZATION_ID \
+                  ANTHROPIC_SERVICE_ACCOUNT_ID ANTHROPIC_WORKSPACE_ID
+            echo "Claude auth: API key"
+          fi
+          unset oidc_url oidc_tok
+
           rc=0
           # --setting-sources user: the reviewed PR's .claude/ settings and hooks
           # never load into a session that holds the API keys.
