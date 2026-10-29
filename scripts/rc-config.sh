@@ -428,18 +428,41 @@ emit_setting() {
   printf '%s=%s\n' "$_es_key" "$_es_eff"
 }
 
+# CI mode -- "no human is present". ENV-ONLY (RC_CI): never read from any config
+# file, because a reviewed repo must not be able to switch off the human gates by
+# committing a setting. When true, the reader forces settings.auto_retry=true and
+# settings.learn=false (the Capture Gate needs a human), whatever the files or
+# their own env vars say.
+RC_CI_EFF=false
+if [ -n "${RC_CI:-}" ]; then
+  if valid_bool "$RC_CI"; then
+    RC_CI_EFF="$RC_CI"
+  else
+    echo "rc-config: settings.ci: invalid RC_CI='$RC_CI'; ignoring env override" >&2
+  fi
+fi
+
+# emit_ci_forced <key> <value>: in CI mode, print <key>=<value> with a stderr
+# note and succeed; otherwise fail so the caller emits the setting normally.
+emit_ci_forced() {
+  [ "$RC_CI_EFF" = true ] || return 1
+  echo "rc-config: $1: forced to $2 in CI mode (RC_CI=true)" >&2
+  printf '%s=%s\n' "$1" "$2"
+}
+
 echo "# settings"
 emit_setting settings.personas ".settings.personas" "true" bool RC_PERSONAS
 emit_setting settings.verify ".settings.verify" "true" bool RC_VERIFY
 emit_setting settings.verify_max_findings ".settings.verify_max_findings" "12" posint RC_VERIFY_CAP
-emit_setting settings.learn ".settings.learn" "true" bool RC_LEARN
+emit_ci_forced settings.learn false || emit_setting settings.learn ".settings.learn" "true" bool RC_LEARN
 emit_setting settings.min_reviewers ".settings.min_reviewers" "2" posint RC_MIN_REVIEWERS
 emit_setting settings.reviewer_timeout_seconds ".settings.reviewer_timeout_seconds" "600" posint RC_REVIEWER_TIMEOUT
 emit_setting settings.run_budget_seconds ".settings.run_budget_seconds" "600" posint RC_RUN_BUDGET
-emit_setting settings.auto_retry ".settings.auto_retry" "false" bool RC_AUTO_RETRY
+emit_ci_forced settings.auto_retry true || emit_setting settings.auto_retry ".settings.auto_retry" "false" bool RC_AUTO_RETRY
 emit_setting settings.health_probe ".settings.health_probe" "false" bool RC_HEALTH_PROBE
 emit_setting settings.health_probe_timeout_seconds ".settings.health_probe_timeout_seconds" "20" posint RC_HEALTH_PROBE_TIMEOUT
 emit_setting settings.claude_max_turns ".settings.claude_max_turns" "100" posint RC_CLAUDE_MAX_TURNS
+printf 'settings.ci=%s\n' "$RC_CI_EFF"
 
 # ---------------------------------------------------------------------------
 # Static analysis — files AND env (env wins), its own top-level section
@@ -799,6 +822,45 @@ if [ "$yq_present" -eq 1 ]; then
   done
 fi
 
+# RC_APPROVED_SEATS=<slot>[,<slot>...] -- ENV-ONLY pre-approval of custom seats
+# (e.g. by a CI workflow, where no human can answer the Step-0 confirm question).
+# Env is a trusted layer; never read from any config file. Each token is trimmed
+# and validated with valid_slotname; an invalid one is ignored with a note. A
+# listed seat that would need confirmation runs without it (needs_confirm=false,
+# no confirm.<n> line). Listed names that match no emitted seat are noted below.
+CS_APPROVED=""
+if [ -n "${RC_APPROVED_SEATS:-}" ]; then
+  _ap_old_ifs="$IFS"
+  IFS=','
+  set -f
+  for _ap in $RC_APPROVED_SEATS; do
+    IFS="$_ap_old_ifs"
+    _ap="$(printf '%s' "$_ap" | sed 's/^[[:space:]]*//; s/[[:space:]]*$//')"
+    if [ -z "$_ap" ]; then
+      IFS=','
+      continue
+    fi
+    if valid_slotname "$_ap"; then
+      case ",$CS_APPROVED," in
+        *",$_ap,"*) ;;
+        *) CS_APPROVED="${CS_APPROVED:+$CS_APPROVED,}$_ap" ;;
+      esac
+    else
+      echo "rc-config: RC_APPROVED_SEATS: invalid slot name '$_ap'; ignored" >&2
+    fi
+    IFS=','
+  done
+  set +f
+  IFS="$_ap_old_ifs"
+fi
+
+cs_approved() {
+  case ",$CS_APPROVED," in
+    *",$1,"*) return 0 ;;
+  esac
+  return 1
+}
+
 CS_OUT=""
 CS_SLOTS=""
 CS_CONFIRM=0
@@ -841,8 +903,10 @@ for _cs in $CS_ALL; do
   # per review — otherwise a reviewed repo could field many (Ollama seats need
   # no confirm) and forge cross-family agreement between its own seats. The
   # first in slot order (trusted-first) is kept; the rest emit nothing. A
-  # disabled seat never runs, so it does not use up the slot.
-  if [ "$_source" = committed ] && [ "$_enabled" = true ]; then
+  # disabled seat never runs, so it does not use up the slot. Neither does a seat
+  # listed in RC_APPROVED_SEATS: env is a trusted layer, so the operator opted in
+  # to it exactly as if a trusted config layer had named it.
+  if [ "$_source" = committed ] && [ "$_enabled" = true ] && ! cs_approved "$_cs"; then
     if [ "$CS_COMMITTED_TAKEN" -eq 1 ]; then
       echo "rc-config: reviewer.custom.$_cs: only one seat from the repo's committed config runs per review; seat skipped (enable it in ~/.review-council/config.yml or an untracked config.local.yml to run it)" >&2
       IFS=','
@@ -877,6 +941,10 @@ for _cs in $CS_ALL; do
     _needs_confirm=true
   else
     _needs_confirm=false
+  fi
+  if [ "$_needs_confirm" = true ] && cs_approved "$_cs"; then
+    _needs_confirm=false
+    echo "rc-config: seat '$_cs' approved via RC_APPROVED_SEATS" >&2
   fi
 
   _slot_lines=""
@@ -998,6 +1066,18 @@ for _cs in $CS_ALL; do
 done
 set +f
 IFS="$_cs_old_ifs"
+
+# An approved name that no emitted seat carries (not configured, skipped, or
+# typo'd) approves nothing -- say so, so a CI operator can spot it.
+_ap_old_ifs="$IFS"
+IFS=','
+for _ap in $CS_APPROVED; do
+  case ",$CS_SLOTS," in
+    *",$_ap,"*) ;;
+    *) echo "rc-config: RC_APPROVED_SEATS: no configured seat '$_ap'; ignored" >&2 ;;
+  esac
+done
+IFS="$_ap_old_ifs"
 
 if [ -n "$CS_SLOTS" ]; then
   echo "# custom reviewers"

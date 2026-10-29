@@ -173,6 +173,19 @@ EOF
   ! grep -qF -- "issues/comments/42" "$GHLOG"
 }
 
+@test "post: CI GITHUB_TOKEN (gh api user 403) re-run UPDATES the github-actions[bot] digest" {
+  # In GitHub Actions the GITHUB_TOKEN cannot call /user (403) -> _me empty ->
+  # Bot-authored matching. A re-run must PATCH the existing bot digest, not add
+  # a second one, and must leave a human's marked comment alone.
+  printf '[{"id":7,"user":{"login":"someone","type":"User"},"body":"<!-- rc:report --> quoted"},{"id":42,"user":{"login":"github-actions[bot]","type":"Bot"},"body":"<!-- rc:report --> old"}]\n' >"$COMMENTS"
+  GH_TOKEN=ghs_ci USER_FAIL=1 PATH="$SANDBOX" run "$SCRIPT" post 5 "$BODY"
+  [ "$status" -eq 0 ]
+  has "action=updated"
+  logged "issues/comments/42"
+  ! grep -qF -- "issues/comments/7" "$GHLOG" || return 1
+  ! grep -qF -- "[POST]" "$GHLOG" || return 1
+}
+
 @test "post: a failed comment listing does NOT create a duplicate (fail-soft)" {
   # If we can't read existing comments we must not POST a new one — that would
   # duplicate an existing digest. Expect a hard non-zero, no POST.
@@ -291,4 +304,63 @@ EOF
 @test "unknown subcommand -> usage, exit 2" {
   PATH="$SANDBOX" run "$SCRIPT" frobnicate
   [ "$status" -eq 2 ]
+}
+
+# ---- post: secret redaction ------------------------------------------------
+# Fixtures are built by string concatenation so no full token literal ever sits
+# in this (public) file; the values are obviously fake but match the shapes.
+
+FAKE32="FAKEfakeFAKEfakeFAKEfakeFAKEfake"
+
+# post_body <text>: post a digest containing <text>; leaves the sent body in $sent.
+post_body() {
+  printf '<!-- rc:report -->\n## Digest\n%s\n' "$1" >"$BODY"
+  PATH="$SANDBOX" run --separate-stderr "$SCRIPT" post 5 "$BODY"
+  [ "$status" -eq 0 ]
+  sent="$(jq -r '.body' "$POSTBODY")"
+}
+
+redacts() {
+  _tok="$1"
+  post_body "leaked: $_tok here"
+  printf '%s' "$sent" | grep -qF 'leaked: [REDACTED] here' || { echo "not redacted: $sent"; return 1; }
+  ! printf '%s' "$sent" | grep -qF -- "$_tok" || return 1
+  printf '%s' "$stderr" | grep -qF 'redacted 1 likely secret(s)'
+  # the note never echoes the value
+  ! printf '%s' "$stderr" | grep -qF -- "$_tok" || return 1
+}
+
+@test "redact: Anthropic sk-ant- key" { redacts "sk-ant-""api03-$FAKE32"; }
+@test "redact: OpenRouter sk-or- key" { redacts "sk-or-""v1-$FAKE32"; }
+@test "redact: OpenAI sk-proj- key" { redacts "sk-proj-""$FAKE32"; }
+@test "redact: OpenAI legacy sk- key" { redacts "sk-""${FAKE32}1234"; }
+@test "redact: GitHub ghp_ token" { redacts "ghp_""${FAKE32}0000"; }
+@test "redact: GitHub gho_ token" { redacts "gho_""${FAKE32}0000"; }
+@test "redact: GitHub ghs_ token" { redacts "ghs_""${FAKE32}0000"; }
+@test "redact: GitHub github_pat_ token" { redacts "github_pat_""11FAKE_${FAKE32}"; }
+@test "redact: AWS AKIA access key id" { redacts "AKIA""FAKEFAKEFAKEFAKE"; }
+
+@test "redact: counts several secrets, keeps the marker, still posts" {
+  post_body "a $(printf '%s' "ghp_""${FAKE32}0000") b $(printf '%s' "AKIA""FAKEFAKEFAKEFAKE")"
+  has "action=created"
+  printf '%s' "$sent" | grep -qF '<!-- rc:report -->'
+  [ "$(printf '%s' "$sent" | grep -oF '[REDACTED]' | wc -l | tr -d ' ')" -eq 2 ]
+  printf '%s' "$stderr" | grep -qF 'redacted 2 likely secret(s)'
+}
+
+@test "redact: redacts the PATCH (update) body too" {
+  printf '[{"id":42,"user":{"login":"rc-bot"},"body":"<!-- rc:report -->"}]\n' >"$COMMENTS"
+  printf '<!-- rc:report -->\nkey %s\n' "sk-ant-""api03-$FAKE32" >"$BODY"
+  PATH="$SANDBOX" run "$SCRIPT" post 5 "$BODY"
+  [ "$status" -eq 0 ]
+  has "action=updated"
+  jq -r '.body' "$PATCHBODY" | grep -qF 'key [REDACTED]'
+}
+
+@test "redact: no false positive on ordinary text (sk-learn, a SHA, prose)" {
+  _txt="uses sk-learn and scikit-learn; sk-learn-compatible-transformer-pipeline; commit 0123456789abcdef0123456789abcdef01234567; AKIAshort; the ghp_ prefix; task-ant-runner"
+  post_body "$_txt"
+  printf '%s' "$sent" | grep -qF -- "$_txt"
+  ! printf '%s' "$sent" | grep -qF '[REDACTED]' || return 1
+  ! printf '%s' "$stderr" | grep -qF 'redacted' || return 1
 }

@@ -35,6 +35,15 @@
 set -eu
 
 MARKER='<!-- rc:report -->'
+
+# Likely-secret shapes redacted from the digest before it is posted (the body is
+# model-composed from review context, which may quote a credential). One
+# Oniguruma regex for jq: Anthropic sk-ant-, OpenRouter sk-or-, OpenAI
+# sk-proj-/sk-svcacct-/sk-admin- and legacy sk-<32+ alnum>, GitHub
+# ghp_/gho_/ghs_/ghu_/ghr_ and github_pat_, AWS access key ids AKIA/ASIA. The
+# lookbehind/lookahead keep it to whole tokens; the length floors keep ordinary
+# text ("sk-learn", a 40-hex SHA) out.
+SECRET_RE='(?<![A-Za-z0-9_-])(?:sk-(?:ant|or|proj|svcacct|admin)-[A-Za-z0-9_-]{20,}|sk-[A-Za-z0-9]{32,}|gh[pousr]_[A-Za-z0-9]{36,}|github_pat_[A-Za-z0-9_]{22,}|(?:AKIA|ASIA)[0-9A-Z]{16}(?![0-9A-Za-z]))'
 GH_POST_TOKEN=''  # set by `post` from the named env var; empty = ambient gh auth
 
 # ---------------------------------------------------------------------------
@@ -142,6 +151,24 @@ do_post() {
     return 1
   }
 
+  # Redact likely secrets into the request payload ({"body": ...}) — redact and
+  # post, never refuse (fail-soft); the note carries the count only, never a
+  # value. If redaction itself fails we cannot vouch for the body: don't post.
+  _payload="$(mktemp "${TMPDIR:-/tmp}/rc-post.XXXXXX")" || {
+    echo "rc-post: could not create a temp file; not posting" >&2
+    return 1
+  }
+  trap 'rm -f "$_payload"' EXIT
+  _nred="$(jq -Rrs --arg re "$SECRET_RE" '[match($re; "g")] | length' "$_body" 2>/dev/null)" || _nred=""
+  if ! jq -Rs --arg re "$SECRET_RE" '{body: gsub($re; "[REDACTED]")}' "$_body" >"$_payload" 2>/dev/null \
+    || [ -z "$_nred" ]; then
+    echo "rc-post: could not scan the digest for secrets; not posting" >&2
+    return 1
+  fi
+  if [ "$_nred" != 0 ]; then
+    echo "rc-post: redacted $_nred likely secret(s) from the digest before posting" >&2
+  fi
+
   GH_POST_TOKEN="$(resolve_token "$_tokname")"
 
   _repo="$(gh repo view --json nameWithOwner 2>/dev/null | jq -r '.nameWithOwner // empty')"
@@ -178,8 +205,7 @@ do_post() {
     | max_by(.id) | .id // empty' 2>/dev/null)" || _id=""
 
   if [ -n "$_id" ]; then
-    if _url="$(jq -Rs '{body: .}' "$_body" \
-      | gh_post api "repos/$_repo/issues/comments/$_id" -X PATCH --input - 2>/dev/null \
+    if _url="$(gh_post api "repos/$_repo/issues/comments/$_id" -X PATCH --input - <"$_payload" 2>/dev/null \
       | jq -r '.html_url // empty' 2>/dev/null)" && [ -n "$_url" ]; then
       printf 'action=updated\nurl=%s\n' "$_url"
       return 0
@@ -189,8 +215,7 @@ do_post() {
 
   # Guard with `|| _url=""` so a non-zero POST/parse never trips `set -e` before
   # the clean fail-soft return below.
-  _url="$(jq -Rs '{body: .}' "$_body" \
-    | gh_post api "repos/$_repo/issues/$_pr/comments" -X POST --input - 2>/dev/null \
+  _url="$(gh_post api "repos/$_repo/issues/$_pr/comments" -X POST --input - <"$_payload" 2>/dev/null \
     | jq -r '.html_url // empty' 2>/dev/null)" || _url=""
   [ -n "$_url" ] || {
     echo "rc-post: posting the digest comment failed" >&2
