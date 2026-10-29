@@ -3,11 +3,11 @@
 # Copy this file into your repo. Guide: https://github.com/deployhq/review-council/blob/main/docs/github-action.md
 #
 # Before the first run:
-#   1. Choose how Claude authenticates: the ANTHROPIC_API_KEY secret, OR
-#      Anthropic federation (no stored key; set up a rule in the Anthropic
-#      Console first). Use exactly one. See "Authenticate Claude" in the guide.
-#      Add the secrets below (Settings -> Secrets and variables -> Actions).
-#      The others are optional.
+#   1. Add the ANTHROPIC_API_KEY secret (Settings -> Secrets and variables ->
+#      Actions). The other secrets below are optional. To authenticate Claude
+#      with Anthropic federation instead (no stored key), use
+#      review-council-federated.yml, not this file. See "Authenticate Claude"
+#      in the guide.
 #   2. Merge this file to your default branch. GitHub runs issue_comment
 #      workflows only from the default branch, so `/review-council` comments
 #      do nothing until it is there.
@@ -32,9 +32,7 @@ on:
 
 # Required. A reusable workflow never gets more than its caller grants.
 # PR comments are issue comments, so issues: write is needed to post.
-# id-token: write is needed for federation. Keep it with an API key too: the
-# reusable workflow requests it in both modes (with a key, the run removes the
-# token-request variables before Claude starts).
+# No id-token: write here. Only the federated workflow needs it.
 #
 # Do NOT add a workflow-level `concurrency:` with cancel-in-progress here: every
 # PR comment triggers this workflow and would cancel a running review. The
@@ -44,7 +42,6 @@ permissions:
   contents: read
   pull-requests: write
   issues: write
-  id-token: write
 
 jobs:
   review:
@@ -64,15 +61,8 @@ jobs:
       # Git ref of deployhq/review-council to load the plugin from.
       # Keep it the same as the ref in `uses:` above.
       plugin_ref: main
-      # Option B: Anthropic federation (keyless). These IDs are not secrets.
-      # Uncomment them and remove ANTHROPIC_API_KEY below. Use one option only.
-      # anthropic_federation_rule_id: fdrl_...
-      # anthropic_organization_id: 00000000-0000-0000-0000-000000000000
-      # anthropic_service_account_id: svac_...
-      # anthropic_workspace_id: wrkspc_...   # only if the rule covers more than one workspace
     secrets:
-      # Option A: an Anthropic API key. Remove it if you use federation.
-      ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+      ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}     # required
       OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}           # optional: enables Codex
       OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}   # optional: an OpenRouter custom seat
       PERPLEXITY_API_KEY: ${{ secrets.PERPLEXITY_API_KEY }}   # optional: enables Perplexity

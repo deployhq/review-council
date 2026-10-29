@@ -74,5 +74,9 @@ jobs:
           "$HOME/.local/bin/actionlint" --version
 
       # examples/github-action/config.yml is Review Council config, not a workflow.
+      # actionlint checks workflows only, not composite actions: the shared
+      # actions keep their logic in scripts, which shellcheck covers here.
       - name: Lint workflows
-        run: actionlint -color .github/workflows/*.yml examples/github-action/review-council.yml
+        run: |
+          actionlint -color .github/workflows/*.yml examples/github-action/review-council*.yml
+          shellcheck .github/actions/*/*.sh

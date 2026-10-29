@@ -1,0 +1,80 @@
+# .github/workflows/review-council.yml — run Review Council on your PRs,
+# authenticating Claude with Anthropic Workload Identity Federation (no stored
+# Anthropic key).
+#
+# Copy this file into your repo INSTEAD of review-council.yml (use one or the
+# other). Guide: https://github.com/deployhq/review-council/blob/main/docs/github-action.md
+#
+# Before the first run:
+#   1. Create a federation rule in the Anthropic Console and fill in the IDs
+#      below. See "Federation (opt-in)" under "Authenticate Claude" in the guide.
+#   2. Check that no cloud trust policy (AWS, GCP, Azure, ...) matches this
+#      repo's PR runs broadly. This file grants id-token: write, so the job can
+#      mint GitHub OIDC tokens for other audiences too. See the guide.
+#   3. Add any optional secrets below (Settings -> Secrets and variables ->
+#      Actions). No ANTHROPIC_API_KEY is needed.
+#   4. Merge this file to your default branch. GitHub runs issue_comment
+#      workflows only from the default branch, so `/review-council` comments
+#      do nothing until it is there.
+#
+# Fork PRs are always skipped. A `/review-council` comment runs only when the
+# commenter has write access to the repo. On `pull_request`, GitHub runs the
+# copy of this file on the PR's branch, so a PR can change these settings for
+# its own run; on `issue_comment` it runs the default-branch copy.
+
+name: Review Council
+
+on:
+  pull_request:
+    # A draft PR marked ready for review. Add `opened` to also review PRs
+    # opened as non-draft, and `synchronize` to review every push (one run per
+    # push; a newer run cancels the older one). Drafts are always skipped,
+    # on both triggers.
+    types: [ready_for_review]
+  issue_comment:
+    # A comment starting with `/review-council` on a PR.
+    types: [created]
+
+# Required. A reusable workflow never gets more than its caller grants.
+# PR comments are issue comments, so issues: write is needed to post.
+# id-token: write lets the run fetch the GitHub OIDC token it trades for an
+# Anthropic token.
+#
+# Do NOT add a workflow-level `concurrency:` with cancel-in-progress here: every
+# PR comment triggers this workflow and would cancel a running review. The
+# reusable workflow already allows one review per PR, and only an authorised
+# trigger can cancel it.
+permissions:
+  contents: read
+  pull-requests: write
+  issues: write
+  id-token: write
+
+jobs:
+  review:
+    # `main` picks up every upstream change. If you'd rather not, pin a commit
+    # SHA here and set plugin_ref below to the same SHA.
+    uses: deployhq/review-council/.github/workflows/review-council-federated.yml@main
+    with:
+      # Anthropic federation. Required. These IDs are not secrets.
+      anthropic_federation_rule_id: fdrl_...
+      anthropic_organization_id: 00000000-0000-0000-0000-000000000000
+      anthropic_service_account_id: svac_...
+      # anthropic_workspace_id: wrkspc_...   # only if the rule covers more than one workspace
+      # Custom seats from .review-council/config.yml that may run in CI,
+      # comma-separated slot names (e.g. "qwen,kimi"). Empty = none approved.
+      # Approving a seat approves its slot name only: the PR's config.yml still
+      # sets its harness, provider and model.
+      approved_seats: ""
+      # Soft time budget for the whole review, in seconds.
+      run_budget_seconds: 900
+      # Run the static-analysis scan (secrets, CVEs, lint) first.
+      static_analysis: true
+      # Git ref of deployhq/review-council to load the plugin from.
+      # Keep it the same as the ref in `uses:` above.
+      plugin_ref: main
+    secrets:
+      OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}           # optional: enables Codex
+      OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}   # optional: an OpenRouter custom seat
+      PERPLEXITY_API_KEY: ${{ secrets.PERPLEXITY_API_KEY }}   # optional: enables Perplexity
+      # PR_BOT_TOKEN: ${{ secrets.PR_BOT_TOKEN }}             # optional: post as your own App or bot (default: github-actions[bot])

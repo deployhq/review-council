@@ -368,12 +368,13 @@ review-council/
 │   ├── plugin.json          # Plugin metadata
 │   └── marketplace.json     # Marketplace listing
 ├── .github/workflows/
-│   ├── review-council.yml   # Reusable workflow: run the council on PRs in GitHub Actions
+│   ├── review-council.yml   # Reusable workflow: run the council on PRs in GitHub Actions (API key)
+│   ├── review-council-federated.yml  # Same, with Anthropic federation (opt-in; needs id-token: write)
 │   └── unit-tests.yml       # bats unit tests
 ├── docs/
 │   └── github-action.md     # GitHub Actions guide
 ├── examples/
-│   └── github-action/       # Copy-paste caller workflow + example config.yml for CI
+│   └── github-action/       # Copy-paste caller workflows (API key, federated) + example config.yml for CI
 ├── skills/
 │   ├── run/SKILL.md         # Main command (orchestrator)
 │   ├── setup/SKILL.md       # Provider status checker
@@ -601,8 +602,8 @@ None met our go bar (full coverage in under ~10 min for under ~$2, with a verifi
 Run the council on your PRs with no human in the loop. You call a **reusable workflow** from your repo; it runs headless Claude Code with the plugin loaded and posts one review-digest comment on the PR as `github-actions[bot]` (or your own bot).
 
 - **When:** a PR is marked ready for review, or someone with write access comments `/review-council`. Drafts and PRs from forks are ignored.
-- **Claude auth:** the `ANTHROPIC_API_KEY` secret, or Anthropic Workload Identity Federation (keyless: no stored key, short-lived tokens). Exactly one. The caller grants `id-token: write` either way.
-- **Secrets:** `ANTHROPIC_API_KEY` (unless you use federation); `OPENAI_API_KEY` for Codex, `PERPLEXITY_API_KEY`, `OPENROUTER_API_KEY` for custom seats, `PR_BOT_TOKEN` to post as your own App or bot (optional).
+- **Claude auth:** two entry workflows. `review-council.yml` (default) takes the `ANTHROPIC_API_KEY` secret and needs no `id-token` permission. `review-council-federated.yml` (opt-in) uses Anthropic Workload Identity Federation (no stored key, short-lived tokens); only this one requests `id-token: write`, so check your cloud OIDC trust policies first (see the guide).
+- **Secrets:** `ANTHROPIC_API_KEY` (API-key workflow only); `OPENAI_API_KEY` for Codex, `PERPLEXITY_API_KEY`, `OPENROUTER_API_KEY` for custom seats, `PR_BOT_TOKEN` to post as your own App or bot (optional).
 - **Config:** the committed `.review-council/config.yml` (and `learnings.md`) from the PR's branch, with workflow env on top. Custom seats run only when the workflow approves them by slot name (`approved_seats`); the PR's config still defines the seat.
 - **Trust:** the boundary is write access. Fork PRs are skipped, and only comments and reviews from owners, members and collaborators are read. The orchestrator holds your keys, so use dedicated, spend-limited ones.
 - **Advisory:** the digest never blocks a merge. A hidden state block (`clean` / `findings` / `degraded`) lets an agent or a gate read the result.
