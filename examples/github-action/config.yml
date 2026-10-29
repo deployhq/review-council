@@ -6,11 +6,14 @@
 #
 # In CI this file is read from the PR's branch, so a PR can change it and see
 # the effect in its own review. Env vars set by the workflow win over it:
-#   RC_CI=true            -> never asks, posts automatically, learn=false, auto_retry=true
+#   RC_CI=true            -> never asks, posts automatically, never writes
+#                            learnings.md, auto_retry=true
 #   RC_PR_COMMENTS=true   -> posting is always on in CI (pr_comments.enabled not needed)
 #   RC_RUN_BUDGET         -> from the run_budget_seconds input
 #   RC_STATIC_ANALYSIS    -> from the static_analysis input
 # config.local.yml is not used in CI (it is gitignored, so not in the checkout).
+# .review-council/learnings.md is also read from the PR's branch: a PR can add
+# Suppressions to its own review. Set settings.learn: false to stop CI reading it.
 
 # reviewers:                          # uncomment this line and the block you need
   # Built-in reviewers run when their key is present in the workflow secrets:
@@ -29,6 +32,8 @@
   #       OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
   #
   # Not approved -> skipped, with "kimi: skipped — not approved for CI".
+  # Approval covers the slot name only: this file still sets the seat's
+  # harness, provider and model, and a PR can change them.
   # Every approved seat runs. Unapproved seats: at most one from this file,
   # and in CI one that needs approval is skipped (nobody can confirm it).
   # Use harness `claude` (or `opencode`) for OpenRouter, not `codex`.
@@ -52,7 +57,8 @@
 #   min_reviewers: 2
 #   reviewer_timeout_seconds: 600
 #   claude_max_turns: 100       # lower it to cap Claude-side cost
-#   # run_budget_seconds, auto_retry and learn are set by the workflow in CI.
+#   learn: false                # in CI: stop reading learnings.md (CI never writes it)
+#   # run_budget_seconds and auto_retry are set by the workflow in CI.
 
 # static_analysis:
 #   tools: [gitleaks, trufflehog, osv-scanner, semgrep, ruff, shellcheck, actionlint, hadolint]

@@ -213,7 +213,7 @@ Each run setting (`settings.*`) is also tunable via its `RC_*` environment varia
 | `RC_HEALTH_PROBE` | `false` | Opt-in Step-0 health probe (Codex + Google slots) so `available`/`min_reviewers` reflect *usable*, not merely installed. Default off; a provider is dropped only on positive hard-fail evidence (auth/quota/overload), fail-open otherwise. |
 | `RC_HEALTH_PROBE_TIMEOUT` | `20` | Short wall-clock cap (seconds) for each health probe |
 | `RC_CLAUDE_MAX_TURNS` | `100` | Turn budget (`maxTurns`) for the native Claude and Security reviewer subagents. Default 100 (lenient); lower it to cap local review cost. |
-| `RC_CI` | `false` | `true` = no human is present (set by the [GitHub Actions workflow](#github-actions)): never asks, posts the digest without a confirm step when posting is on, forces `auto_retry=true` and `learn=false`. Env only. |
+| `RC_CI` | `false` | `true` = no human is present (set by the [GitHub Actions workflow](#github-actions)): never asks, posts the digest without a confirm step when posting is on, forces `auto_retry=true`, never writes `learnings.md` (recall still follows your `settings.learn`), and reads only PR comments and reviews from `OWNER`/`MEMBER`/`COLLABORATOR`. Env only. |
 | `RC_APPROVED_SEATS` | — | Comma-separated custom-seat slot names approved to run without the start-of-run question (the workflow's `approved_seats` input). Env only. |
 | `PERPLEXITY_API_KEY` | — | Enables Perplexity reviewer via Sonar API |
 
@@ -602,7 +602,8 @@ Run the council on your PRs with no human in the loop. You call a **reusable wor
 
 - **When:** a PR is marked ready for review, or someone with write access comments `/review-council`. Drafts and PRs from forks are ignored.
 - **Secrets:** `ANTHROPIC_API_KEY` (required); `OPENAI_API_KEY` for Codex, `PERPLEXITY_API_KEY`, `OPENROUTER_API_KEY` for custom seats, `PR_BOT_TOKEN` to post as your own App or bot (optional).
-- **Config:** the committed `.review-council/config.yml` from the PR's branch, with workflow env on top. Custom seats run only when the workflow approves them (`approved_seats`).
+- **Config:** the committed `.review-council/config.yml` (and `learnings.md`) from the PR's branch, with workflow env on top. Custom seats run only when the workflow approves them by slot name (`approved_seats`); the PR's config still defines the seat.
+- **Trust:** the boundary is write access. Fork PRs are skipped, and only comments and reviews from owners, members and collaborators are read. The orchestrator holds your keys, so use dedicated, spend-limited ones.
 - **Advisory:** the digest never blocks a merge. A hidden state block (`clean` / `findings` / `degraded`) lets an agent or a gate read the result.
 - **Cost:** about 3.5 minutes and $3 Claude-side on a tiny diff in our test; real PRs cost more.
 
@@ -610,7 +611,10 @@ Run the council on your PRs with no human in the loop. You call a **reusable wor
 # Trimmed: the full example also sets the triggers and the required permissions.
 jobs:
   review:
+    # Pin @main and plugin_ref to the same release tag or commit SHA.
     uses: deployhq/review-council/.github/workflows/review-council.yml@main
+    with:
+      plugin_ref: main
     secrets:
       ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
       OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}

@@ -37,6 +37,9 @@ setup() {
   # The test env must not leak a GH_TOKEN into the fake (would mask the
   # user-identity assertions).
   unset GH_TOKEN
+  # Nor GITHUB_ACTIONS (set when this suite itself runs in Actions): it narrows
+  # the bot-fallback match, so tests opt in to it explicitly.
+  unset GITHUB_ACTIONS
 
   install_fake_gh
 }
@@ -178,12 +181,49 @@ EOF
   # Bot-authored matching. A re-run must PATCH the existing bot digest, not add
   # a second one, and must leave a human's marked comment alone.
   printf '[{"id":7,"user":{"login":"someone","type":"User"},"body":"<!-- rc:report --> quoted"},{"id":42,"user":{"login":"github-actions[bot]","type":"Bot"},"body":"<!-- rc:report --> old"}]\n' >"$COMMENTS"
-  GH_TOKEN=ghs_ci USER_FAIL=1 PATH="$SANDBOX" run "$SCRIPT" post 5 "$BODY"
+  GITHUB_ACTIONS=true GH_TOKEN=ghs_ci USER_FAIL=1 PATH="$SANDBOX" run "$SCRIPT" post 5 "$BODY"
   [ "$status" -eq 0 ]
   has "action=updated"
   logged "issues/comments/42"
   ! grep -qF -- "issues/comments/7" "$GHLOG" || return 1
   ! grep -qF -- "[POST]" "$GHLOG" || return 1
+}
+
+@test "post: unresolved identity ignores a Bot comment that only CONTAINS the marker" {
+  # The fallback requires the body to START with the marker; another bot quoting
+  # it mid-text must not be hijacked.
+  printf '[{"id":42,"user":{"login":"other[bot]","type":"Bot"},"body":"see <!-- rc:report --> quoted"}]\n' >"$COMMENTS"
+  USER_FAIL=1 PATH="$SANDBOX" run "$SCRIPT" post 5 "$BODY"
+  [ "$status" -eq 0 ]
+  has "action=created"
+  ! grep -qF -- "issues/comments/42" "$GHLOG" || return 1
+}
+
+@test "post: under GITHUB_ACTIONS (no bot token) only github-actions[bot] is matched" {
+  printf '[{"id":50,"user":{"login":"other[bot]","type":"Bot"},"body":"<!-- rc:report --> theirs"},{"id":42,"user":{"login":"github-actions[bot]","type":"Bot"},"body":"<!-- rc:report --> old"}]\n' >"$COMMENTS"
+  GITHUB_ACTIONS=true USER_FAIL=1 PATH="$SANDBOX" run "$SCRIPT" post 5 "$BODY"
+  [ "$status" -eq 0 ]
+  has "action=updated"
+  logged "issues/comments/42"
+  ! grep -qF -- "issues/comments/50" "$GHLOG" || return 1
+}
+
+@test "post: under GITHUB_ACTIONS another bot's marked comment alone is not updated" {
+  printf '[{"id":50,"user":{"login":"other[bot]","type":"Bot"},"body":"<!-- rc:report --> theirs"}]\n' >"$COMMENTS"
+  GITHUB_ACTIONS=true USER_FAIL=1 PATH="$SANDBOX" run "$SCRIPT" post 5 "$BODY"
+  [ "$status" -eq 0 ]
+  has "action=created"
+  ! grep -qF -- "issues/comments/50" "$GHLOG" || return 1
+}
+
+@test "post: GITHUB_ACTIONS with a bot token keeps the any-Bot fallback" {
+  # Posting as a custom bot (App token) in Actions: the login is not
+  # github-actions[bot], so the narrowing must not apply.
+  printf '[{"id":42,"user":{"login":"review-council[bot]","type":"Bot"},"body":"<!-- rc:report --> old"}]\n' >"$COMMENTS"
+  RC_BOT_TOKEN=tok GITHUB_ACTIONS=true USER_FAIL=1 PATH="$SANDBOX" run "$SCRIPT" post 5 "$BODY" RC_BOT_TOKEN
+  [ "$status" -eq 0 ]
+  has "action=updated"
+  logged "issues/comments/42"
 }
 
 @test "post: a failed comment listing does NOT create a duplicate (fail-soft)" {
@@ -339,6 +379,14 @@ redacts() {
 @test "redact: GitHub ghs_ token" { redacts "ghs_""${FAKE32}0000"; }
 @test "redact: GitHub github_pat_ token" { redacts "github_pat_""11FAKE_${FAKE32}"; }
 @test "redact: AWS AKIA access key id" { redacts "AKIA""FAKEFAKEFAKEFAKE"; }
+@test "redact: Perplexity pplx- key" { redacts "pplx-""$FAKE32"; }
+
+@test "redact: a token in markdown italics (leading underscore) is caught" {
+  _tok="sk-ant-""api03-$FAKE32"
+  post_body "leaked: _${_tok}_ here"
+  printf '%s' "$sent" | grep -qF 'leaked: _[REDACTED] here' || { echo "not redacted: $sent"; return 1; }
+  ! printf '%s' "$sent" | grep -qF -- "$_tok" || return 1
+}
 
 @test "redact: counts several secrets, keeps the marker, still posts" {
   post_body "a $(printf '%s' "ghp_""${FAKE32}0000") b $(printf '%s' "AKIA""FAKEFAKEFAKEFAKE")"
@@ -363,4 +411,36 @@ redacts() {
   printf '%s' "$sent" | grep -qF -- "$_txt"
   ! printf '%s' "$sent" | grep -qF '[REDACTED]' || return 1
   ! printf '%s' "$stderr" | grep -qF 'redacted' || return 1
+}
+
+# ---- redact subcommand -----------------------------------------------------
+
+@test "redact subcommand: stdin -> redacted stdout, count on stderr only" {
+  _tok="pplx-""$FAKE32"
+  _in="$(printf 'line one\nkey %s and %s\nend' "$_tok" "ghp_""${FAKE32}0000")"
+  PATH="$SANDBOX" run --separate-stderr sh -c 'printf "%s" "$1" | "$2" redact' _ "$_in" "$SCRIPT"
+  [ "$status" -eq 0 ]
+  [ "$output" = "$(printf 'line one\nkey [REDACTED] and [REDACTED]\nend')" ]
+  [[ "$stderr" == *"redacted 2 likely secret(s)"* ]] || false
+  [[ "$output" != *"redacted"* ]] || false
+  [[ "$stderr" != *"$_tok"* ]] || false
+}
+
+@test "redact subcommand: clean text passes through byte-for-byte" {
+  _in="sk-learn; commit 0123456789abcdef0123456789abcdef01234567; no trailing newline"
+  printf '%s' "$_in" >"$BATS_TEST_TMPDIR/in.txt"
+  PATH="$SANDBOX" run --separate-stderr sh -c '"$1" redact <"$2" >"$3"' _ "$SCRIPT" "$BATS_TEST_TMPDIR/in.txt" "$BATS_TEST_TMPDIR/out.txt"
+  [ "$status" -eq 0 ]
+  cmp "$BATS_TEST_TMPDIR/in.txt" "$BATS_TEST_TMPDIR/out.txt"
+  [[ "$stderr" == *"redacted 0 likely secret(s)"* ]] || false
+}
+
+@test "redact subcommand: a redaction failure exits non-zero with no stdout" {
+  # A jq that always fails stands in for a broken redaction.
+  printf '#!/bin/sh\nexit 5\n' >"$FAKEDIR/jq"
+  chmod +x "$FAKEDIR/jq"
+  PATH="$SANDBOX" run --separate-stderr sh -c 'printf "secret text" | "$1" redact' _ "$SCRIPT"
+  [ "$status" -ne 0 ]
+  [ -z "$output" ]
+  [[ "$stderr" == *"redaction failed"* ]] || false
 }

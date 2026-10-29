@@ -350,6 +350,7 @@ settings:
 | `settings.verify` | `true` | `RC_VERIFY` | Run the verification pass over findings. |
 | `settings.verify_max_findings` | `12` | `RC_VERIFY_CAP` | Cap on findings sent to the verification pass. |
 | `settings.learn` | `true` | `RC_LEARN` | Enable learnings recall (Step 0.5) and capture (Step 7) — see [Learnings](#learnings) below. |
+| `settings.recall` | = `settings.learn` | — (derived) | **Output only, not a config key.** The *configured* learn value (files + `RC_LEARN`) before CI mode forces `learn=false`. Gates Step 0.5 (recall); outside CI it always equals `settings.learn`. |
 | `settings.min_reviewers` | `2` | `RC_MIN_REVIEWERS` | Minimum participating reviewers for council mode. |
 | `settings.reviewer_timeout_seconds` | `600` | `RC_REVIEWER_TIMEOUT` | Per-invocation wall-clock cap (seconds) for CLI/API reviewers. |
 | `settings.run_budget_seconds` | `600` | `RC_RUN_BUDGET` | Total wall-clock budget (seconds) for the whole run. |
@@ -370,7 +371,9 @@ config file, because the committed config is untrusted and these switches remove
   → `settings.ci`. When `true`, the run never asks a question: the reader also forces
   `settings.auto_retry=true` and `settings.learn=false` (overriding the files **and**
   `RC_AUTO_RETRY`/`RC_LEARN`, with a note) — the Capture Gate (Step 7) needs a human, while
-  Step 0.5 may still *read* `learnings.md`. Missing static-analysis tools are skipped (noted in
+  Step 0.5 may still *read* `learnings.md`: it is gated on `settings.recall`, which carries the
+  configured (pre-force) learn value, so an operator who set `learn: false` / `RC_LEARN=false`
+  gets no recall in CI either. Missing static-analysis tools are skipped (noted in
   the report); with `pr_comments.enabled` the digest is posted without the confirmation or the
   triage walk, and a draft PR is never opened.
 - **`RC_APPROVED_SEATS=<slot>[,<slot>…]`** — pre-approves custom seats, see
@@ -455,11 +458,15 @@ pr_comments:
   taken from local git, never from config.
 - **Secret redaction.** Before posting, `rc-post.sh` replaces likely secrets in the digest
   (Anthropic `sk-ant-…`, OpenRouter `sk-or-…`, OpenAI `sk-proj-…`/legacy `sk-…`, GitHub
-  `ghp_`/`gho_`/`ghs_`/`ghu_`/`ghr_`/`github_pat_…`, AWS `AKIA…`/`ASIA…`) with `[REDACTED]`
-  and notes only the count on stderr — it still posts (fail-soft).
+  `ghp_`/`gho_`/`ghs_`/`ghu_`/`ghr_`/`github_pat_…`, Perplexity `pplx-…`, AWS `AKIA…`/`ASIA…`)
+  with `[REDACTED]` and notes only the count on stderr — it still posts (fail-soft). The same
+  implementation is exposed as `rc-post.sh redact` (stdin → redacted stdout, count on stderr,
+  non-zero exit and no output if redaction fails) for other outputs such as a CI job summary.
 - **Identity under `GITHUB_TOKEN`.** The Actions token cannot read `/user`, so `rc-post.sh`
-  cannot learn its login; it then updates only a **Bot**-authored marked comment (the
-  previous `github-actions[bot]` digest), never a human's, so CI re-runs edit one comment.
+  cannot learn its login; it then updates only a **Bot**-authored comment whose body *starts*
+  with the marker — and, under `GITHUB_ACTIONS=true` with no bot token, only one by
+  `github-actions[bot]` (the previous digest) — never a human's or another bot's, so CI re-runs
+  edit one comment.
 
 ## Learnings
 
@@ -495,7 +502,7 @@ skeleton the first time it writes, if the file doesn't already exist:
 
 ### Recall (Step 0.5 — read side)
 
-If `settings.learn` is true, Step 0.5 reads the file from the **target repo** (the repo being
+If `settings.recall` is true (it equals `settings.learn` except in CI mode), Step 0.5 reads the file from the **target repo** (the repo being
 reviewed, alongside `.review-council/config.yml`). A missing file is skipped silently — it is
 the normal case, not a warning. Once read, the two sections travel different paths:
 

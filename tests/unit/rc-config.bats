@@ -1465,6 +1465,39 @@ pr_comments:
   [[ "$stderr" == *"settings.auto_retry: forced to true in CI mode"* ]] || false
 }
 
+@test "recall: outside CI, settings.recall equals settings.learn" {
+  run --separate-stderr "$SCRIPT" "$CFG"
+  [ "$status" -eq 0 ]
+  has_line "settings.learn=true"
+  has_line "settings.recall=true"
+  printf 'settings:\n  learn: false\n' >"$CFG/config.yml"
+  run --separate-stderr "$SCRIPT" "$CFG"
+  [ "$status" -eq 0 ]
+  has_line "settings.learn=false"
+  has_line "settings.recall=false"
+}
+
+@test "recall: RC_CI=true forces learn=false but recall keeps the configured true" {
+  printf 'settings:\n  learn: true\n' >"$CFG/config.yml"
+  RC_CI=true run --separate-stderr "$SCRIPT" "$CFG"
+  [ "$status" -eq 0 ]
+  has_line "settings.learn=false"
+  has_line "settings.recall=true"
+}
+
+@test "recall: RC_CI=true with learn turned off -> recall=false (file or RC_LEARN)" {
+  printf 'settings:\n  learn: false\n' >"$CFG/config.yml"
+  RC_CI=true run --separate-stderr "$SCRIPT" "$CFG"
+  [ "$status" -eq 0 ]
+  has_line "settings.learn=false"
+  has_line "settings.recall=false"
+  rm -f "$CFG/config.yml"
+  RC_CI=true RC_LEARN=false run --separate-stderr "$SCRIPT" "$CFG"
+  [ "$status" -eq 0 ]
+  has_line "settings.learn=false"
+  has_line "settings.recall=false"
+}
+
 @test "ci: RC_CI=false is honoured and changes nothing else" {
   RC_CI=false run --separate-stderr "$SCRIPT" "$CFG"
   [ "$status" -eq 0 ]

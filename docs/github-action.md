@@ -23,7 +23,7 @@ Either way, the PR must be open and not a draft. It never runs on PRs from forks
 **What it does.**
 
 1. Checks out the PR's branch.
-2. Installs Claude Code, the Review Council plugin (from a pinned ref), `yq`, and the Codex CLI if you gave it an OpenAI key.
+2. Installs Claude Code, the Review Council plugin (from a pinned ref), `yq`, and the Codex CLI if you gave it an OpenAI key (or a `harness: codex` seat needs it).
 3. Runs headless Claude Code: `claude -p "/review-council:run <PR number>"`.
 4. Posts the digest on the PR, or updates the one already there. Re-runs never add a second comment.
 5. Appends the final report to the job summary.
@@ -43,7 +43,9 @@ The Google slot (`agy` / `gemini`) is not set up in CI.
 
 **Time and cost.** In our local test, a headless run on a tiny diff took about **3.5 minutes** and cost about **$3 on the Claude side**. Real PRs cost more: cost grows with the size of the diff and the number of reviewers. Codex, Perplexity and seat costs are billed separately by each provider. The run is bounded by the existing caps (`run_budget_seconds`, per-reviewer timeouts, turn limits). There is no separate spend cap.
 
-**Concurrency.** One run per PR. If a new run starts for the same PR (a second `/review-council`, or another trigger), the older run is cancelled.
+**Two jobs.** The reusable workflow has a `gate` job and a `review` job. `gate` does every check (event, draft, fork, commenter permission) and has no concurrency group, so any PR comment can start it without side effects. `review` runs only if `gate` passes (`needs: gate`).
+
+**Concurrency.** One review per PR. The `review` job has a per-PR concurrency group with `cancel-in-progress`. If an authorised trigger starts a new review for the same PR (a second `/review-council`, or another `pull_request` event), the older review is cancelled. A comment that fails the gate never reaches `review`, so it cannot cancel a running review.
 
 **It never blocks a merge.** The digest is advisory. The workflow does not fail the check when it finds problems. If you want a gate, read the [state block](#the-hidden-state-block).
 
@@ -58,7 +60,7 @@ In your repo: **Settings → Secrets and variables → Actions → New repositor
 | Secret | Required | What it does |
 |---|---|---|
 | `ANTHROPIC_API_KEY` | yes | Runs Claude Code, the Claude reviewer and the Security reviewer. |
-| `OPENAI_API_KEY` | no (recommended) | Enables Codex. The workflow passes it to Codex as `CODEX_API_KEY`, which is the variable Codex reads in non-interactive mode. Without it, Codex is not installed. |
+| `OPENAI_API_KEY` | no (recommended) | Enables the Codex reviewer. The workflow passes it to Codex as `CODEX_API_KEY`, which is the variable Codex reads in non-interactive mode. Without it, the Codex reviewer does not run, even if a `harness: codex` seat installs the Codex CLI. |
 | `OPENROUTER_API_KEY` | no | Key for a custom seat on OpenRouter. |
 | `PERPLEXITY_API_KEY` | no | Enables the Perplexity reviewer. |
 | `PR_BOT_TOKEN` | no | A GitHub token to post as your own App or bot instead of `github-actions[bot]`. See [Who posts](#who-posts). |
@@ -85,8 +87,10 @@ permissions:
 
 jobs:
   review:
+    # `main` picks up every upstream change. To avoid that, pin a commit SHA here and in plugin_ref.
     uses: deployhq/review-council/.github/workflows/review-council.yml@main
     with:
+      plugin_ref: main          # keep in step with the ref in `uses:`
       approved_seats: ""        # e.g. "kimi" — see "Custom seats in CI"
       run_budget_seconds: 900
     secrets:
@@ -101,8 +105,8 @@ Things to know:
 
 - **Keep the `permissions:` block.** A reusable workflow can never get more permissions than its caller grants. Without `pull-requests: write` and `issues: write`, the run cannot post. Comments on a PR are issue comments, so `issues: write` is needed.
 - **Merge it to your default branch first.** GitHub runs `issue_comment` workflows only from the default branch. Until the file is on `main` (or whatever your default is), `/review-council` does nothing.
-- **Don't add `concurrency:` with `cancel-in-progress` to the caller.** Every PR comment triggers the caller, so it would cancel a running review. The reusable workflow already allows one run per PR.
-- **Two refs, two jobs.** `@main` in `uses:` pins the *workflow*. The `plugin_ref` input pins the *plugin* it runs. Pin both to a tag or commit SHA if you want fully repeatable runs.
+- **Don't add `concurrency:` with `cancel-in-progress` to the caller.** Every PR comment triggers the caller, so any comment would cancel a running review. The reusable workflow already allows one review per PR, and only an authorised trigger can cancel it.
+- **Pinning (optional).** With `main`, every upstream change reaches your runs. If you'd rather control when changes arrive, pin the ref in `uses:` (the *workflow*) and the `plugin_ref` input (the *plugin*) to the same commit SHA.
 - **Want a review on PRs that are opened non-draft?** `ready_for_review` fires only when a draft becomes ready. Add `opened` to the `pull_request` types. Add `synchronize` to review every push (this costs a run per push; the newer run cancels the older). Drafts are skipped on every trigger, including `/review-council` comments.
 
 ### 3. Try it
@@ -115,7 +119,7 @@ Open a PR, or comment `/review-council` on an existing one. Watch the run in the
 |---|---|---|---|
 | `approved_seats` | string | `""` | Comma-separated custom-seat slot names that may run. See [Custom seats in CI](#custom-seats-in-ci). |
 | `run_budget_seconds` | number | `900` | Soft time budget for the whole review. When spent, the council skips or shrinks the double-check pass and still posts a report. |
-| `plugin_ref` | string | `main` | Git ref of `deployhq/review-council` to load the plugin from. |
+| `plugin_ref` | string | `main` | Git ref of `deployhq/review-council` to load the plugin from. Set it to the same tag or SHA as the `uses:` ref. |
 | `claude_code_version` | string | a pinned version | Version of `@anthropic-ai/claude-code` to install. |
 | `codex_version` | string | `0.163.0` | Version of the Codex CLI to install. |
 | `static_analysis` | boolean | `true` | Run the static-analysis scan (secrets, CVEs, lint) before the review. Missing tools are skipped and noted; the run never stops to ask. |
@@ -131,13 +135,13 @@ Precedence is per key: **workflow env > `config.yml` > built-in default.**
 
   | Env | Value | Effect |
   |---|---|---|
-  | `RC_CI` | `true` | "No human is present." Never asks a question. Posts without a confirm step. Skips the triage walk and the learnings capture. Never opens a draft PR. |
+  | `RC_CI` | `true` | "No human is present." Never asks a question. Posts without a confirm step. Skips the triage walk and the learnings capture. Never opens a draft PR. Reads only trusted PR comments and reviews (see [Security model](#security-model)). |
   | `RC_PR_COMMENTS` | `true` | Posting is always on in CI. You don't need `pr_comments.enabled` in `config.yml`. |
   | `RC_RUN_BUDGET` | `run_budget_seconds` input | Overrides `settings.run_budget_seconds` from the file. |
   | `RC_STATIC_ANALYSIS` | `static_analysis` input | Overrides `static_analysis.enabled` from the file. |
   | `RC_APPROVED_SEATS` | `approved_seats` input | Pre-approves the named seats. |
 
-  `RC_CI=true` also forces `settings.auto_retry=true` (a failed reviewer is retried once without asking) and `settings.learn=false`. `.review-council/learnings.md` is still **read** (its conventions and suppressions apply), but CI never **writes** to it.
+  `RC_CI=true` also forces `settings.auto_retry=true` (a failed reviewer is retried once without asking) and turns off learnings capture: CI never **writes** `.review-council/learnings.md`. Reading it (recall) follows your config through `settings.recall`: by default CI reads the file and applies its Conventions and Suppressions; set `settings.learn: false` in `config.yml` and CI does not read it either. The file is read from the PR's branch, so see [Learnings in CI](#learnings-in-ci).
 
 - **`config.local.yml` is not used in CI.** It is gitignored, so it is not in the checkout.
 
@@ -168,7 +172,9 @@ A custom seat is an extra reviewer: a model you choose, run through a harness CL
          OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
    ```
 
-A seat that needs approval and is not in `approved_seats` is skipped. The report says: `kimi: skipped — not approved for CI (add it to approved_seats)`. The PR branch cannot approve its own seat: approval lives only in the workflow file, which runs from your default branch.
+A seat that needs approval and is not in `approved_seats` is skipped. The report says: `kimi: skipped — not approved for CI (add it to approved_seats)`. Approval lives only in the caller workflow file, never in `config.yml`. See [Trust boundary](#trust-boundary) for which copy of that file a run uses.
+
+**Approving a seat approves its name, not its definition.** `approved_seats: "kimi"` lets the seat called `kimi` run. The seat's `harness`, `provider` and `model` still come from `config.yml` on the PR's branch, so a PR can change what `kimi` is (for example, point it at a different OpenRouter model) and the approval still applies. Its key stays `OPENROUTER_API_KEY`, and the trusted-only keys stay ignored. Use a spend-limited key for seats.
 
 Limits in CI:
 
@@ -240,15 +246,34 @@ PRs from forks are ignored completely. That includes `/review-council` comments 
 
 ### Triggers, permissions and data
 
-**Who can trigger.** The `pull_request` trigger runs for branches pushed to your repo. The `/review-council` trigger checks the commenter's permission (`GET /repos/{owner}/{repo}/collaborators/{user}/permission`) and runs only for `admin`, `maintain` or `write`.
+**Who can trigger.** The `pull_request` trigger runs for branches pushed to your repo, which needs write access. The `/review-council` trigger checks the commenter's permission (`GET /repos/{owner}/{repo}/collaborators/{user}/permission`) and runs only for `admin`, `maintain` or `write`. All checks run in the `gate` job; the `review` job runs only if they pass.
+
+**What the run reads from the PR.** Because fork PRs are skipped, the PR's code, title, body and diff come from people with write access. PR comments and reviews are different: on a public repo anyone can write them. In CI the run reads only comments and reviews whose author is `OWNER`, `MEMBER` or `COLLABORATOR`, and drops the rest. All PR text, trusted or not, is treated as data to review, never as instructions.
 
 **Job permissions.** `contents: read`, `pull-requests: write`, `issues: write`. The checkout does not keep credentials (`persist-credentials: false`). The run can read code and post a comment. It cannot push.
 
 **The PR's Claude settings never load.** Claude Code runs with `--setting-sources user`, so the reviewed branch's `.claude/` settings and hooks are never loaded into the session that holds the keys.
 
-**Trusted vs. untrusted config.** The workflow file is the trusted place. It runs from your default branch and chooses the switches (`RC_CI`, `RC_APPROVED_SEATS`, …). The PR branch's `config.yml` is untrusted: it can tune the review, but it cannot approve a seat, set `api_key_env`, set free-form seat flags, or set `pr_comments.bot_token_env`. The target PR comes from the checkout, never from config.
+### Trust boundary
 
-**Secret scan before posting.** Before the digest is posted, likely secrets are replaced with `[REDACTED]`: Anthropic (`sk-ant-…`), OpenAI (`sk-…`, `sk-proj-…`), OpenRouter (`sk-or-…`), GitHub (`ghp_…`, `gho_…`, `ghs_…`, `ghu_…`, `ghr_…`, `github_pat_…`) and AWS (`AKIA…`, `ASIA…`). The comment is still posted. The log shows only how many values were redacted, never the values.
+The boundary is **write access to the repo**. Everything below follows from it.
+
+**Which workflow file runs.** The caller workflow sets the switches (`RC_CI`, `RC_APPROVED_SEATS`, `plugin_ref`, the `uses:` ref, …). Which copy of it runs depends on the trigger:
+
+- `issue_comment` (`/review-council`): GitHub runs the copy on your **default branch**.
+- `pull_request`: GitHub runs the copy on the **PR's branch**. A same-repo PR can change `approved_seats`, `plugin_ref` or the `uses:` ref for its own run.
+
+That is not an escalation: anyone who can push a branch can already edit any workflow file. But it means the default-branch workflow is not a hard limit on what a PR's own run does. If you need the default-branch settings to hold, use only the `/review-council` trigger.
+
+**Trusted vs. untrusted config.** The PR branch's `config.yml` is untrusted: it can tune the review, but it cannot approve a seat, set `api_key_env`, set free-form seat flags, or set `pr_comments.bot_token_env`. It can change the definition of an approved seat (see [Custom seats in CI](#custom-seats-in-ci)). The target PR comes from the checkout, never from config.
+
+### Learnings in CI
+
+`.review-council/learnings.md` is read from the PR's branch, with the same trust as `config.yml`. A PR author with write access can add Suppressions or Conventions in the PR and so hide findings in that PR's own review. Review changes to `learnings.md` like code, or set `settings.learn: false` on your default branch's `config.yml` to stop CI from reading it. (A PR can also change that setting, as with any other key in `config.yml`.)
+
+### Secrets, data egress and residual risk
+
+**Secret scan before posting.** Before the digest is posted, and before the report is written to the job summary, likely secrets are replaced with `[REDACTED]`. Both use one shared list (`rc-post.sh redact`): Anthropic (`sk-ant-…`), OpenAI (`sk-…`, `sk-proj-…`), OpenRouter (`sk-or-…`), Perplexity (`pplx-…`), GitHub (`ghp_…`, `gho_…`, `ghs_…`, `ghu_…`, `ghr_…`, `github_pat_…`) and AWS (`AKIA…`, `ASIA…`). The comment is still posted. The log shows only how many values were redacted, never the values.
 
 **Where your code goes.** The PR's diff and the files the reviewers read are sent, under **your** keys, to:
 
@@ -260,7 +285,7 @@ PRs from forks are ignored completely. That includes `/review-council` comments 
 
 Static-analysis tools run on the runner. `trufflehog` checks found credentials against their provider; drop it from `static_analysis.tools` to stop that.
 
-**Residual risk.** The orchestrator is Claude Code with a Bash tool, and the API keys are in its environment. It reads the PR's diff, which could contain instructions planted to steer it. This is bounded: only people with write access can start a run, by pushing a branch or commenting. That is the same posture as other AI PR-review actions. Use dedicated keys with spend limits, and don't use the workflow on repos where people you don't trust have write access.
+**Residual risk.** The orchestrator is Claude Code with a Bash tool, and the API keys are in its environment. It reads the PR's code, title, body and diff, which could contain instructions planted to steer it. Those come from people with write access. Comments and reviews from anyone else are dropped before the run reads them. So a malicious PR author with write access could try to make the run leak the keys. They could already do that without Review Council, by editing a workflow in their branch to print the secrets. Use dedicated keys with spend limits, rotate them if you suspect a leak, and don't use the workflow on repos where people you don't trust have write access.
 
 ### Who posts
 

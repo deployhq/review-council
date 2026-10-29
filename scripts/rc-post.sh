@@ -22,6 +22,11 @@
 #                                   a bot token; when that var is non-empty the
 #                                   comment is posted as that identity, else as
 #                                   the authenticated `gh` user.
+#   redact                          Read text on stdin, write it to stdout with
+#                                   likely secrets replaced by [REDACTED]; the
+#                                   count goes to stderr only. Non-zero exit (and
+#                                   no stdout) if redaction itself fails. Same
+#                                   implementation `post` uses.
 #
 # Idempotency: the digest carries a hidden marker (rc:report). `post` finds the
 # most-recent comment bearing it and PATCHes it in place; only when none exists
@@ -40,11 +45,50 @@ MARKER='<!-- rc:report -->'
 # model-composed from review context, which may quote a credential). One
 # Oniguruma regex for jq: Anthropic sk-ant-, OpenRouter sk-or-, OpenAI
 # sk-proj-/sk-svcacct-/sk-admin- and legacy sk-<32+ alnum>, GitHub
-# ghp_/gho_/ghs_/ghu_/ghr_ and github_pat_, AWS access key ids AKIA/ASIA. The
-# lookbehind/lookahead keep it to whole tokens; the length floors keep ordinary
-# text ("sk-learn", a 40-hex SHA) out.
-SECRET_RE='(?<![A-Za-z0-9_-])(?:sk-(?:ant|or|proj|svcacct|admin)-[A-Za-z0-9_-]{20,}|sk-[A-Za-z0-9]{32,}|gh[pousr]_[A-Za-z0-9]{36,}|github_pat_[A-Za-z0-9_]{22,}|(?:AKIA|ASIA)[0-9A-Z]{16}(?![0-9A-Za-z]))'
+# ghp_/gho_/ghs_/ghu_/ghr_ and github_pat_, Perplexity pplx-, AWS access key ids
+# AKIA/ASIA. The lookbehind/lookahead keep it to whole tokens; `_` is NOT in the
+# lookbehind so a token wrapped in markdown italics (`_sk-ant-..._`) is still
+# caught. The length floors keep ordinary text ("sk-learn", a 40-hex SHA) out.
+SECRET_RE='(?<![A-Za-z0-9-])(?:sk-(?:ant|or|proj|svcacct|admin)-[A-Za-z0-9_-]{20,}|sk-[A-Za-z0-9]{32,}|gh[pousr]_[A-Za-z0-9]{36,}|github_pat_[A-Za-z0-9_]{22,}|pplx-[A-Za-z0-9]{32,}|(?:AKIA|ASIA)[0-9A-Z]{16}(?![0-9A-Za-z]))'
 GH_POST_TOKEN=''  # set by `post` from the named env var; empty = ambient gh auth
+
+# ---------------------------------------------------------------------------
+# redact_file <in> <out>: write <in> to <out> with every SECRET_RE match replaced
+# by [REDACTED], byte-for-byte otherwise (jq -j: no added newline). Sets
+# _RED_N to the match count. Returns non-zero if the scan or the rewrite fails —
+# callers must then treat the text as unvetted. The ONE redaction implementation:
+# `post` and the `redact` subcommand both go through here.
+# ---------------------------------------------------------------------------
+redact_file() {
+  _RED_N="$(jq -Rrs --arg re "$SECRET_RE" '[match($re; "g")] | length' "$1" 2>/dev/null)" || _RED_N=""
+  [ -n "$_RED_N" ] || return 1
+  jq -Rjs --arg re "$SECRET_RE" 'gsub($re; "[REDACTED]")' "$1" >"$2" 2>/dev/null || return 1
+}
+
+# redact: stdin -> stdout, count -> stderr. Output is only released once the
+# whole redaction succeeded, so a failure never leaks unredacted text.
+do_redact() {
+  _rd_in="$(mktemp "${TMPDIR:-/tmp}/rc-redact-in.XXXXXX")" || {
+    echo "rc-post: could not create a temp file; not redacting" >&2
+    return 1
+  }
+  _rd_out="$(mktemp "${TMPDIR:-/tmp}/rc-redact-out.XXXXXX")" || {
+    rm -f "$_rd_in"
+    echo "rc-post: could not create a temp file; not redacting" >&2
+    return 1
+  }
+  trap 'rm -f "$_rd_in" "$_rd_out"' EXIT
+  cat >"$_rd_in" || {
+    echo "rc-post: could not read stdin; not redacting" >&2
+    return 1
+  }
+  redact_file "$_rd_in" "$_rd_out" || {
+    echo "rc-post: redaction failed; no output" >&2
+    return 1
+  }
+  cat "$_rd_out"
+  echo "rc-post: redacted $_RED_N likely secret(s)" >&2
+}
 
 # ---------------------------------------------------------------------------
 # Identity: run gh with the posting token when one was resolved, else ambient.
@@ -158,15 +202,19 @@ do_post() {
     echo "rc-post: could not create a temp file; not posting" >&2
     return 1
   }
-  trap 'rm -f "$_payload"' EXIT
-  _nred="$(jq -Rrs --arg re "$SECRET_RE" '[match($re; "g")] | length' "$_body" 2>/dev/null)" || _nred=""
-  if ! jq -Rs --arg re "$SECRET_RE" '{body: gsub($re; "[REDACTED]")}' "$_body" >"$_payload" 2>/dev/null \
-    || [ -z "$_nred" ]; then
+  _redacted="$(mktemp "${TMPDIR:-/tmp}/rc-post-red.XXXXXX")" || {
+    rm -f "$_payload"
+    echo "rc-post: could not create a temp file; not posting" >&2
+    return 1
+  }
+  trap 'rm -f "$_payload" "$_redacted"' EXIT
+  if ! redact_file "$_body" "$_redacted" \
+    || ! jq -Rs '{body: .}' "$_redacted" >"$_payload" 2>/dev/null; then
     echo "rc-post: could not scan the digest for secrets; not posting" >&2
     return 1
   fi
-  if [ "$_nred" != 0 ]; then
-    echo "rc-post: redacted $_nred likely secret(s) from the digest before posting" >&2
+  if [ "$_RED_N" != 0 ]; then
+    echo "rc-post: redacted $_RED_N likely secret(s) from the digest before posting" >&2
   fi
 
   GH_POST_TOKEN="$(resolve_token "$_tokname")"
@@ -181,9 +229,16 @@ do_post() {
   # a public string, so without this a third party could plant a marked comment
   # and get it edited under our token (or force an endless spam loop). If the
   # identity can't be resolved (e.g. a GitHub App installation token cannot call
-  # /user), fall back to matching only BOT-authored comments — on that path we are
-  # a bot, and a human attacker's planted comment is type "User", so it's ignored.
+  # /user), fall back to matching only BOT-authored comments whose body STARTS
+  # with the marker (our digest always does; a bot quoting it mid-text does not)
+  # — on that path we are a bot, and a human attacker's planted comment is type
+  # "User", so it's ignored. Under GitHub Actions with no bot token we post as
+  # the Actions token, so narrow further to login `github-actions[bot]`.
   _me="$(gh_post api user 2>/dev/null | jq -r '.login // empty' 2>/dev/null)" || _me=""
+  _fb_login=""
+  if [ -z "$_me" ] && [ "${GITHUB_ACTIONS:-}" = true ] && [ -z "$GH_POST_TOKEN" ]; then
+    _fb_login='github-actions[bot]'
+  fi
 
   # List existing comments. A FAILED list must NOT look like an empty list: if we
   # can't read the comments we must not create a new one (that would duplicate an
@@ -198,10 +253,12 @@ do_post() {
   # error object among array pages) without a jq type error.
   # `2>/dev/null` + `|| _id=""`: a malformed response (jq parse error) must degrade
   # to "no match" / fail-soft, never abort the script under `set -e`.
-  _id="$(printf '%s' "$_comments" | jq -s --arg m "$MARKER" --arg me "$_me" '
+  _id="$(printf '%s' "$_comments" | jq -s --arg m "$MARKER" --arg me "$_me" --arg fb "$_fb_login" '
     [ .[] | arrays | .[]
-      | select(.body != null and (.body | contains($m))
-          and (if $me == "" then (.user.type == "Bot") else (.user.login == $me) end)) ]
+      | select((.body | type) == "string"
+          and (if $me != "" then (.user.login == $me and (.body | contains($m)))
+               else (.user.type == "Bot" and (.body | startswith($m))
+                     and ($fb == "" or .user.login == $fb)) end)) ]
     | max_by(.id) | .id // empty' 2>/dev/null)" || _id=""
 
   if [ -n "$_id" ]; then
@@ -233,8 +290,9 @@ case "$_cmd" in
   detect) detect_pr "$@" ;;
   open-draft) open_draft "$@" ;;
   post) do_post "$@" ;;
+  redact) do_redact "$@" ;;
   *)
-    echo "usage: rc-post.sh <detect | open-draft | post <pr> <body-file> [envname]>" >&2
+    echo "usage: rc-post.sh <detect | open-draft | post <pr> <body-file> [envname] | redact>" >&2
     exit 2
     ;;
 esac

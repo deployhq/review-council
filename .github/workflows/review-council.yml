@@ -6,7 +6,7 @@ name: Review Council
 # Call it from a workflow in your repo that triggers on `pull_request` and/or
 # `issue_comment` (see examples/github-action/review-council.yml and
 # docs/github-action.md). The caller must grant at least the permissions
-# declared below — a called workflow can never exceed its caller's grant.
+# declared on the jobs below — a called workflow can never exceed its caller's grant.
 #
 # Security model, in short:
 #   - Fork PRs are skipped (secrets would be exposed to untrusted code paths).
@@ -14,6 +14,10 @@ name: Review Council
 #     admin permission on the repo.
 #   - Every event-derived value (comment body, login, branch name) reaches a
 #     script through `env:`, never through `${{ }}` inside `run:`.
+#   - Every check (event, fork, draft, open, commenter permission) runs in the
+#     `gate` job, which holds no concurrency group. Only the `review` job, which
+#     runs after the gate passes, takes the per-PR group with cancel-in-progress
+#     — so a comment from a user without write access cannot cancel a review.
 #   - The reviewed repo is checked out without persisted credentials; the
 #     token used to post is GITHUB_TOKEN, scoped by `permissions:`.
 on:
@@ -60,10 +64,10 @@ on:
         description: Optional. A token (e.g. a GitHub App installation token minted in the caller) used to post the digest as that App or bot instead of github-actions[bot].
         required: false
 
-permissions:
-  contents: read
-  pull-requests: write
-  issues: write
+# No workflow-level grant: each job declares the minimum it needs. The union
+# (contents: read, pull-requests: write, issues: write) is what the caller
+# must grant.
+permissions: {}
 
 env:
   # Pinned tool versions (not inputs — bump them here).
@@ -79,9 +83,11 @@ env:
   RUFF_VERSION: 0.17.0
 
 jobs:
-  review:
-    name: Review Council
+  gate:
+    name: Gate
     # Cheap pre-filter; the gate step re-checks against the live PR.
+    # Deliberately NO concurrency group here: anyone can trigger this job by
+    # commenting, so it must never be able to cancel a review in progress.
     if: >
       (
         github.event_name == 'pull_request' &&
@@ -95,13 +101,15 @@ jobs:
         startsWith(github.event.comment.body, '/review-council')
       )
     runs-on: ubuntu-latest
-    concurrency:
-      group: review-council-${{ github.repository }}-${{ github.event.pull_request.number || github.event.issue.number }}
-      cancel-in-progress: true
-    env:
-      # `secrets` is not available in step-level `if`, so expose presence only.
-      HAS_OPENAI: ${{ secrets.OPENAI_API_KEY != '' }}
-      npm_config_prefix: ${{ github.workspace }}/.npm-global
+    permissions:
+      # (metadata: read is implicit and covers the collaborator-permission lookup)
+      pull-requests: read   # read the live PR
+      issues: write         # the eyes reaction on the triggering comment
+    outputs:
+      proceed: ${{ steps.gate.outputs.proceed }}
+      pr_number: ${{ steps.gate.outputs.pr_number }}
+      head_ref: ${{ steps.gate.outputs.head_ref }}
+      timeout_minutes: ${{ steps.gate.outputs.timeout_minutes }}
     steps:
       - name: Resolve PR and check gates
         id: gate
@@ -115,7 +123,7 @@ jobs:
           RUN_BUDGET: ${{ inputs.run_budget_seconds }}
         run: |
           set -euo pipefail
-          skip() { echo "Skipping: $1"; echo "skip=true" >> "$GITHUB_OUTPUT"; exit 0; }
+          skip() { echo "Skipping: $1"; echo "proceed=false" >> "$GITHUB_OUTPUT"; exit 0; }
 
           case "$PR_NUMBER" in ''|*[!0-9]*) skip "no PR number on this event" ;; esac
 
@@ -151,25 +159,42 @@ jobs:
           timeout_min=$(( (RUN_BUDGET + 59) / 60 + 30 ))
 
           {
-            echo "skip=false"
+            echo "proceed=true"
             echo "pr_number=$PR_NUMBER"
             echo "head_ref=$head_ref"
             echo "timeout_minutes=$timeout_min"
           } >> "$GITHUB_OUTPUT"
 
+  review:
+    name: Review Council
+    needs: gate
+    if: needs.gate.outputs.proceed == 'true'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: write  # post/update the review digest
+      issues: write         # the digest is an issue comment on the PR
+    # Taken only after the gate passed, so only an authorised trigger can
+    # cancel (supersede) a review in progress for the same PR.
+    concurrency:
+      group: review-council-${{ github.repository }}-${{ needs.gate.outputs.pr_number }}
+      cancel-in-progress: true
+    env:
+      # `secrets` is not available in step-level `if`, so expose presence only.
+      HAS_OPENAI: ${{ secrets.OPENAI_API_KEY != '' }}
+      npm_config_prefix: ${{ github.workspace }}/.npm-global
+    steps:
       - name: Check out the pull request
-        if: steps.gate.outputs.skip != 'true'
-        uses: actions/checkout@v4
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with:
-          ref: ${{ steps.gate.outputs.head_ref }}
+          ref: ${{ needs.gate.outputs.head_ref }}
           path: repo
           fetch-depth: 0
           persist-credentials: false
 
       # Kept outside the reviewed tree so static scanners never see it as new files.
       - name: Check out Review Council
-        if: steps.gate.outputs.skip != 'true'
-        uses: actions/checkout@v4
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with:
           repository: deployhq/review-council
           ref: ${{ inputs.plugin_ref }}
@@ -177,14 +202,12 @@ jobs:
           persist-credentials: false
 
       - name: Prepare tool directories
-        if: steps.gate.outputs.skip != 'true'
         run: |
           mkdir -p "$npm_config_prefix/bin" "$HOME/.local/bin"
           echo "$npm_config_prefix/bin" >> "$GITHUB_PATH"
           echo "$HOME/.local/bin" >> "$GITHUB_PATH"
 
       - name: Install Claude Code
-        if: steps.gate.outputs.skip != 'true'
         env:
           CLAUDE_CODE_VERSION: ${{ inputs.claude_code_version }}
         run: |
@@ -192,14 +215,13 @@ jobs:
           claude --version
 
       - name: Install yq (mikefarah v4)
-        if: steps.gate.outputs.skip != 'true'
         run: |
           curl -fsSL "https://github.com/mikefarah/yq/releases/download/${YQ_VERSION}/yq_linux_amd64" -o "$HOME/.local/bin/yq"
           chmod +x "$HOME/.local/bin/yq"
           "$HOME/.local/bin/yq" --version
 
       - name: Install Codex CLI
-        if: steps.gate.outputs.skip != 'true' && env.HAS_OPENAI == 'true'
+        if: env.HAS_OPENAI == 'true'
         env:
           CODEX_VERSION: ${{ inputs.codex_version }}
         run: |
@@ -209,7 +231,6 @@ jobs:
       # Install only the harnesses the resolved config actually uses. The reader
       # gets the same trusted env (RC_CI, RC_APPROVED_SEATS) the review does.
       - name: Install custom-seat harnesses
-        if: steps.gate.outputs.skip != 'true'
         working-directory: repo
         env:
           RC_CI: 'true'
@@ -251,7 +272,7 @@ jobs:
       # Note: trufflehog's verified mode makes outbound calls to confirm a secret
       # is live; drop it via static_analysis.tools in config to opt out.
       - name: Install static-analysis tools
-        if: steps.gate.outputs.skip != 'true' && inputs.static_analysis
+        if: inputs.static_analysis
         continue-on-error: true
         run: |
           set -uo pipefail
@@ -282,9 +303,8 @@ jobs:
           done
 
       - name: Run Review Council
-        if: steps.gate.outputs.skip != 'true'
         working-directory: repo
-        timeout-minutes: ${{ fromJSON(steps.gate.outputs.timeout_minutes || '45') }}
+        timeout-minutes: ${{ fromJSON(needs.gate.outputs.timeout_minutes || '45') }}
         env:
           RC_CI: 'true'
           RC_PR_COMMENTS: 'true'
@@ -301,7 +321,7 @@ jobs:
           # posting falls back to github-actions[bot] via GH_TOKEN.
           RC_PR_BOT_TOKEN: ${{ secrets.PR_BOT_TOKEN }}
           RC_PR_BOT_TOKEN_ENV: RC_PR_BOT_TOKEN
-          PR_NUMBER: ${{ steps.gate.outputs.pr_number }}
+          PR_NUMBER: ${{ needs.gate.outputs.pr_number }}
         run: |
           set -uo pipefail
           # Unset empty optional keys so providers detect "not set", not "set to ''".
@@ -322,20 +342,10 @@ jobs:
           exit "$rc"
 
       - name: Write job summary
-        if: always() && steps.gate.outputs.skip != 'true'
+        if: always()
         run: |
           set -uo pipefail
           log="$RUNNER_TEMP/rc-run.jsonl"
-          redact() {
-            sed -E \
-              -e 's/sk-ant-[A-Za-z0-9_-]+/[REDACTED]/g' \
-              -e 's/sk-or-[A-Za-z0-9_-]+/[REDACTED]/g' \
-              -e 's/sk-proj-[A-Za-z0-9_-]+/[REDACTED]/g' \
-              -e 's/sk-[A-Za-z0-9_-]{20,}/[REDACTED]/g' \
-              -e 's/(ghp|gho|ghs|ghu|ghr)_[A-Za-z0-9]+/[REDACTED]/g' \
-              -e 's/github_pat_[A-Za-z0-9_]+/[REDACTED]/g' \
-              -e 's/AKIA[0-9A-Z]{16}/[REDACTED]/g'
-          }
           {
             echo "## Review Council"
             echo
@@ -347,7 +357,13 @@ jobs:
                 "$log" 2>/dev/null | tail -n 2 || true
               result="$(jq -r 'select(.type == "result") | .result // empty' "$log" 2>/dev/null | tail -n 1000 || true)"
               if [ -n "$result" ]; then
-                printf '%s\n' "$result" | redact
+                # One redaction list for the whole plugin: rc-post.sh redact
+                # (stdin -> stdout, count on stderr, non-zero on failure).
+                if redacted="$(printf '%s\n' "$result" | "$GITHUB_WORKSPACE/rc-plugin/scripts/rc-post.sh" redact)"; then
+                  printf '%s\n' "$redacted"
+                else
+                  echo "summary withheld: redaction failed"
+                fi
               else
                 echo "The run produced no final result (see the step log)."
               fi

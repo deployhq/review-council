@@ -454,7 +454,14 @@ echo "# settings"
 emit_setting settings.personas ".settings.personas" "true" bool RC_PERSONAS
 emit_setting settings.verify ".settings.verify" "true" bool RC_VERIFY
 emit_setting settings.verify_max_findings ".settings.verify_max_findings" "12" posint RC_VERIFY_CAP
-emit_ci_forced settings.learn false || emit_setting settings.learn ".settings.learn" "true" bool RC_LEARN
+# settings.recall carries the CONFIGURED learn value (files + RC_LEARN), before
+# CI forces learn=false: CI turns off only the Capture Gate (Step 7, needs a
+# human); whether Step 0.5 still reads learnings.md is the operator's choice.
+# Outside CI recall == learn.
+_learn_cfg="$(emit_setting settings.learn ".settings.learn" "true" bool RC_LEARN)"
+_learn_cfg="${_learn_cfg#settings.learn=}"
+emit_ci_forced settings.learn false || printf 'settings.learn=%s\n' "$_learn_cfg"
+printf 'settings.recall=%s\n' "$_learn_cfg"
 emit_setting settings.min_reviewers ".settings.min_reviewers" "2" posint RC_MIN_REVIEWERS
 emit_setting settings.reviewer_timeout_seconds ".settings.reviewer_timeout_seconds" "600" posint RC_REVIEWER_TIMEOUT
 emit_setting settings.run_budget_seconds ".settings.run_budget_seconds" "600" posint RC_RUN_BUDGET

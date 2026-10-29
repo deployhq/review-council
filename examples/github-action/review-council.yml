@@ -10,7 +10,9 @@
 #      do nothing until it is there.
 #
 # Fork PRs are always skipped. A `/review-council` comment runs only when the
-# commenter has write access to the repo.
+# commenter has write access to the repo. On `pull_request`, GitHub runs the
+# copy of this file on the PR's branch, so a PR can change these settings for
+# its own run; on `issue_comment` it runs the default-branch copy.
 
 name: Review Council
 
@@ -30,7 +32,8 @@ on:
 #
 # Do NOT add a workflow-level `concurrency:` with cancel-in-progress here: every
 # PR comment triggers this workflow and would cancel a running review. The
-# reusable workflow already allows one run per PR.
+# reusable workflow already allows one review per PR, and only an authorised
+# trigger can cancel it.
 permissions:
   contents: read
   pull-requests: write
@@ -38,18 +41,22 @@ permissions:
 
 jobs:
   review:
-    # Pin to a tag or commit SHA for repeatable runs.
+    # `main` picks up every upstream change. If you'd rather not, pin a commit
+    # SHA here and set plugin_ref below to the same SHA.
     uses: deployhq/review-council/.github/workflows/review-council.yml@main
     with:
       # Custom seats from .review-council/config.yml that may run in CI,
       # comma-separated slot names (e.g. "qwen,kimi"). Empty = none approved.
+      # Approving a seat approves its slot name only: the PR's config.yml still
+      # sets its harness, provider and model.
       approved_seats: ""
       # Soft time budget for the whole review, in seconds.
       run_budget_seconds: 900
       # Run the static-analysis scan (secrets, CVEs, lint) first.
       static_analysis: true
       # Git ref of deployhq/review-council to load the plugin from.
-      # plugin_ref: main
+      # Keep it the same as the ref in `uses:` above.
+      plugin_ref: main
     secrets:
       ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}     # required
       OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}           # optional: enables Codex
