@@ -1,8 +1,8 @@
 name: Unit Tests
 
 # Tier-1 unit tests only — the deterministic shell helpers (scripts/*.sh).
-# This is TEST CI. It deliberately does NOT run any Review Council review:
-# there is no CI for review runs. Its only job is to keep the tested helpers
+# This is TEST CI only. It does NOT run a Review Council review — the review
+# Action is the reusable workflow in review-council.yml. Its only job is to keep the tested helpers
 # regression-free on every push to main and every pull request (including the
 # stacked PRs whose base is another feature branch).
 on:

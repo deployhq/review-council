@@ -1,0 +1,58 @@
+# .github/workflows/review-council.yml — run Review Council on your PRs.
+#
+# Copy this file into your repo. Guide: https://github.com/deployhq/review-council/blob/main/docs/github-action.md
+#
+# Before the first run:
+#   1. Add the secrets below (Settings -> Secrets and variables -> Actions).
+#      ANTHROPIC_API_KEY is required; the others are optional.
+#   2. Merge this file to your default branch. GitHub runs issue_comment
+#      workflows only from the default branch, so `/review-council` comments
+#      do nothing until it is there.
+#
+# Fork PRs are always skipped. A `/review-council` comment runs only when the
+# commenter has write access to the repo.
+
+name: Review Council
+
+on:
+  pull_request:
+    # A draft PR marked ready for review. Add `opened` to also review PRs
+    # opened as non-draft, and `synchronize` to review every push (one run per
+    # push; a newer run cancels the older one). Drafts are always skipped,
+    # on both triggers.
+    types: [ready_for_review]
+  issue_comment:
+    # A comment starting with `/review-council` on a PR.
+    types: [created]
+
+# Required. A reusable workflow never gets more than its caller grants.
+# PR comments are issue comments, so issues: write is needed to post.
+#
+# Do NOT add a workflow-level `concurrency:` with cancel-in-progress here: every
+# PR comment triggers this workflow and would cancel a running review. The
+# reusable workflow already allows one run per PR.
+permissions:
+  contents: read
+  pull-requests: write
+  issues: write
+
+jobs:
+  review:
+    # Pin to a tag or commit SHA for repeatable runs.
+    uses: deployhq/review-council/.github/workflows/review-council.yml@main
+    with:
+      # Custom seats from .review-council/config.yml that may run in CI,
+      # comma-separated slot names (e.g. "qwen,kimi"). Empty = none approved.
+      approved_seats: ""
+      # Soft time budget for the whole review, in seconds.
+      run_budget_seconds: 900
+      # Run the static-analysis scan (secrets, CVEs, lint) first.
+      static_analysis: true
+      # Git ref of deployhq/review-council to load the plugin from.
+      # plugin_ref: main
+    secrets:
+      ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}     # required
+      OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}           # optional: enables Codex
+      OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}   # optional: an OpenRouter custom seat
+      PERPLEXITY_API_KEY: ${{ secrets.PERPLEXITY_API_KEY }}   # optional: enables Perplexity
+      # PR_BOT_TOKEN: ${{ secrets.PR_BOT_TOKEN }}             # optional: post as your own App or bot (default: github-actions[bot])

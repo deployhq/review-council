@@ -13,7 +13,7 @@ Single-model code review has blind spots. Different models catch different thing
 - **Genuine disagreements** (a reviewer's counter-evidence refutes another's finding, or an unresolved conflict survives the judge) = documented as a dropped/refuted finding or a Dissenting Opinion, not just discarded
 - **Learns from your triage** — a human-confirmed capture gate after each report distills your skip decisions into persisted false-positive suppressions & conventions in a committed `learnings.md`, recalled automatically on future runs
 
-The result: fewer false positives, broader coverage, and a clear priority order. Review Council is orchestrated locally, inside a single Claude Code session, and by default only ever prints a report — it never pushes commits or posts to a PR on its own. Optionally (off by default) it can post a single review-digest comment to the PR after you confirm — see [Posting to PRs](#posting-to-prs). Note the data egress this implies: when Codex, Google, or Perplexity are enabled, the gathered review context (diff, file contents, etc.) is sent to those third-party tools/APIs — only Claude (the native subagent) stays fully local. An opt-in [custom reviewer seat](#custom-reviewer-seats) sends it to OpenRouter and the model's host (or nowhere, with a local Ollama model). Codex's own shell access during review is sandboxed read-only (`codex exec --sandbox read-only`) — it can read the repo but cannot write to it or reach the network.
+The result: fewer false positives, broader coverage, and a clear priority order. Review Council is orchestrated locally, inside a single Claude Code session, and by default only ever prints a report — it never pushes commits or posts to a PR on its own. Optionally (off by default) it can post a single review-digest comment to the PR after you confirm — see [Posting to PRs](#posting-to-prs). It can also [run unattended in GitHub Actions](#github-actions), where it posts the digest automatically. Note the data egress this implies: when Codex, Google, or Perplexity are enabled, the gathered review context (diff, file contents, etc.) is sent to those third-party tools/APIs — only Claude (the native subagent) stays fully local. An opt-in [custom reviewer seat](#custom-reviewer-seats) sends it to OpenRouter and the model's host (or nowhere, with a local Ollama model). Codex's own shell access during review is sandboxed read-only (`codex exec --sandbox read-only`) — it can read the repo but cannot write to it or reach the network.
 
 ## Quick Start
 
@@ -89,7 +89,7 @@ flowchart TD
     N --> O["Step 6: Severity-First Report<br/>badges + dissent + lens map"]
 
     O --> P66{"Step 6.6: Post digest?<br/>(if pr_comments.enabled, default off)"}
-    P66 -->|"human-confirmed"| P66P["Post / update the single<br/>review-digest comment · rc-post.sh"]
+    P66 -->|"human-confirmed<br/>(automatic in CI)"| P66P["Post / update the single<br/>review-digest comment · rc-post.sh"]
     P66 -->|"off / declined"| P7
     P66P --> P7
 
@@ -213,6 +213,8 @@ Each run setting (`settings.*`) is also tunable via its `RC_*` environment varia
 | `RC_HEALTH_PROBE` | `false` | Opt-in Step-0 health probe (Codex + Google slots) so `available`/`min_reviewers` reflect *usable*, not merely installed. Default off; a provider is dropped only on positive hard-fail evidence (auth/quota/overload), fail-open otherwise. |
 | `RC_HEALTH_PROBE_TIMEOUT` | `20` | Short wall-clock cap (seconds) for each health probe |
 | `RC_CLAUDE_MAX_TURNS` | `100` | Turn budget (`maxTurns`) for the native Claude and Security reviewer subagents. Default 100 (lenient); lower it to cap local review cost. |
+| `RC_CI` | `false` | `true` = no human is present (set by the [GitHub Actions workflow](#github-actions)): never asks, posts the digest without a confirm step when posting is on, forces `auto_retry=true` and `learn=false`. Env only. |
+| `RC_APPROVED_SEATS` | — | Comma-separated custom-seat slot names approved to run without the start-of-run question (the workflow's `approved_seats` input). Env only. |
 | `PERPLEXITY_API_KEY` | — | Enables Perplexity reviewer via Sonar API |
 
 **The two-cap model.** Review Council bounds time with two independent caps, not one:
@@ -365,6 +367,13 @@ review-council/
 ├── .claude-plugin/
 │   ├── plugin.json          # Plugin metadata
 │   └── marketplace.json     # Marketplace listing
+├── .github/workflows/
+│   ├── review-council.yml   # Reusable workflow: run the council on PRs in GitHub Actions
+│   └── unit-tests.yml       # bats unit tests
+├── docs/
+│   └── github-action.md     # GitHub Actions guide
+├── examples/
+│   └── github-action/       # Copy-paste caller workflow + example config.yml for CI
 ├── skills/
 │   ├── run/SKILL.md         # Main command (orchestrator)
 │   ├── setup/SKILL.md       # Provider status checker
@@ -435,7 +444,7 @@ sequenceDiagram
 
     Note over O: Severity-First Report — badges, dissent, lens map
 
-    Note over O: Post digest (Step 6.6, if pr_comments.enabled — default off) — human-confirmed<br/>compose review-digest comment, upsert the singleton on the PR via rc-post.sh
+    Note over O: Post digest (Step 6.6, if pr_comments.enabled — default off) — human-confirmed (automatic in CI)<br/>compose review-digest comment, upsert the singleton on the PR via rc-post.sh
 
     Note over O: Capture Gate (Step 7, if settings.learn) — human-confirmed<br/>tackle/skip/skip-all, distill into Suppression/Convention, write via rc-learn.sh
 ```
@@ -466,9 +475,13 @@ pr_comments:
   bot_token_env: RC_PR_BOT_TOKEN # optional; see "Identity" below
 ```
 
-**It never posts on its own.** After the report you triage each finding (fix / defer / won't-fix), review the composed digest, and explicitly confirm before anything is posted. If the branch has no open PR, it offers to open a **draft** so the digest has a home. Nothing is posted if you decline.
+**Locally, it never posts on its own.** After the report you triage each finding (fix / defer / won't-fix), review the composed digest, and explicitly confirm before anything is posted. If the branch has no open PR, it offers to open a **draft** so the digest has a home. Nothing is posted if you decline.
 
-**Identity.** With no token configured, the comment posts under **your own authenticated `gh` account**, clearly marked as an automated Review Council comment (not a personal one). To post under a distinct identity instead, put a token in the env var named by `bot_token_env` (default `RC_PR_BOT_TOKEN`) — a bot account's fine-grained PAT (posts as that bot user) or a GitHub App installation token (posts as `review-council[bot]`). The token only ever comes from your environment, never from committed config, and the target PR is always taken from your local git — a repo you review can't redirect where comments land.
+**In CI it posts automatically.** The one exception is an unattended run (`RC_CI=true`, set by the [GitHub Actions workflow](#github-actions)): with posting enabled, it posts without asking, skips the triage walk (the "what was fixed" section reads `Not triaged — automated CI run.`), and never opens a draft PR.
+
+**State block and footer.** The comment starts with a hidden `<!-- rc:state {...} -->` line (the reviewed commit SHA, `clean` / `findings` / `degraded`, and counts per severity) that tools and agents can parse, and ends with a footer: `Review done with Review Council · <who posted>`. Likely secrets in the body are replaced with `[REDACTED]` before posting. Details: [docs/github-action.md](docs/github-action.md#the-digest-comment).
+
+**Identity.** With no token configured, the comment posts under **your own authenticated `gh` account**; the footer marks it as automated (`posted by @you (not a personal comment)`). In GitHub Actions it posts as `github-actions[bot]`, or as your own App or bot via the workflow's `PR_BOT_TOKEN` secret. If a bot token's login can't be read, the footer drops the identity. To post under a distinct identity instead, put a token in the env var named by `bot_token_env` (default `RC_PR_BOT_TOKEN`) — a bot account's fine-grained PAT or a GitHub App installation token; the comment posts as that bot. The token only ever comes from your environment, never from committed config, and the target PR is always taken from your local git — a repo you review can't redirect where comments land.
 
 This reverses the report-only posture behind an explicit opt-in; the digest (findings + your decisions) is sent to GitHub when you post.
 
@@ -583,28 +596,27 @@ A file the seat did not review is not a file the council calls clean. For fuller
 
 None met our go bar (full coverage in under ~10 min for under ~$2, with a verified new finding). Treat the seat's output as leads for the council to check — that is what `role: signal` is for.
 
-## GitHub Actions (Roadmap)
+## GitHub Actions
 
-Review Council can be triggered from CI as a reusable GitHub Action workflow — similar to [claude-fix-pr](https://github.com/deployhq/claude-fix-pr).
+Run the council on your PRs with no human in the loop. You call a **reusable workflow** from your repo; it runs headless Claude Code with the plugin loaded and posts one review-digest comment on the PR as `github-actions[bot]` (or your own bot).
 
-```mermaid
-flowchart LR
-    A["PR opened/updated"] --> B["GitHub Action"]
-    C["/review-council comment"] --> B
-    B --> D["Headless Claude Code"]
-    D --> E["Review Council"]
-    E --> F["PR Comment<br/>with findings"]
-    E --> G{"Critical issues?"}
-    G -->|"Yes"| H["Block merge"]
-    G -->|"No"| I["Approve"]
+- **When:** a PR is marked ready for review, or someone with write access comments `/review-council`. Drafts and PRs from forks are ignored.
+- **Secrets:** `ANTHROPIC_API_KEY` (required); `OPENAI_API_KEY` for Codex, `PERPLEXITY_API_KEY`, `OPENROUTER_API_KEY` for custom seats, `PR_BOT_TOKEN` to post as your own App or bot (optional).
+- **Config:** the committed `.review-council/config.yml` from the PR's branch, with workflow env on top. Custom seats run only when the workflow approves them (`approved_seats`).
+- **Advisory:** the digest never blocks a merge. A hidden state block (`clean` / `findings` / `degraded`) lets an agent or a gate read the result.
+- **Cost:** about 3.5 minutes and $3 Claude-side on a tiny diff in our test; real PRs cost more.
 
-    style B fill:#2563eb,color:#fff
-    style E fill:#7c3aed,color:#fff
-    style H fill:#dc2626,color:#fff
-    style I fill:#16a34a,color:#fff
+```yaml
+# Trimmed: the full example also sets the triggers and the required permissions.
+jobs:
+  review:
+    uses: deployhq/review-council/.github/workflows/review-council.yml@main
+    secrets:
+      ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+      OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
 ```
 
-This is planned for a future release.
+Setup, inputs, the digest format and the security model: **[docs/github-action.md](docs/github-action.md)**. Copy-paste files: [`examples/github-action/`](examples/github-action/).
 
 ## Adding New Reviewers (Extensibility)
 
