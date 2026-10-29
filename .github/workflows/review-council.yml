@@ -1,0 +1,355 @@
+name: Review Council
+
+# Reusable workflow: run a Review Council review of a pull request, unattended,
+# and post (or update) the single review-digest comment on it.
+#
+# Call it from a workflow in your repo that triggers on `pull_request` and/or
+# `issue_comment` (see examples/github-action/review-council.yml and
+# docs/github-action.md). The caller must grant at least the permissions
+# declared below — a called workflow can never exceed its caller's grant.
+#
+# Security model, in short:
+#   - Fork PRs are skipped (secrets would be exposed to untrusted code paths).
+#   - `/review-council` comments only run for users with write, maintain or
+#     admin permission on the repo.
+#   - Every event-derived value (comment body, login, branch name) reaches a
+#     script through `env:`, never through `${{ }}` inside `run:`.
+#   - The reviewed repo is checked out without persisted credentials; the
+#     token used to post is GITHUB_TOKEN, scoped by `permissions:`.
+on:
+  workflow_call:
+    inputs:
+      approved_seats:
+        description: Comma-separated custom-seat slot names pre-approved for CI (RC_APPROVED_SEATS). Seats from committed config that would otherwise need a confirmation are skipped unless listed here.
+        type: string
+        default: ''
+      run_budget_seconds:
+        description: Review Council run budget in seconds (RC_RUN_BUDGET). Also sizes the step timeout.
+        type: number
+        default: 900
+      plugin_ref:
+        description: Git ref of deployhq/review-council to run.
+        type: string
+        default: main
+      claude_code_version:
+        description: Version of @anthropic-ai/claude-code to install.
+        type: string
+        default: 2.1.312
+      codex_version:
+        description: Version of @openai/codex to install (only when OPENAI_API_KEY is set, or a custom seat uses the codex harness).
+        type: string
+        default: 0.163.0
+      static_analysis:
+        description: Run the static-analysis step (Step 2.5) and install its tools (RC_STATIC_ANALYSIS).
+        type: boolean
+        default: true
+    secrets:
+      ANTHROPIC_API_KEY:
+        description: Anthropic API key for the orchestrating Claude Code session and the native Claude reviewers.
+        required: true
+      OPENAI_API_KEY:
+        description: Optional. Enables the Codex reviewer (exported to Codex as CODEX_API_KEY).
+        required: false
+      OPENROUTER_API_KEY:
+        description: Optional. Key for custom seats on OpenRouter.
+        required: false
+      PERPLEXITY_API_KEY:
+        description: Optional. Enables the Perplexity reviewer.
+        required: false
+      PR_BOT_TOKEN:
+        description: Optional. A token (e.g. a GitHub App installation token minted in the caller) used to post the digest as that App or bot instead of github-actions[bot].
+        required: false
+
+permissions:
+  contents: read
+  pull-requests: write
+  issues: write
+
+env:
+  # Pinned tool versions (not inputs — bump them here).
+  YQ_VERSION: v4.44.6
+  OPENCODE_VERSION: 1.19.3
+  OCR_VERSION: 1.13.3
+  GITLEAKS_VERSION: 8.30.1
+  TRUFFLEHOG_VERSION: 3.99.2
+  OSV_SCANNER_VERSION: 2.7.0
+  ACTIONLINT_VERSION: 1.7.12
+  HADOLINT_VERSION: 2.15.1
+  SEMGREP_VERSION: 1.180.0
+  RUFF_VERSION: 0.17.0
+
+jobs:
+  review:
+    name: Review Council
+    # Cheap pre-filter; the gate step re-checks against the live PR.
+    if: >
+      (
+        github.event_name == 'pull_request' &&
+        github.event.action != 'closed' &&
+        github.event.pull_request.draft == false &&
+        github.event.pull_request.head.repo.full_name == github.repository
+      ) ||
+      (
+        github.event_name == 'issue_comment' &&
+        github.event.issue.pull_request &&
+        startsWith(github.event.comment.body, '/review-council')
+      )
+    runs-on: ubuntu-latest
+    concurrency:
+      group: review-council-${{ github.repository }}-${{ github.event.pull_request.number || github.event.issue.number }}
+      cancel-in-progress: true
+    env:
+      # `secrets` is not available in step-level `if`, so expose presence only.
+      HAS_OPENAI: ${{ secrets.OPENAI_API_KEY != '' }}
+      npm_config_prefix: ${{ github.workspace }}/.npm-global
+    steps:
+      - name: Resolve PR and check gates
+        id: gate
+        env:
+          GH_TOKEN: ${{ github.token }}
+          EVENT_NAME: ${{ github.event_name }}
+          REPO: ${{ github.repository }}
+          PR_NUMBER: ${{ github.event.pull_request.number || github.event.issue.number }}
+          COMMENT_ID: ${{ github.event.comment.id }}
+          COMMENTER: ${{ github.event.comment.user.login }}
+          RUN_BUDGET: ${{ inputs.run_budget_seconds }}
+        run: |
+          set -euo pipefail
+          skip() { echo "Skipping: $1"; echo "skip=true" >> "$GITHUB_OUTPUT"; exit 0; }
+
+          case "$PR_NUMBER" in ''|*[!0-9]*) skip "no PR number on this event" ;; esac
+
+          if [ "$EVENT_NAME" = "issue_comment" ]; then
+            perm_json="$(gh api "repos/$REPO/collaborators/$COMMENTER/permission")" \
+              || skip "could not read the commenter's permission"
+            perm="$(jq -r '.permission // ""' <<<"$perm_json")"
+            role="$(jq -r '.role_name // ""' <<<"$perm_json")"
+            case "$perm:$role" in
+              admin:*|write:*|*:maintain) ;;
+              *) skip "commenter lacks write/maintain/admin permission" ;;
+            esac
+          fi
+
+          pr_json="$(gh api "repos/$REPO/pulls/$PR_NUMBER")" || skip "could not read PR #$PR_NUMBER"
+          state="$(jq -r '.state' <<<"$pr_json")"
+          draft="$(jq -r '.draft' <<<"$pr_json")"
+          head_repo="$(jq -r '.head.repo.full_name // ""' <<<"$pr_json")"
+          head_ref="$(jq -r '.head.ref' <<<"$pr_json")"
+
+          [ "$state" = "open" ] || skip "PR #$PR_NUMBER is not open"
+          [ "$draft" = "false" ] || skip "PR #$PR_NUMBER is a draft"
+          [ "$head_repo" = "$REPO" ] || skip "PR #$PR_NUMBER comes from a fork"
+
+          if [ "$EVENT_NAME" = "issue_comment" ] && [ -n "$COMMENT_ID" ]; then
+            gh api --silent -X POST "repos/$REPO/issues/comments/$COMMENT_ID/reactions" \
+              -f content=eyes || echo "::warning::could not react to the comment"
+          fi
+
+          # Step timeout: budget (rounded up to minutes) + headroom for Round 1
+          # (reviewer_timeout_seconds), setup, judging and posting.
+          case "$RUN_BUDGET" in ''|*[!0-9]*) RUN_BUDGET=900 ;; esac
+          timeout_min=$(( (RUN_BUDGET + 59) / 60 + 30 ))
+
+          {
+            echo "skip=false"
+            echo "pr_number=$PR_NUMBER"
+            echo "head_ref=$head_ref"
+            echo "timeout_minutes=$timeout_min"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Check out the pull request
+        if: steps.gate.outputs.skip != 'true'
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ steps.gate.outputs.head_ref }}
+          path: repo
+          fetch-depth: 0
+          persist-credentials: false
+
+      # Kept outside the reviewed tree so static scanners never see it as new files.
+      - name: Check out Review Council
+        if: steps.gate.outputs.skip != 'true'
+        uses: actions/checkout@v4
+        with:
+          repository: deployhq/review-council
+          ref: ${{ inputs.plugin_ref }}
+          path: rc-plugin
+          persist-credentials: false
+
+      - name: Prepare tool directories
+        if: steps.gate.outputs.skip != 'true'
+        run: |
+          mkdir -p "$npm_config_prefix/bin" "$HOME/.local/bin"
+          echo "$npm_config_prefix/bin" >> "$GITHUB_PATH"
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+
+      - name: Install Claude Code
+        if: steps.gate.outputs.skip != 'true'
+        env:
+          CLAUDE_CODE_VERSION: ${{ inputs.claude_code_version }}
+        run: |
+          npm install -g "@anthropic-ai/claude-code@${CLAUDE_CODE_VERSION}"
+          claude --version
+
+      - name: Install yq (mikefarah v4)
+        if: steps.gate.outputs.skip != 'true'
+        run: |
+          curl -fsSL "https://github.com/mikefarah/yq/releases/download/${YQ_VERSION}/yq_linux_amd64" -o "$HOME/.local/bin/yq"
+          chmod +x "$HOME/.local/bin/yq"
+          "$HOME/.local/bin/yq" --version
+
+      - name: Install Codex CLI
+        if: steps.gate.outputs.skip != 'true' && env.HAS_OPENAI == 'true'
+        env:
+          CODEX_VERSION: ${{ inputs.codex_version }}
+        run: |
+          npm install -g "@openai/codex@${CODEX_VERSION}"
+          codex --version
+
+      # Install only the harnesses the resolved config actually uses. The reader
+      # gets the same trusted env (RC_CI, RC_APPROVED_SEATS) the review does.
+      - name: Install custom-seat harnesses
+        if: steps.gate.outputs.skip != 'true'
+        working-directory: repo
+        env:
+          RC_CI: 'true'
+          RC_APPROVED_SEATS: ${{ inputs.approved_seats }}
+          CODEX_VERSION: ${{ inputs.codex_version }}
+        run: |
+          set -euo pipefail
+          cfg="$("$GITHUB_WORKSPACE/rc-plugin/scripts/rc-config.sh" .review-council 2>/dev/null || true)"
+          harnesses="$(awk -F= '
+            /^reviewer\.custom\.[^.]+\.enabled=true$/ { split($1, k, "."); on[k[3]] = 1 }
+            /^reviewer\.custom\.[^.]+\.needs_confirm=true$/ { split($1, k, "."); nc[k[3]] = 1 }
+            /^reviewer\.custom\.[^.]+\.harness=/       { split($1, k, "."); h[k[3]] = $2 }
+            END { for (s in h) if (on[s] && !nc[s]) print h[s] }
+          ' <<<"$cfg" | sort -u)"
+          if [ -z "$harnesses" ]; then
+            echo "No enabled custom seats."
+            exit 0
+          fi
+          for h in $harnesses; do
+            case "$h" in
+              claude) echo "claude harness: already installed" ;;
+              codex)
+                command -v codex >/dev/null || npm install -g "@openai/codex@${CODEX_VERSION}"
+                codex --version ;;
+              opencode)
+                npm install -g "opencode-ai@${OPENCODE_VERSION}"
+                opencode --version ;;
+              ocr)
+                npm install -g "@alibaba-group/open-code-review@${OCR_VERSION}"
+                command -v ocr ;;
+              *) echo "::warning::unknown harness '$h' — not installed" ;;
+            esac
+          done
+          jq --version
+
+      # Best effort: with RC_CI=true a missing tool is noted in the report and the
+      # review proceeds without it, so a download hiccup must not fail the job.
+      # shellcheck and jq ship with ubuntu-latest; pipx is preinstalled.
+      # Note: trufflehog's verified mode makes outbound calls to confirm a secret
+      # is live; drop it via static_analysis.tools in config to opt out.
+      - name: Install static-analysis tools
+        if: steps.gate.outputs.skip != 'true' && inputs.static_analysis
+        continue-on-error: true
+        run: |
+          set -uo pipefail
+          bin="$HOME/.local/bin"
+          tmp="$(mktemp -d)"
+          get_tar() { # <url> <binary-name>
+            curl -fsSL "$1" -o "$tmp/a.tgz" && tar -xzf "$tmp/a.tgz" -C "$tmp" "$2" && install -m 0755 "$tmp/$2" "$bin/$2"
+          }
+          get_bin() { # <url> <binary-name>
+            curl -fsSL "$1" -o "$bin/$2" && chmod +x "$bin/$2"
+          }
+          gh_dl=https://github.com
+          get_tar "$gh_dl/gitleaks/gitleaks/releases/download/v${GITLEAKS_VERSION}/gitleaks_${GITLEAKS_VERSION}_linux_x64.tar.gz" gitleaks \
+            || echo "::warning::gitleaks install failed"
+          get_tar "$gh_dl/trufflesecurity/trufflehog/releases/download/v${TRUFFLEHOG_VERSION}/trufflehog_${TRUFFLEHOG_VERSION}_linux_amd64.tar.gz" trufflehog \
+            || echo "::warning::trufflehog install failed"
+          get_bin "$gh_dl/google/osv-scanner/releases/download/v${OSV_SCANNER_VERSION}/osv-scanner_linux_amd64" osv-scanner \
+            || echo "::warning::osv-scanner install failed"
+          get_tar "$gh_dl/rhysd/actionlint/releases/download/v${ACTIONLINT_VERSION}/actionlint_${ACTIONLINT_VERSION}_linux_amd64.tar.gz" actionlint \
+            || echo "::warning::actionlint install failed"
+          get_bin "$gh_dl/hadolint/hadolint/releases/download/v${HADOLINT_VERSION}/hadolint-linux-x86_64" hadolint \
+            || echo "::warning::hadolint install failed"
+          pipx install "semgrep==${SEMGREP_VERSION}" || echo "::warning::semgrep install failed"
+          pipx install "ruff==${RUFF_VERSION}" || echo "::warning::ruff install failed"
+          rm -rf "$tmp"
+          for t in gitleaks trufflehog osv-scanner semgrep ruff shellcheck actionlint hadolint; do
+            if command -v "$t" >/dev/null; then echo "$t: ok"; else echo "$t: missing"; fi
+          done
+
+      - name: Run Review Council
+        if: steps.gate.outputs.skip != 'true'
+        working-directory: repo
+        timeout-minutes: ${{ fromJSON(steps.gate.outputs.timeout_minutes || '45') }}
+        env:
+          RC_CI: 'true'
+          RC_PR_COMMENTS: 'true'
+          RC_APPROVED_SEATS: ${{ inputs.approved_seats }}
+          RC_RUN_BUDGET: ${{ inputs.run_budget_seconds }}
+          RC_STATIC_ANALYSIS: ${{ inputs.static_analysis }}
+          GH_TOKEN: ${{ github.token }}
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          # codex ignores OPENAI_API_KEY on its own; CODEX_API_KEY is what it reads.
+          CODEX_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+          OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
+          PERPLEXITY_API_KEY: ${{ secrets.PERPLEXITY_API_KEY }}
+          # Optional bot identity for the digest; unset below when empty, so
+          # posting falls back to github-actions[bot] via GH_TOKEN.
+          RC_PR_BOT_TOKEN: ${{ secrets.PR_BOT_TOKEN }}
+          RC_PR_BOT_TOKEN_ENV: RC_PR_BOT_TOKEN
+          PR_NUMBER: ${{ steps.gate.outputs.pr_number }}
+        run: |
+          set -uo pipefail
+          # Unset empty optional keys so providers detect "not set", not "set to ''".
+          for v in CODEX_API_KEY OPENROUTER_API_KEY PERPLEXITY_API_KEY; do
+            [ -n "${!v:-}" ] || unset "$v"
+          done
+          [ -n "${RC_PR_BOT_TOKEN:-}" ] || unset RC_PR_BOT_TOKEN RC_PR_BOT_TOKEN_ENV
+          rc=0
+          # --setting-sources user: the reviewed PR's .claude/ settings and hooks
+          # never load into a session that holds the API keys.
+          claude -p "/review-council:run ${PR_NUMBER}" \
+            --plugin-dir "$GITHUB_WORKSPACE/rc-plugin" \
+            --setting-sources user \
+            --allowedTools "Bash Read Grep Glob Agent Skill Write" \
+            --output-format stream-json --verbose \
+            > "$RUNNER_TEMP/rc-run.jsonl" || rc=$?
+          echo "claude exited with $rc"
+          exit "$rc"
+
+      - name: Write job summary
+        if: always() && steps.gate.outputs.skip != 'true'
+        run: |
+          set -uo pipefail
+          log="$RUNNER_TEMP/rc-run.jsonl"
+          redact() {
+            sed -E \
+              -e 's/sk-ant-[A-Za-z0-9_-]+/[REDACTED]/g' \
+              -e 's/sk-or-[A-Za-z0-9_-]+/[REDACTED]/g' \
+              -e 's/sk-proj-[A-Za-z0-9_-]+/[REDACTED]/g' \
+              -e 's/sk-[A-Za-z0-9_-]{20,}/[REDACTED]/g' \
+              -e 's/(ghp|gho|ghs|ghu|ghr)_[A-Za-z0-9]+/[REDACTED]/g' \
+              -e 's/github_pat_[A-Za-z0-9_]+/[REDACTED]/g' \
+              -e 's/AKIA[0-9A-Z]{16}/[REDACTED]/g'
+          }
+          {
+            echo "## Review Council"
+            echo
+            if [ ! -s "$log" ]; then
+              echo "No output was captured (the run did not start, or was cancelled before writing)."
+            else
+              jq -r 'select(.type == "result")
+                | "_\(.subtype // "result") · \((.duration_ms // 0) / 1000 | floor)s · $\(.total_cost_usd // 0)_\n"' \
+                "$log" 2>/dev/null | tail -n 2 || true
+              result="$(jq -r 'select(.type == "result") | .result // empty' "$log" 2>/dev/null | tail -n 1000 || true)"
+              if [ -n "$result" ]; then
+                printf '%s\n' "$result" | redact
+              else
+                echo "The run produced no final result (see the step log)."
+              fi
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"
