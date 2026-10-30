@@ -1,8 +1,8 @@
 # Run Review Council in GitHub Actions
 
-Review Council can review your pull requests on its own, in GitHub Actions, with no human in the loop. It runs the same council as `/review-council:run` and posts one **review-digest comment** on the PR.
+Review Council can review your pull requests on its own, in GitHub Actions, with no human in the loop. It runs the same council as `/review-council:run` and posts **one review per run**: the summary as the review's text, and a comment on each line with a finding.
 
-You call it as a **reusable workflow** from your own repo. Your repo's secrets pay for the models. Your repo's `GITHUB_TOKEN` posts the comment.
+You call it as a **reusable workflow** from your own repo. Your repo's secrets pay for the models. Your repo's `GITHUB_TOKEN` posts the review.
 
 There is one workflow to call, `review-council.yml`. Claude authenticates in one of three ways:
 
@@ -37,7 +37,7 @@ Either way, the PR must be open and not a draft. It never runs on PRs from forks
 1. Checks out the PR's branch.
 2. Installs Claude Code, the Review Council plugin (from a pinned ref), `yq`, and the Codex CLI if you gave it a Codex credential (an OpenAI key or a Codex access token), or a `harness: codex` seat needs it.
 3. Runs headless Claude Code: `claude -p "/review-council:run <PR number>"`.
-4. Posts each finding as an **inline comment** on its line of the diff, in one GitHub review. Findings that aren't on the diff go in the **digest** comment, which it posts or updates (never a second one). See [What gets posted](#what-gets-posted).
+4. Posts each finding as an **inline comment** on its line of the diff, in one GitHub review. The review's text is the **summary**, including the findings that aren't on the diff. See [What gets posted](#what-gets-posted).
 5. Appends the final report to the job summary.
 
 **Which reviewers run.**
@@ -129,7 +129,7 @@ Things to know:
 
 ### 3. Try it
 
-Comment `/review-council` on an open, non-draft PR. Watch the run in the **Actions** tab. The digest appears on the PR when the run finishes.
+Comment `/review-council` on an open, non-draft PR. Watch the run in the **Actions** tab. The review appears on the PR when the run finishes.
 
 ### Inputs
 
@@ -215,6 +215,10 @@ With [Workload Identity Federation](https://platform.claude.com/docs/en/manage-c
   ```
 
   Use `subject_prefix`, not an exact subject. The two triggers produce two subject shapes: `repo:<owner>/<repo>:pull_request` and `repo:<owner>/<repo>:ref:refs/heads/<default branch>`. The `condition` pins the rule to the Review Council workflow, so other workflows in your repo can't use it.
+
+  **If your org uses ID-based subjects**, the subject looks like `repo:<owner>@<owner-id>/<repo>@<repo-id>:pull_request`, and `repo:<owner>/<repo>:*` never matches: the run fails with `Token exchange failed with status 401`, and the rule's authentication log shows `match_subject_prefix`. Use `repo:<owner>@<owner-id>/*` instead (the owner ID is `id` from `GET /orgs/<owner>`).
+
+  **One rule for every repo.** Leave the repository out (`repo:<owner>/*`, or `repo:<owner>@<owner-id>/*`). The `condition` still limits the rule to Review Council runs. In the Console wizard, choose **Any event** (the default "Only push" never matches a PR run) and put the `condition` in **Advanced match options → CEL condition**.
 - **Scope:** `workspace:inference` is enough, since the run only calls Messages. The default `workspace:developer` also works.
 - **Token lifetime:** set `token_lifetime_seconds: 3600`. The wizard fills in 600. With 3600, only GitHub's own limit applies (below).
 
@@ -436,16 +440,16 @@ Kimi is a distinct model family (Moonshot), so with `role: reviewer` its finding
 
 ### Inline comments
 
-Each reported finding that sits on a line of the PR's diff becomes an inline comment on that line (or range), like a human reviewer's. All of a run's comments go in **one** review. Each comment shows the severity, the confidence badge, who found it, the problem, why it matters and the fix, plus a collapsed **Prompt for AI agents** you can paste into a coding agent.
+Each reported finding that sits on a line of the PR's diff becomes an inline comment on that line (or range), like a human reviewer's. All of a run's comments go in **one** review, whose text is the summary (see [The summary](#the-summary)). Each comment shows the severity, the confidence badge, who found it, the problem, why it matters and the fix, plus a collapsed **Prompt for AI agents** you can paste into a coding agent. It ends with the same footer as the summary.
 
-- **Where it goes.** Each reviewer reports the exact `file:line` (or `file:start-end`) of a finding. A script checks that line against the PR's diff as GitHub reports it. If it fits, the comment goes there; if not (a file the PR didn't change, a line outside the changed hunks), the finding goes in the digest under **Outside the diff**. Nothing is moved to a "nearby" line.
+- **Where it goes.** Each reviewer reports the exact `file:line` (or `file:start-end`) of a finding. A script checks that line against the PR's diff as GitHub reports it. If it fits, the comment goes there; if not (a file the PR didn't change, a line outside the changed hunks), the finding goes in the summary under **Outside the diff**. Nothing is moved to a "nearby" line.
 - **Request changes.** A run with any Critical or Important finding posts its review as **request changes**, once: not again while that request is still active. A later run with none dismisses it. If GitHub refuses (for example, on a PR opened by `github-actions[bot]` itself), the review is posted as a plain comment.
 - **A person's dismissal sticks.** If someone dismisses the bot's "request changes" review, the findings it listed never request changes again on that PR. Only a new Critical or Important finding does.
 - **Dismissing may be refused.** On a protected branch that limits who can dismiss reviews, GitHub may refuse the bot's dismissal. Then its "request changes" stays until a person dismisses it (and that dismissal sticks, as above).
-- **Tags.** Each comment shows the finding's confidence tag, the same as in the report: `[verified]`, `[cross-reviewed]`, `[1 reviewer · unverified]`, `[unverified]` or `[tool-only:<rule>]`. The digest explains them under **What the tags mean**.
-- **If GitHub rejects the review** (one bad line fails the whole review), every finding goes in the digest instead. Nothing is lost.
-- **At most 50 inline comments** per run; the rest go in the digest.
-- **If the PR head moved during the run** (a push landed), nothing goes inline, nothing requests changes and nothing is dismissed. Every finding goes in the digest.
+- **Tags.** Each comment shows the finding's confidence tag, the same as in the report: `[verified]`, `[cross-reviewed]`, `[1 reviewer · unverified]`, `[unverified]` or `[tool-only:<rule>]`. The summary explains them under **What the tags mean**.
+- **If GitHub rejects the review** (one bad line fails the whole review), it is posted again without inline comments, with every finding in the summary. If GitHub accepts no review at all, the summary is posted as a PR comment instead. Nothing is lost.
+- **At most 50 inline comments** per run; the rest go in the summary.
+- **If the PR head moved during the run** (a push landed), nothing goes inline, nothing requests changes and nothing is dismissed. Every finding goes in the summary.
 - **No pings.** `@mentions` in finding text are neutralised, so the bot never notifies anyone.
 
 ### Re-runs
@@ -462,17 +466,16 @@ A re-run (a new push, or `/review-council` again) is matched to earlier comments
 
 Only comments posted by the same identity (`github-actions[bot]`, or your bot) count as earlier comments. A comment by anyone else that copies the hidden markers is ignored.
 
-### The digest comment
+### The summary
 
-One comment per PR. A re-run edits it in place.
+Each run's review carries the summary as its text. There is no separate summary comment, so the PR shows one entry per run, like a human reviewer's.
 
-It has three sections:
+1. **Who reviewed.** One or two sentences: the reviewers that ran, any that were skipped or failed (and why), and the static analysis. A failed reviewer is always named: if every reviewer fails, a short "review could not run" summary is still posted, with status `degraded`.
+2. **Counts.** For example `Findings: 2 important · 2 suggestions · On the diff: 4 inline comments below · 1 outside the diff`. Earlier comments that still stand and threads resolved as fixed are counted too.
+3. **Outside the diff.** The full text of each finding that couldn't go inline. Capped in size: findings that don't fit are counted as "N more not shown".
+4. **Collapsed:** what the tags mean, what the council decided (upheld, refuted, severity changes), and custom seats' coverage and extra signals.
 
-1. **What was found, and by whom.** A table of findings by severity (Critical, Important, Suggestions), with confidence badges and the reviewers that raised them. Under it: how many went inline, and the full text of the findings **outside the diff**. A reviewer that failed or was skipped is named here. It never fails silently: if every reviewer fails, a short "review could not run" digest is still posted, with status `degraded` and the failed reviewers named. The digest is capped in size: findings that don't fit are counted as "N more not shown".
-2. **What the council decided.** What was upheld, refuted or left unverified by the double-check pass.
-3. **What was fixed.** In CI this is one line: `Not triaged — automated CI run.`
-
-It ends with a footer:
+It ends with a footer, as does every inline comment:
 
 ```
 ---
@@ -482,9 +485,11 @@ It ends with a footer:
 
 With `PR_BOT_TOKEN`, the footer names your bot's login instead. If that login can't be read, the footer is just `Review done with Review Council`, with no identity.
 
+If an earlier version left a summary **comment** on the PR (or one was posted because GitHub accepted no review), the next run replaces its text with a link to the latest review.
+
 ### The hidden state block
 
-The comment starts with two hidden HTML comments. They don't render on GitHub. They are there for tools and agents:
+The summary starts with two hidden HTML comments. They don't render on GitHub. They are there for tools and agents:
 
 ```
 <!-- rc:report -->
@@ -507,8 +512,8 @@ The comment starts with two hidden HTML comments. They don't render on GitHub. T
 
 **Reading it from an agent** (for example, an agent that opens PRs and waits for a clean review):
 
-1. List the PR's issue comments (`GET /repos/{owner}/{repo}/issues/{number}/comments`). This returns comments from every author, bots included.
-2. Find the comment whose body starts with `<!-- rc:report -->`.
+1. List the PR's reviews (`GET /repos/{owner}/{repo}/pulls/{number}/reviews`).
+2. Take the newest one whose body starts with `<!-- rc:report -->` (by `submitted_at`). If there is none, look for a PR comment that starts with it (the fallback when GitHub accepted no review).
 3. Parse the JSON on its second line, between `<!-- rc:state ` and ` -->`.
 4. Treat the PR as reviewed and clean only if `sha` equals the PR's current head SHA **and** `status` is `clean`.
 
@@ -549,7 +554,7 @@ That is not an escalation: anyone who can push a branch can already edit any wor
 
 ### Secrets, data egress and residual risk
 
-**Secret scan before posting.** Before the digest and inline comments are posted, and before the report is written to the job summary, likely secrets are replaced with `[REDACTED]`. Both use one shared list (`rc-post.sh redact`): Anthropic (`sk-ant-…`), OpenAI (`sk-…`, `sk-proj-…`), OpenRouter (`sk-or-…`), Perplexity (`pplx-…`), GitHub (`ghp_…`, `gho_…`, `ghs_…`, `ghu_…`, `ghr_…`, `github_pat_…`), AWS (`AKIA…`, `ASIA…`), Google API keys (`AIza…`), Slack (`xoxb-…`, `xoxp-…`, `xoxa-…`, `xoxr-…`), Stripe live keys (`sk_live_…`, `rk_live_…`) and private key blocks (`-----BEGIN … PRIVATE KEY-----`). Inline comments are redacted too, one comment at a time, before they are encoded into the review. The comment is still posted. The log shows only how many values were redacted, never the values.
+**Secret scan before posting.** Before the summary and inline comments are posted, and before the report is written to the job summary, likely secrets are replaced with `[REDACTED]`. Both use one shared list (`rc-post.sh redact`): Anthropic (`sk-ant-…`), OpenAI (`sk-…`, `sk-proj-…`), OpenRouter (`sk-or-…`), Perplexity (`pplx-…`), GitHub (`ghp_…`, `gho_…`, `ghs_…`, `ghu_…`, `ghr_…`, `github_pat_…`), AWS (`AKIA…`, `ASIA…`), Google API keys (`AIza…`), Slack (`xoxb-…`, `xoxp-…`, `xoxa-…`, `xoxr-…`), Stripe live keys (`sk_live_…`, `rk_live_…`) and private key blocks (`-----BEGIN … PRIVATE KEY-----`). Inline comments are redacted too, one comment at a time, before they are encoded into the review. The comment is still posted. The log shows only how many values were redacted, never the values.
 
 **Where your code goes.** The PR's diff and the files the reviewers read are sent, under **your** keys, to:
 
@@ -557,7 +562,7 @@ That is not an escalation: anyone who can push a branch can already edit any wor
 - **OpenAI** — if `OPENAI_API_KEY` or `CODEX_ACCESS_TOKEN` is set (Codex).
 - **Perplexity** — if `PERPLEXITY_API_KEY` is set.
 - **OpenRouter and the model's host** — for an approved OpenRouter seat (with `data_collection: deny`).
-- **GitHub** — the digest comment and the job summary.
+- **GitHub** — the review (summary and inline comments) and the job summary.
 
 Static-analysis tools run on the runner. `trufflehog` checks found credentials against their provider; drop it from `static_analysis.tools` to stop that.
 
@@ -567,7 +572,7 @@ Static-analysis tools run on the runner. `trufflehog` checks found credentials a
 
 ### Who posts
 
-By default the comment posts as `github-actions[bot]`, using the calling repo's `GITHUB_TOKEN`. No GitHub App is needed.
+By default the review posts as `github-actions[bot]`, using the calling repo's `GITHUB_TOKEN`. No GitHub App is needed.
 
 To post as your own GitHub App or bot user, pass a token as the optional `PR_BOT_TOKEN` secret. The workflow exports it as `RC_PR_BOT_TOKEN` and points `pr_comments.bot_token_env` at it. The token needs write access to issue and PR comments on the repo. Unset means `github-actions[bot]`.
 
@@ -600,7 +605,7 @@ For a bot user, store its fine-grained token as a repo or org secret. For a GitH
 - `jti_reused`: a GitHub token was exchanged twice.
 - Also check: the caller grants `id-token: write`, the audience is `https://api.anthropic.com`, the `condition` names `deployhq/review-council/.github/workflows/review-council.yml@`, and `anthropic_workspace_id` is set if the rule covers more than one workspace.
 
-**A missing or wrong secret.** Claude needs one credential (`ANTHROPIC_API_KEY`, `CLAUDE_CODE_OAUTH_TOKEN`, or federation); without one, the run fails. Any other missing key just drops that reviewer. A bad key shows up in the digest: the reviewer is listed in `degraded` and the status is `degraded`.
+**A missing or wrong secret.** Claude needs one credential (`ANTHROPIC_API_KEY`, `CLAUDE_CODE_OAUTH_TOKEN`, or federation); without one, the run fails. Any other missing key just drops that reviewer. A bad key shows up in the summary: the reviewer is listed in `degraded` and the status is `degraded`.
 
 **Codex shows as degraded.** Check `OPENAI_API_KEY` (or `CODEX_ACCESS_TOKEN`) in your secrets. The workflow passes the key to Codex as `CODEX_API_KEY`; Codex does not read `OPENAI_API_KEY` in non-interactive mode. A bad key fails in seconds, and the review carries on without Codex.
 

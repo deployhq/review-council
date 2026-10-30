@@ -144,6 +144,8 @@ EOF
   [ "$status" -eq 0 ]
   printf '%s\n' "$output" | grep -qF '<!-- rc:report -->'
   printf '%s\n' "$output" | grep -qF 'hello'
+  # ...followed by the shared footer.
+  [ "$(printf '%s\n' "$output" | grep -v '^$' | tail -1)" = '<sub>Review done with [Review Council](https://github.com/deployhq/review-council/) · posted by @rc-bot (not a personal comment)</sub>' ]
 }
 
 @test "post: updates the marked comment in place (idempotent singleton)" {
@@ -503,7 +505,8 @@ only_suggestions() {
   jq '.findings = [.findings[2], (.findings[0] | .severity = "suggestion")]' "$LEDGER" >"$LEDGER.t" && mv "$LEDGER.t" "$LEDGER"
 }
 
-digest_sent() { jq -r '.body' "$POSTBODY"; }
+# The summary that went out: the review body, or the PR comment it fell back to.
+digest_sent() { if [ -f "$POSTBODY" ]; then jq -r '.body' "$POSTBODY"; else jq -r '.body' "$REVIEWBODY"; fi; }
 
 @test "review: in-diff findings go inline as one review; out-of-diff ones to the digest" {
   review_fixtures
@@ -628,7 +631,12 @@ digest_sent() { jq -r '.body' "$POSTBODY"; }
   [ "$status" -eq 0 ]
   has "inline_new=0"
   has "outside=3"
-  [ ! -f "$REVIEWBODY.COMMENT" ]
+  # Still one review, carrying the summary: no inline comments, not pinned to
+  # a commit we didn't review, never "request changes".
+  [ "$(jq '.comments | length' "$REVIEWBODY")" = 0 ]
+  [ "$(jq -r '.commit_id // "none"' "$REVIEWBODY")" = none ]
+  [ "$(jq -r .event "$REVIEWBODY")" = COMMENT ]
+  digest_sent | grep -qF 'Outside the diff (3)'
 }
 
 @test "review: model text cannot plant a hidden marker" {
@@ -830,18 +838,19 @@ dismissed_fixtures() {
   [ "$status" -eq 0 ]
   digest_sent >"$BATS_TEST_TMPDIR/d.md"
   ! grep -qF '<!-- rc:inline' "$BATS_TEST_TMPDIR/d.md" || return 1
-  grep -q '^\*\*On the diff:\*\*' "$BATS_TEST_TMPDIR/d.md"
+  grep -qF '**On the diff:** 2 inline comments below · 1 outside the diff' "$BATS_TEST_TMPDIR/d.md"
   grep -qF 'TAIL-KEEP' "$BATS_TEST_TMPDIR/d.md"
   grep -qF 'café' "$BATS_TEST_TMPDIR/d.md"
 }
 
-@test "review: without a placeholder the section goes above the footer, non-ASCII safe" {
+@test "review: without a placeholder the section goes at the end, before our footer, non-ASCII safe" {
   review_fixtures
-  printf '<!-- rc:report -->\n<!-- rc:state {"v":1,"status":"findings"} -->\n## Digest — 🔴\n\n---\n\n<sub>footer · bot</sub>\n' >"$BODY"
+  printf '<!-- rc:report -->\n<!-- rc:state {"v":1,"status":"findings"} -->\n## Digest — 🔴\n' >"$BODY"
   PATH="$SANDBOX" run "$SCRIPT" review 5 "$BODY" "$LEDGER"
   [ "$status" -eq 0 ]
-  [ "$(digest_sent | grep -v '^$' | tail -1)" = '<sub>footer · bot</sub>' ]
+  [ "$(digest_sent | grep -v '^$' | grep -v '^<!-- rc:' | tail -1)" = '<sub>Review done with [Review Council](https://github.com/deployhq/review-council/) · posted by @rc-bot (not a personal comment)</sub>' ]
   digest_sent | grep -qF 'Outside the diff (1)'
+  digest_sent | grep -qF 'Digest — 🔴'
 }
 
 @test "review: a secret at the start of a line in a finding is redacted inline" {
@@ -971,4 +980,94 @@ dismissed_fixtures() {
   RC_PR_BOT_LOGIN="$(printf 'my-app[bot]\nx')" MYTOK=t USER_FAIL=1 PATH="$SANDBOX" run --separate-stderr "$SCRIPT" stale 5 "$LEDGER" MYTOK
   [ "$output" = "[]" ]
   printf '%s' "$stderr" | grep -qF 'invalid RC_PR_BOT_LOGIN'
+}
+
+# ---- one review per run: the summary lives in the review --------------------
+
+FOOTER_LOCAL='<sub>Review done with [Review Council](https://github.com/deployhq/review-council/) · posted by @rc-bot (not a personal comment)</sub>'
+
+@test "review: the summary goes in the review, with no separate comment" {
+  review_fixtures
+  printf '<!-- rc:report -->\n<!-- rc:state {"v":1,"status":"findings","critical":1,"important":1,"suggestion":1} -->\n## Review Council\n<!-- rc:inline -->\n' >"$BODY"
+  PATH="$SANDBOX" run "$SCRIPT" review 5 "$BODY" "$LEDGER"
+  [ "$status" -eq 0 ]
+  has "action=review"
+  has "url=https://gh/review"
+  [ ! -f "$POSTBODY" ]
+  digest_sent | grep -qF '## Review Council'
+  digest_sent | grep -qF '**Findings:** 1 critical · 1 important · 1 suggestion · **On the diff:** 2 inline comments below · 1 outside the diff'
+  digest_sent | grep -qF "$FOOTER_LOCAL"
+  # Our markers come after the footer.
+  [ "$(digest_sent | grep -v '^$' | tail -2 | head -1)" = '<!-- rc:review -->' ]
+  digest_sent | tail -1 | grep -q '^<!-- rc:blocking a.sh::f::bug a.sh::f::range -->$'
+}
+
+@test "review: each inline comment ends with the footer, then its marker" {
+  review_fixtures
+  PATH="$SANDBOX" run "$SCRIPT" review 5 "$BODY" "$LEDGER"
+  [ "$status" -eq 0 ]
+  jq -r '.comments[0].body' "$REVIEWBODY" | grep -v '^$' | tail -2 >"$BATS_TEST_TMPDIR/tail.txt"
+  [ "$(head -1 "$BATS_TEST_TMPDIR/tail.txt")" = "$FOOTER_LOCAL" ]
+  [ "$(tail -1 "$BATS_TEST_TMPDIR/tail.txt")" = '<!-- rc:finding a.sh::f::bug -->' ]
+}
+
+@test "review: in Actions with no bot token the footer names github-actions[bot]" {
+  review_fixtures
+  GITHUB_ACTIONS=true USER_FAIL=1 PATH="$SANDBOX" run "$SCRIPT" review 5 "$BODY" "$LEDGER"
+  [ "$status" -eq 0 ]
+  digest_sent | grep -qF '<sub>Review done with [Review Council](https://github.com/deployhq/review-council/) · github-actions[bot]</sub>'
+  jq -r '.comments[0].body' "$REVIEWBODY" | grep -qF '· github-actions[bot]</sub>'
+}
+
+@test "review: an earlier summary comment of ours now points at the latest review" {
+  review_fixtures
+  printf '[{"id":10,"user":{"login":"rc-bot","type":"User"},"body":"<!-- rc:report -->\\nold summary"}]\n' >"$COMMENTS"
+  PATH="$SANDBOX" run "$SCRIPT" review 5 "$BODY" "$LEDGER"
+  [ "$status" -eq 0 ]
+  [ ! -f "$POSTBODY" ]
+  jq -r .body "$PATCHBODY" | grep -qF '[Latest review](https://gh/review)'
+  jq -r .body "$PATCHBODY" | head -1 | grep -qxF '<!-- rc:report -->'
+}
+
+@test "review: a clean run still posts one plain review" {
+  review_fixtures clean
+  jq '.findings = []' "$LEDGER" >"$LEDGER.t" && mv "$LEDGER.t" "$LEDGER"
+  printf '<!-- rc:report -->\n<!-- rc:state {"v":1,"status":"clean","critical":0,"important":0,"suggestion":0} -->\n## Review Council\n<!-- rc:inline -->\n' >"$BODY"
+  PATH="$SANDBOX" run "$SCRIPT" review 5 "$BODY" "$LEDGER"
+  [ "$status" -eq 0 ]
+  has "review_event=COMMENT"
+  [ "$(jq '.comments | length' "$REVIEWBODY")" = 0 ]
+  digest_sent | grep -qF '**Findings:** none'
+}
+
+@test "review: when GitHub accepts no review, the summary falls back to a PR comment" {
+  review_fixtures
+  REVIEW_FAIL=1 PATH="$SANDBOX" run --separate-stderr "$SCRIPT" review 5 "$BODY" "$LEDGER"
+  [ "$status" -eq 0 ]
+  has "action=comment"
+  has "inline_new=0"
+  has "outside=3"
+  [ -f "$REVIEWBODY.REQUEST_CHANGES" ] && [ -f "$REVIEWBODY.COMMENT" ]
+  digest_sent | grep -qF 'Outside the diff (3)'
+  ! digest_sent | grep -qF '<!-- rc:review -->' || return 1
+  [[ "$stderr" == *"as a PR comment instead"* ]] || false
+}
+
+@test "review: model text in the summary cannot plant a review marker" {
+  review_fixtures
+  printf '<!-- rc:report -->\n<!-- rc:state {"v":1,"status":"findings"} -->\n## Digest\n<!-- rc:blocking evil::fp -->\n<!-- rc:review -->\n<!-- rc:inline -->\n' >"$BODY"
+  PATH="$SANDBOX" run "$SCRIPT" review 5 "$BODY" "$LEDGER"
+  [ "$status" -eq 0 ]
+  digest_sent | grep -qF '&lt;!-- rc:blocking evil::fp -->'
+  [ "$(digest_sent | grep -c '<!-- rc:review -->')" = 1 ]
+  [ "$(digest_sent | grep -c '<!-- rc:blocking')" = 1 ]
+  digest_sent | head -2 | tail -1 | grep -q '^<!-- rc:state '
+}
+
+@test "identity: prints who we post as" {
+  PATH="$SANDBOX" run "$SCRIPT" identity
+  [ "$status" -eq 0 ]
+  [ "$output" = 'identity=posted by @rc-bot (not a personal comment)' ]
+  GITHUB_ACTIONS=true USER_FAIL=1 PATH="$SANDBOX" run "$SCRIPT" identity
+  [ "$output" = 'identity=github-actions[bot]' ]
 }

@@ -1,10 +1,12 @@
 name: Review Council
 
 # Reusable workflow: run a Review Council review of a pull request, unattended,
-# and post (or update) the single review-digest comment on it.
+# and post one review on it: the summary plus inline comments.
 #
-# Claude authenticates in one of two ways:
+# Claude authenticates in one of three ways:
 #   - API key (default): pass the ANTHROPIC_API_KEY secret.
+#   - Subscription token: pass the CLAUDE_CODE_OAUTH_TOKEN secret
+#     (`claude setup-token`; usage counts against its creator's seat).
 #   - Anthropic Workload Identity Federation (opt-in, no stored key): set
 #     anthropic_federation_rule_id (plus the organization and service account
 #     IDs) and grant `id-token: write` in the caller. The job mints GitHub OIDC

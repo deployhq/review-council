@@ -13,7 +13,7 @@ Single-model code review has blind spots. Different models catch different thing
 - **Genuine disagreements** (a reviewer's counter-evidence refutes another's finding, or an unresolved conflict survives the judge) = documented as a dropped/refuted finding or a Dissenting Opinion, not just discarded
 - **Learns from your triage** — a human-confirmed capture gate after each report distills your skip decisions into persisted false-positive suppressions & conventions in a committed `learnings.md`, recalled automatically on future runs
 
-The result: fewer false positives, broader coverage, and a clear priority order. Review Council is orchestrated locally, inside a single Claude Code session, and by default only ever prints a report — it never pushes commits or posts to a PR on its own. Optionally (off by default) it can post a single review-digest comment to the PR after you confirm — see [Posting to PRs](#posting-to-prs). It can also [run unattended in GitHub Actions](#github-actions), where it posts the digest automatically. Note the data egress this implies: when Codex, Google, or Perplexity are enabled, the gathered review context (diff, file contents, etc.) is sent to those third-party tools/APIs — only Claude (the native subagent) stays fully local. An opt-in [custom reviewer seat](#custom-reviewer-seats) sends it to OpenRouter and the model's host (or nowhere, with a local Ollama model). Codex's own shell access during review is sandboxed read-only (`codex exec --sandbox read-only`) — it can read the repo but cannot write to it or reach the network.
+The result: fewer false positives, broader coverage, and a clear priority order. Review Council is orchestrated locally, inside a single Claude Code session, and by default only ever prints a report — it never pushes commits or posts to a PR on its own. Optionally (off by default) it can post its findings to the PR as a review (a summary plus inline comments) after you confirm — see [Posting to PRs](#posting-to-prs). It can also [run unattended in GitHub Actions](#github-actions), where it posts the digest automatically. Note the data egress this implies: when Codex, Google, or Perplexity are enabled, the gathered review context (diff, file contents, etc.) is sent to those third-party tools/APIs — only Claude (the native subagent) stays fully local. An opt-in [custom reviewer seat](#custom-reviewer-seats) sends it to OpenRouter and the model's host (or nowhere, with a local Ollama model). Codex's own shell access during review is sandboxed read-only (`codex exec --sandbox read-only`) — it can read the repo but cannot write to it or reach the network.
 
 ## Quick Start
 
@@ -89,7 +89,7 @@ flowchart TD
     N --> O["Step 6: Severity-First Report<br/>badges + dissent + lens map"]
 
     O --> P66{"Step 6.6: Post digest?<br/>(if pr_comments.enabled, default off)"}
-    P66 -->|"human-confirmed<br/>(automatic in CI)"| P66P["Post / update the single<br/>review-digest comment · rc-post.sh"]
+    P66 -->|"human-confirmed<br/>(automatic in CI)"| P66P["Post one review: summary<br/>+ inline comments · rc-post.sh"]
     P66 -->|"off / declined"| P7
     P66P --> P7
 
@@ -444,7 +444,7 @@ sequenceDiagram
 
     Note over O: Severity-First Report — badges, dissent, lens map
 
-    Note over O: Post digest (Step 6.6, if pr_comments.enabled — default off) — human-confirmed (automatic in CI)<br/>compose review-digest comment, upsert the singleton on the PR via rc-post.sh
+    Note over O: Post digest (Step 6.6, if pr_comments.enabled — default off) — human-confirmed (automatic in CI)<br/>compose the summary, post it as one review with the inline comments via rc-post.sh
 
     Note over O: Capture Gate (Step 7, if settings.learn) — human-confirmed<br/>tackle/skip/skip-all, distill into Suppression/Convention, write via rc-learn.sh
 ```
@@ -467,8 +467,8 @@ sequenceDiagram
 
 By default Review Council is **report-only**. You can opt in to have it post its findings to the pull request:
 
-- **Inline comments.** Each finding on a line of the PR's diff becomes an inline review comment on that line, all in one review. The review **requests changes** when there is a Critical or Important finding, and is a plain comment otherwise; once a person dismisses that request, the same findings never raise it again. Each comment carries the finding's confidence tag (e.g. `[cross-reviewed]`), explained in the digest.
-- **One digest comment.** A summary with three sections: **what was found (and by whom)**, **what the council decided**, and **what was fixed** (your triage). Findings that aren't on the diff are written out here in full. Re-running updates the *same* comment in place, so there is no spam.
+- **Inline comments.** Each finding on a line of the PR's diff becomes an inline review comment on that line, all in one review. The review **requests changes** when there is a Critical or Important finding, and is a plain comment otherwise; once a person dismisses that request, the same findings never raise it again. Each comment carries the finding's confidence tag (e.g. `[cross-reviewed]`), explained in the summary.
+- **The summary is the review's text.** Who reviewed, the counts, the findings that aren't on the diff (in full), and, collapsed, what the council decided and what the tags mean; locally, also **what was fixed** (your triage). One review per run, no separate summary comment.
 - **Re-runs.** A finding already commented on is left alone and new ones are added. An earlier comment the run no longer reports is re-checked by Claude against the current code, and resolved only if it looks fixed (if GitHub refuses, the bot replies once and a person resolves it). A thread a person resolved is left alone; a fixed finding that comes back gets a new comment. If GitHub refuses to dismiss the bot's "request changes" (protected-branch rules), a person dismisses it.
 
 Turn it on in `.review-council/config.yml` (or `config.local.yml`):
@@ -481,7 +481,7 @@ pr_comments:
 
 **Locally, it never posts on its own.** After the report you triage each finding (fix / defer / won't-fix), review the composed digest and what will be resolved, and explicitly confirm before anything is posted. If the branch has no open PR, it offers to open a **draft** so the digest has a home. Nothing is posted if you decline.
 
-**In CI it posts automatically.** The one exception is an unattended run (`RC_CI=true`, set by the [GitHub Actions workflow](#github-actions)): with posting enabled, it posts without asking, skips the triage walk (the "what was fixed" section reads `Not triaged — automated CI run.`), and never opens a draft PR.
+**In CI it posts automatically.** The one exception is an unattended run (`RC_CI=true`, set by the [GitHub Actions workflow](#github-actions)): with posting enabled, it posts without asking, skips the triage walk (no "what was fixed" section), and never opens a draft PR.
 
 **State block and footer.** The comment starts with a hidden `<!-- rc:state {...} -->` line (the reviewed commit SHA, `clean` / `findings` / `degraded`, and counts per severity) that tools and agents can parse, and ends with a footer: `Review done with Review Council · <who posted>`. Likely secrets in the body are replaced with `[REDACTED]` before posting. Details: [docs/github-action.md](docs/github-action.md#what-gets-posted).
 
@@ -602,7 +602,7 @@ None met our go bar (full coverage in under ~10 min for under ~$2, with a verifi
 
 ## GitHub Actions
 
-Run the council on your PRs with no human in the loop. You call a **reusable workflow** from your repo; it runs headless Claude Code with the plugin loaded and posts inline review comments plus one digest comment on the PR as `github-actions[bot]` (or your own bot).
+Run the council on your PRs with no human in the loop. You call a **reusable workflow** from your repo; it runs headless Claude Code with the plugin loaded and posts one review per run (the summary plus inline comments) on the PR as `github-actions[bot]` (or your own bot).
 
 - **When:** someone with write access comments `/review-council` on a PR (and optionally, automatically, when a PR is marked ready for review). Drafts and PRs from forks are ignored.
 - **Claude auth:** one workflow, exactly one credential. By default it takes the `ANTHROPIC_API_KEY` secret (pay per token). Or pass `CLAUDE_CODE_OAUTH_TOKEN` (from `claude setup-token`) to run on a Claude subscription; usage counts against its creator's seat. Neither needs an `id-token` permission. Opt-in, set the `anthropic_*` federation inputs to use Anthropic Workload Identity Federation (no stored key, short-lived tokens); only then does the caller grant `id-token: write`, so check your cloud OIDC trust policies first (see the guide). The review job gets exactly the caller's grant.

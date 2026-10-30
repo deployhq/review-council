@@ -439,8 +439,8 @@ pr_comments:
 
 - `enabled` (bool, default `false`) — when true, after the report Review Council offers to
   post the findings to the PR — inline review comments on the diff (one review; "request
-  changes" on a critical/important finding) plus a single review-digest comment that holds
-  the summary and the findings off the diff (human-confirmed in a local run; posted
+  changes" on a critical/important finding), whose text is the summary with the findings
+  off the diff (human-confirmed in a local run; posted
   without the confirmation only in [CI mode](#ci-mode-rc_ci-and-rc_approved_seats)).
   `RC_PR_COMMENTS` overrides it (env wins), so CI can force it on.
 - `bot_token_env` (string, default `RC_PR_BOT_TOKEN`) — the **name** of an environment

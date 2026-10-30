@@ -7,8 +7,8 @@
 # It performs the mechanical GitHub calls and NOTHING judgemental: the
 # orchestrator composes the digest markdown (from the judge ledger + triage)
 # and writes the ledger JSON; this script places each finding on the diff (or
-# not), renders the inline comments, and creates/updates the single marked
-# digest comment. No LLM here.
+# not), renders the inline comments, and posts one review per run that carries
+# the summary. No LLM here.
 #
 # Subcommands:
 #   detect                          Print the OPEN PR for the current branch as
@@ -18,20 +18,22 @@
 #                                   (pushing it first if needed). Refuses on the
 #                                   default branch. Prints `url=<u>`.
 #   post <pr> <body-file> [envname] Create or update (idempotent, singleton) the
-#                                   digest comment on PR <pr> from <body-file>.
+#                                   digest comment on PR <pr> from <body-file>
+#                                   (used when there is no ledger).
 #                                   [envname] optionally NAMES an env var holding
 #                                   a bot token; when that var is non-empty the
 #                                   comment is posted as that identity, else as
 #                                   the authenticated `gh` user.
 #   review <pr> <digest-file> <ledger> [envname] [recheck-file]
-#                                   Post the run's findings as inline review
-#                                   comments (one review; "request changes" on a
-#                                   critical/important finding), resolve the
-#                                   re-checked fixed ones, then upsert the digest
-#                                   with the findings that are not on the diff.
+#                                   Post one review: the summary (the digest),
+#                                   the findings not on the diff, and an inline
+#                                   comment per finding on the diff ("request
+#                                   changes" on a critical/important finding);
+#                                   resolve the re-checked fixed ones first.
 #                                   See the `review / stale` section below.
 #   stale <pr> <ledger> [envname]   Print (JSON) our open inline comments whose
 #                                   finding this run no longer reports.
+#   identity [envname]              Print `identity=<who we post as>`.
 #   redact                          Read text on stdin, write it to stdout with
 #                                   likely secrets replaced by [REDACTED]; the
 #                                   count goes to stderr only. Non-zero exit (and
@@ -41,6 +43,7 @@
 # Idempotency: the digest carries a hidden marker (rc:report). `post` finds the
 # most-recent comment bearing it and PATCHes it in place; only when none exists
 # (or the update fails) does it create one — so re-runs never spam the PR.
+# Everything posted ends with the same footer (resolve_identity).
 #
 # Fail-soft: every failure returns non-zero with a one-line stderr note and posts
 # nothing further; the caller surfaces it. Posting never mutates the review.
@@ -238,8 +241,23 @@ do_post() {
     return 1
   }
   resolve_identity
+  if ! jq --arg f "$_footer" '.body += "\n\n" + $f' "$_payload" >"$_redacted" \
+    || ! mv "$_redacted" "$_payload"; then
+    echo "rc-post: could not add the footer; not posting" >&2
+    return 1
+  fi
   upsert_digest "$_pr" "$_payload" || return 1
   printf 'action=%s\nurl=%s\n' "$_DG_ACTION" "$_DG_URL"
+}
+
+# ---------------------------------------------------------------------------
+# identity [envname]: print who we would post as (identity=<text>, empty when
+# unknown), for the person to check before anything is posted.
+# ---------------------------------------------------------------------------
+do_identity() {
+  GH_POST_TOKEN="$(resolve_token "${1:-}")"
+  resolve_identity
+  printf 'identity=%s\n' "$_who"
 }
 
 # ---------------------------------------------------------------------------
@@ -273,12 +291,23 @@ resolve_identity() {
   # Unknown = any Bot could be us: then we never resolve or dismiss anything.
   _known=true
   [ -n "$_me" ] || [ -n "$_fb_login" ] || _known=false
+  # The sign-off on everything we post. Locally, with no bot token, we post as
+  # the person's own account, so say it is automated.
+  if [ -z "$GH_POST_TOKEN" ] && [ "${GITHUB_ACTIONS:-}" != true ] && [ -n "$_me" ]; then
+    _who="posted by @$_me (not a personal comment)"
+  else
+    _who="${_me:-$_fb_login}"
+  fi
+  _footer="---
+
+<sub>Review done with [Review Council](https://github.com/deployhq/review-council/)${_who:+ · $_who}</sub>"
 }
 
 # ---------------------------------------------------------------------------
-# upsert_digest <pr> <payload-file>: create or update the singleton digest
-# comment from a ready ({"body": ...}, already redacted) payload. Needs _repo,
-# _me, _fb_login. Sets _DG_ACTION (created|updated) and _DG_URL.
+# upsert_digest <pr> <payload-file> [update-only]: create or update the
+# singleton digest comment from a ready ({"body": ...}, already redacted)
+# payload; with update-only, never create one. Needs _repo, _me, _fb_login.
+# Sets _DG_ACTION (created|updated) and _DG_URL.
 # ---------------------------------------------------------------------------
 upsert_digest() {
   # List existing comments. A FAILED list must NOT look like an empty list: if we
@@ -312,6 +341,7 @@ upsert_digest() {
     fi
     echo "rc-post: could not update comment $_id; posting a fresh one" >&2
   fi
+  [ "${3:-}" != update-only ] || return 1
 
   # Guard with `|| _DG_URL=""` so a non-zero POST/parse never trips `set -e`
   # before the clean fail-soft return below.
@@ -336,8 +366,10 @@ upsert_digest() {
 # finding goes, renders it, and builds every request with jq. A reported
 # finding goes inline only when its path is a file in the PR's diff (GitHub's
 # own list) and its line is a right-side line of one of that file's hunks;
-# everything else goes to the digest's "Outside the diff" section (placeholder
-# line `<!-- rc:inline -->`, else just above the footer).
+# everything else goes to the review's "Outside the diff" section (at the
+# digest's placeholder line `<!-- rc:inline -->`, else at the end). The review
+# body is the digest: a review per run, no separate summary comment (that is
+# only the fallback when GitHub accepts no review).
 #
 # Tracking: each inline comment ends with `<!-- rc:finding <fingerprint> -->`.
 # A finding that already has one of OUR comments is left alone (not reposted,
@@ -474,7 +506,7 @@ PLAN_JQ='
       block: any($fs[]; .severity == "critical" or .severity == "important"),
       blocking: [ $fs[] | select(.severity == "critical" or .severity == "important") | if .tracked then .fingerprint else "" end ],
       kept: ([$fs[] | select(.have)] | length),
-      new: [ $cand[0:$maxn][] | .a + {path, body: (.md + "\n\n<!-- rc:finding " + .fingerprint + " -->"),
+      new: [ $cand[0:$maxn][] | .a + {path, body: (.md + "\n\n" + $footer + "\n\n<!-- rc:finding " + .fingerprint + " -->"),
                                       outside: (.loc + "\n\n" + .md)} ],
       outside: ([ $fs[] | select(.have | not) | select(. as $x | any($cand[0:$maxn][]; .fingerprint == $x.fingerprint) | not)
                   | .loc + "\n\n" + .md ]),
@@ -607,7 +639,7 @@ do_review() {
 
   if ! jq -n --slurpfile f "$_ledger" --slurpfile d "$_tmp/diff.json" --slurpfile ex "$_tmp/ours.json" \
     --argjson inline "$_inline" --argjson maxn "$MAX_INLINE" --argjson cov "$_covered" --argjson res "$_fixed" \
-    --arg re "$SECRET_RE" \
+    --arg re "$SECRET_RE" --arg footer "$_footer" \
     "$LEDGER_DEFS"' $f[0] | '"$PLAN_JQ" >"$_tmp/plan.json" 2>/dev/null; then
     echo "rc-post: could not place the findings; posting the digest only" >&2
     printf '{"block":false,"blocking":[],"kept":0,"new":[],"outside":[],"stale":[],"resolve":[]}\n' >"$_tmp/plan.json"
@@ -659,47 +691,12 @@ do_review() {
   # through (an untracked fingerprint, "", always counts as new).
   _raise="$(jq -r --argjson ack "$_ack" '[.blocking[] | select(. == "" or (. as $f | $ack | index($f)) == null)] | length > 0' "$_tmp/plan.json")"
   _n_new="$(jq '.new | length' "$_tmp/plan.json")"
-
-  # 1. One review: "request changes" when blocking findings exist and none of
-  #    ours already blocks; else a plain comment, only if there is something
-  #    to post inline. GitHub rejects the whole review on one bad line (and
-  #    refuses "request changes" on a PR we authored), so a failed request
-  #    retries as a comment, and a failed comment moves the inline findings
-  #    to the digest.
   _event=COMMENT
   # Only on the reviewed head (_inline): never block or dismiss a commit we
   # didn't review.
   if [ "$_inline" = true ] && [ "$_raise" = true ] && [ "$_active" = '[]' ]; then _event=REQUEST_CHANGES; fi
-  _review_url=""
-  _posted=0
-  for _ev in $_event COMMENT; do
-    [ "$_ev" = REQUEST_CHANGES ] || [ "$_n_new" -gt 0 ] || break
-    jq --arg sha "$_pr_head" --arg ev "$_ev" '{commit_id: $sha, event: $ev,
-        body: ((if $ev == "REQUEST_CHANGES" then "Review Council found critical or important findings. Requesting changes. "
-                else "" end)
-               + "The summary comment on this PR has the full report.\n\n---\n\n<sub>Review done with [Review Council](https://github.com/deployhq/review-council/)</sub>"
-               + "\n\n<!-- rc:review -->"
-               + (if $ev == "REQUEST_CHANGES"
-                  then "\n\n<!-- rc:blocking " + ([.blocking[] | select(. != "")] | join(" ")) + " -->" else "" end)),
-        comments: [.new[] | del(.outside)]}' "$_tmp/plan.json" >"$_tmp/review.raw"
-    if redact_file "$_tmp/review.raw" "$_tmp/review.json" \
-      && _review_url="$(gh_post api "repos/$_repo/pulls/$_pr/reviews" -X POST --input - <"$_tmp/review.json" 2>/dev/null \
-        | jq -r '.html_url // empty' 2>/dev/null)" && [ -n "$_review_url" ]; then
-      _posted=1
-      _event="$_ev"
-      break
-    fi
-    _review_url=""
-    echo "rc-post: GitHub did not accept the review as $_ev" >&2
-    [ "$_ev" = COMMENT ] && break
-  done
-  if [ "$_posted" = 0 ] && [ "$_n_new" -gt 0 ]; then
-    echo "rc-post: listing the inline findings in the digest instead" >&2
-    jq '.outside += [.new[].outside] | .new = []' "$_tmp/plan.json" >"$_tmp/plan2.json" && mv "$_tmp/plan2.json" "$_tmp/plan.json"
-    _n_new=0
-  fi
 
-  # 2. Resolve the stale comments the re-check found fixed; 3. dismiss our
+  # 1. Resolve the stale comments the re-check found fixed; 2. dismiss our
   #    "request changes" when the run is clean. Neither on a degraded run.
   _n_res=0
   _n_dis=0
@@ -741,14 +738,102 @@ do_review() {
     fi
   fi
 
-  # 4. The digest, with the inline summary and the findings outside the diff.
+  # 3. One review per run carries everything: the summary (the digest), the
+  #    findings outside the diff, and the inline comments. GitHub rejects the
+  #    whole review on one bad line (and refuses "request changes" on a PR we
+  #    authored), so retry as a comment, then without the inline comments
+  #    (listed in the body instead). If no review is accepted, the summary
+  #    goes to a PR comment instead.
+  _review_url=""
+  _posted=0
+  _tries="$_event:true"
+  [ "$_event" = COMMENT ] || _tries="$_tries COMMENT:true"
+  if [ "$_n_new" -gt 0 ]; then
+    _tries="$_tries $_event:false"
+    [ "$_event" = COMMENT ] || _tries="$_tries COMMENT:false"
+  fi
+  for _try in $_tries; do
+    _ev="${_try%%:*}"
+    _withinline="${_try#*:}"
+    compose_body "$_withinline" || return 1
+    jq -n --rawfile b "$_tmp/body.md" --slurpfile p "$_tmp/plan.json" --arg ev "$_ev" \
+      --arg sha "$([ "$_inline" = true ] && printf '%s' "$_pr_head")" --argjson wi "$_withinline" '
+      {event: $ev,
+       body: ($b + "\n\n<!-- rc:review -->"
+              + (if $ev == "REQUEST_CHANGES"
+                 then "\n\n<!-- rc:blocking " + ([$p[0].blocking[] | select(. != "")] | join(" ")) + " -->" else "" end)),
+       comments: (if $wi then [$p[0].new[] | del(.outside)] else [] end)}
+      + (if $sha != "" then {commit_id: $sha} else {} end)' >"$_tmp/review.raw"
+    if redact_file "$_tmp/review.raw" "$_tmp/review.json" \
+      && _review_url="$(gh_post api "repos/$_repo/pulls/$_pr/reviews" -X POST --input - <"$_tmp/review.json" 2>/dev/null \
+        | jq -r '.html_url // empty' 2>/dev/null)" && [ -n "$_review_url" ]; then
+      _posted=1
+      _event="$_ev"
+      [ "$_withinline" = true ] || _n_new=0
+      break
+    fi
+    _review_url=""
+    echo "rc-post: GitHub did not accept the review ($_ev, inline comments: $_withinline)" >&2
+  done
+  [ "$_RED_N" = 0 ] || echo "rc-post: redacted $_RED_N likely secret(s) before posting" >&2
+
+  _n_out="$(jq '.outside | length' "$_tmp/plan.json")"
+  if [ "$_posted" = 1 ]; then
+    # A summary comment left by an earlier run (or an earlier fallback) would
+    # go stale: point it at the latest review instead.
+    jq -n --arg m "$MARKER" --arg u "$_review_url" --arg f "$_footer" \
+      '{body: ($m + "\nReview Council posts its summary with each review. [Latest review](\($u)).\n\n" + $f)}' >"$_tmp/pointer.json"
+    upsert_digest "$_pr" "$_tmp/pointer.json" update-only || true
+    _action=review
+    _url="$_review_url"
+  else
+    _n_new=0
+    compose_body false || return 1
+    if ! redact_file "$_tmp/body.md" "$_tmp/body.red" \
+      || ! jq -Rs '{body: .}' "$_tmp/body.red" >"$_tmp/digest.json" 2>/dev/null; then
+      echo "rc-post: could not scan the summary for secrets; not posting it" >&2
+      return 1
+    fi
+    echo "rc-post: posting the summary as a PR comment instead" >&2
+    upsert_digest "$_pr" "$_tmp/digest.json" || return 1
+    _action=comment
+    _url="$_DG_URL"
+  fi
+
+  printf 'action=%s\nurl=%s\n' "$_action" "$_url"
+  printf 'review_url=%s\nreview_event=%s\ninline_new=%s\nkept=%s\nresolved=%s\ndismissed=%s\noutside=%s\n' \
+    "$_review_url" "$([ -n "$_review_url" ] && echo "$_event")" "$_n_new" "$(jq '.kept' "$_tmp/plan.json")" \
+    "$_n_res" "$_n_dis" "$([ "$_n_new" = 0 ] && jq '.outside + .new | length' "$_tmp/plan.json" || echo "$_n_out")"
+}
+
+# compose_body <with-inline>: the summary for this run's review (or the
+# fallback comment) into $_tmp/body.md: the digest, the counts in place of its
+# `rc:inline` line, the tags legend, the findings outside the diff (with the
+# inline ones too when <with-inline> is false), then the footer. Hidden-marker
+# openers in the model-written part are neutralised, so only the lines this
+# script writes are markers. Needs _tmp, _body, _n_res, _footer.
+compose_body() {
   jq -n -r --rawfile dg "$_body" --slurpfile p "$_tmp/plan.json" --arg mark "$INLINE_MARK" \
-    --arg url "$_review_url" --argjson nn "$_n_new" --argjson nr "$_n_res" '
-    ($p[0].outside) as $o
-    | ([ (if $nn > 0 then "\($nn) new inline comment(s) in [this review](\($url))" else empty end),
+    --argjson wi "$1" --argjson nr "$_n_res" --arg footer "$_footer" '
+    ($dg | split("\n")) as $l
+    | ($l[1] // "" | capture("^<!-- rc:state (?<j>.*) -->$").j | fromjson? // {}) as $st
+    | ($l[0:2] | join("\n")) as $head
+    # Only our markers stay markers: the model-written rest keeps the
+    # rc:inline placeholder, and every other comment opener is neutralised.
+    | ($l[2:] | join("\n") | split($mark) | map(gsub("<!--"; "&lt;!--")) | join($mark)) as $rest
+    | (if $wi then $p[0].new | length else 0 end) as $nn
+    | ($p[0].outside + (if $wi then [] else [$p[0].new[].outside] end)) as $o
+    | ([ ("critical", "important", "suggestion") as $k
+         | ($st[$k] // 0) as $n | select(($n | type) == "number" and $n > 0)
+         | "\($n) \($k)" + (if $k == "suggestion" and $n > 1 then "s" else "" end) ]
+       | if length == 0 then "none" else join(" · ") end) as $tally
+    | ([ (if $nn > 0 then "\($nn) inline comment" + (if $nn > 1 then "s" else "" end) + " below" else empty end),
          (if $p[0].kept > 0 then "\($p[0].kept) already commented" else empty end),
-         (if $nr > 0 then "\($nr) resolved as fixed" else empty end) ]
-       | if length == 0 then "No inline comments on the diff." else "**On the diff:** " + join(" · ") + "." end) as $line
+         (if $nr > 0 then "\($nr) resolved as fixed" else empty end),
+         (if ($o | length) > 0 then "\($o | length) outside the diff" else empty end) ]
+       | if length == 0 then "" else "**On the diff:** " + join(" · ") end) as $counts
+    | ([ (if ($st | has("critical")) then "**Findings:** " + $tally else "" end), $counts ]
+       | map(select(. != "")) | join(" · ")) as $line
     | ("<details>\n<summary>What the tags mean</summary>\n\n"
        + "- `[verified]` — backed by a tool: a secret or known-CVE scanner hit, or a lint/security rule a reviewer confirmed.\n"
        + "- `[cross-reviewed]` — raised by reviewers from two or more model families, or confirmed by a different family when double-checked.\n"
@@ -756,41 +841,28 @@ do_review() {
        + "- `[unverified]` — the double-check could not confirm or refute it (or ran out of time).\n"
        + "- `[tool-only:<rule>]` — a lint or security rule fired and no reviewer confirmed it.\n\n"
        + "</details>") as $legend
-    # GitHub caps a comment at 65,536 characters: keep the findings that fit
-    # in about 60,000 and count the rest.
-    | (60000 - ($dg | length) - ($line | length) - ($legend | length) - 200) as $room
+    # GitHub caps a review or comment body at 65,536 characters: keep the
+    # findings that fit in about 60,000 and count the rest.
+    | (60000 - ($dg | length) - ($line | length) - ($legend | length) - ($footer | length) - 300) as $room
     | (reduce $o[] as $x ({used: 0, kept: [], more: 0};
          if .more == 0 and .used + ($x | length) + 9 <= $room
          then .used += ($x | length) + 9 | .kept += [$x] else .more += 1 end)) as $fit
-    | ($line + "\n\n" + $legend
+    | ((if $line != "" then $line + "\n\n" else "" end)
        + (if ($o | length) > 0
-          then "\n\n### Outside the diff (\($o | length))\n\n" + ($fit.kept | join("\n\n---\n\n"))
-               + (if $fit.more > 0 then "\n\n_\($fit.more) more not shown: too long for one comment. The run'"'"'s report lists them._" else "" end)
-          else "" end)) as $sec
+          then "### Outside the diff (\($o | length))\n\n" + ($fit.kept | join("\n\n---\n\n"))
+               + (if $fit.more > 0 then "\n\n_\($fit.more) more not shown: too long for one review. The run'"'"'s report lists them._" else "" end)
+               + "\n\n"
+          else "" end)
+       + $legend) as $sec
     # split/join, not index/rindex: jq 1.7 returns byte offsets for those,
     # which corrupts the splice as soon as the digest has non-ASCII text.
-    | ($dg | split($mark)) as $parts
-    | if ($parts | length) > 1 then $parts[0] + $sec + ($parts[1:] | join($mark))
-      else ($dg | split("\n---\n")) as $f
-      | if ($f | length) > 1
-        then ($f[:-1] | join("\n---\n")) + "\n\n" + $sec + "\n" + "\n---\n" + $f[-1]
-        else $dg + "\n\n" + $sec + "\n" end
-      end' >"$_tmp/digest.md" || {
-    echo "rc-post: could not compose the digest; not posting it" >&2
+    | ($rest | split($mark)) as $parts
+    | $head + "\n"
+      + (if ($parts | length) > 1 then $parts[0] + $sec + ($parts[1:] | join("")) else $rest + "\n\n" + $sec end)
+      + "\n\n" + $footer' >"$_tmp/body.md" || {
+    echo "rc-post: could not compose the summary; not posting" >&2
     return 1
   }
-  if ! redact_file "$_tmp/digest.md" "$_tmp/digest.red" \
-    || ! jq -Rs '{body: .}' "$_tmp/digest.red" >"$_tmp/digest.json" 2>/dev/null; then
-    echo "rc-post: could not scan the digest for secrets; not posting it" >&2
-    return 1
-  fi
-  [ "$_RED_N" = 0 ] || echo "rc-post: redacted $_RED_N likely secret(s) from the digest before posting" >&2
-  upsert_digest "$_pr" "$_tmp/digest.json" || return 1
-
-  printf 'action=%s\nurl=%s\n' "$_DG_ACTION" "$_DG_URL"
-  printf 'review_url=%s\nreview_event=%s\ninline_new=%s\nkept=%s\nresolved=%s\ndismissed=%s\noutside=%s\n' \
-    "$_review_url" "$([ -n "$_review_url" ] && echo "$_event")" "$_n_new" "$(jq '.kept' "$_tmp/plan.json")" \
-    "$_n_res" "$_n_dis" "$(jq '.outside | length' "$_tmp/plan.json")"
 }
 
 # ---------------------------------------------------------------------------
@@ -804,9 +876,10 @@ case "$_cmd" in
   post) do_post "$@" ;;
   review) do_review "$@" ;;
   stale) do_stale "$@" ;;
+  identity) do_identity "$@" ;;
   redact) do_redact "$@" ;;
   *)
-    echo "usage: rc-post.sh <detect | open-draft | post <pr> <body-file> [envname] | review <pr> <digest-file> <ledger> [envname] [recheck-file] | stale <pr> <ledger> [envname] | redact>" >&2
+    echo "usage: rc-post.sh <detect | open-draft | post <pr> <body-file> [envname] | review <pr> <digest-file> <ledger> [envname] [recheck-file] | stale <pr> <ledger> [envname] | identity [envname] | redact>" >&2
     exit 2
     ;;
 esac

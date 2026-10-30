@@ -872,7 +872,7 @@ If it exits non-zero, there is no trustworthy sha: do not post (say so); in CI p
 
 **Gated on `pr_comments.enabled` (resolved in Step 0).** If it is **false** (the default), skip this step entirely — the run stays report-only, byte-identical to today. This is the plugin's one sanctioned outward-posting path, and it **never auto-posts**: a human confirms before anything leaves the session (the `reply-pr` pattern). Posting is fail-soft — any failure is surfaced and the run continues; it never blocks or mutates the review already emitted. **The one exception is `settings.ci=true`** (env `RC_CI` only, set by the workflow — Step 0): no human is present, so each subsection below has a CI branch that posts without the gate; everything else (marker, idempotent upsert, escaping, no secret material, fail-soft) is unchanged.
 
-Posting anchors to a **PR**, so it applies to a PR review (or a code review whose branch has / can open a PR). What gets posted: each reported finding that sits on a line of the PR's diff becomes an **inline review comment** on that line (one GitHub review per run); the **digest** comment carries the summary, `rc:state`, and every finding that can't be placed on the diff. The review **requests changes** when any reported finding is critical or important, else it is a plain comment; findings a person already waved through (by dismissing an earlier "request changes") never raise it again. All GitHub calls go through the deterministic plumbing in `scripts/rc-post.sh` (it does the mechanics and decides placement from the §5.7 ledger and GitHub's own diff, never any judgment — you compose the digest and re-check stale comments, it posts).
+Posting anchors to a **PR**, so it applies to a PR review (or a code review whose branch has / can open a PR). What gets posted: **one GitHub review per run**. Its body is the **digest** (the summary, `rc:state`, and every finding that can't be placed on the diff); each reported finding that sits on a line of the PR's diff becomes an **inline review comment** on that line, in the same review. There is no separate summary comment (one is posted only if GitHub accepts no review). The review **requests changes** when any reported finding is critical or important, else it is a plain comment; findings a person already waved through (by dismissing an earlier "request changes") never raise it again. All GitHub calls go through the deterministic plumbing in `scripts/rc-post.sh` (it does the mechanics and decides placement from the §5.7 ledger and GitHub's own diff, never any judgment — you compose the digest and re-check stale comments, it posts). It also adds the counts, the tags legend and the footer that every posted body ends with.
 
 ### 6.6.1 Resolve the target PR
 ```bash
@@ -898,28 +898,21 @@ Show it as an editable proposal (a sensible default per finding is fine), never 
 **Under `settings.ci=true`: skip this walk entirely** — there is no author to ask, and no disposition is invented.
 
 ### 6.6.3 Compose the digest
-Build the single digest markdown — three sections:
-1. **What was found — and by whom** — a table: severity · finding · `location` · **found by** (the ledger's origin-families; a custom seat as `<slot> (<model> via <harness>)`) · **council verdict** (verified / cross-reviewed / upheld / unverified / dropped-refuted). When custom seats ran, put each `ocr` seat's Step-6 coverage (or skipped) line and each other seat's skipped line directly under the table, and list each seat's Extra-signals findings (if any) as their own short table. The table is the index; the full text of each finding goes inline or into the "Outside the diff" section that `rc-post.sh` writes. Put the line `<!-- rc:inline -->` on its own, right after the table (and any seat lines) — the script replaces it with the inline summary and the findings it could not place on the diff.
-2. **What the council decided** — the judge's synthesis: promotions on cross-family agreement, drops on refutation, the final tally, any dissent.
-3. **What was fixed** — finding → status from the 6.6.2 dispositions (✅ Fixing / ⏭️ Deferred / ❌ Won't fix). **Under `settings.ci=true`** this section is the single line `Not triaged — automated CI run.`
+The digest is the body of this run's review, so keep it short: the inline comments already carry each finding's severity, tag, reviewers and fix. Build it in this order:
+1. **`## Review Council`**, then one or two plain sentences: who reviewed (and which reviewers were skipped or failed, and why), and the static analysis in one clause.
+2. The line `<!-- rc:inline -->` on its own. The script replaces it with the counts (findings by severity, inline comments, already commented, resolved, outside the diff), the findings it could not place on the diff, and the tags legend.
+3. **Custom seats**, when any ran: a `<details><summary>Custom seats</summary>` block with each `ocr` seat's Step-6 coverage (or skipped) line, each other seat's skipped line, and each seat's Extra-signals findings (if any) as a short table (severity · finding · `location`; a seat as `<slot> (<model> via <harness>)`).
+4. **What the council decided**, collapsed: `<details><summary>What the council decided</summary>` with the judge's synthesis as short bullets (promotions on cross-family agreement, drops on refutation, severity changes, any dissent).
+5. **What was fixed** — finding → status from the 6.6.2 dispositions (✅ Fixing / ⏭️ Deferred / ❌ Won't fix). **Under `settings.ci=true`** leave this section out (there was no triage).
 
 Body rules:
-- The **first line is the hidden marker `<!-- rc:report -->`**, verbatim — the engine keys idempotency off it (and `rc-post.sh` refuses to post a body that lacks it).
-- The **second line is the hidden run-state block** from §6.5 (`<!-- rc:state {…} -->`), produced by its `Bash` command — never typed by hand.
-- **Resolve the posting identity** (one `Bash` call; `<VAR>` = the reader-validated `pr_comments.bot_token_env`): `[ -n "$(printenv '<VAR>' 2>/dev/null)" ] && echo set || echo unset` — never print the value.
-  - Token **set** (local or CI) → `GH_TOKEN="$(printenv '<VAR>')" gh api user --jq .login` (the token rides an env assignment, never argv, never echoed); identity = that login. If the call fails (e.g. an App installation token cannot read `/user`), there is **no** identity: never invent one and never name the env var — use the footer without its ` · <identity>` part (`<sub>Review done with [Review Council](https://github.com/deployhq/review-council/)</sub>`); the comment's GitHub author already shows who posted.
-  - Token **unset**, local → `gh api user --jq .login`; identity = `posted by @<login> (not a personal comment)`.
-  - Token **unset**, `settings.ci=true` → identity = `github-actions[bot]`. **Do not call `gh api user` in CI** — the workflow's `GITHUB_TOKEN` gets a 403 there.
-- **End with the footer** — these are the last lines of the body:
-  ```
-  ---
-
-  <sub>Review done with [Review Council](https://github.com/deployhq/review-council/) · <identity></sub>
-  ```
-- **Escape cell content**: a `|` or newline in any `location`/finding string is escaped (`\|`) so untrusted (model/repo-derived) text can't break the table or the comment.
+- The **first line is the hidden marker `<!-- rc:report -->`**, verbatim (`rc-post.sh` refuses a body that lacks it).
+- The **second line is the hidden run-state block** from §6.5 (`<!-- rc:state {…} -->`), produced by its `Bash` command — never typed by hand. The script reads the counts from it.
+- **No footer.** `rc-post.sh` appends the sign-off (and who posted) to everything it posts.
+- **Escape cell content**: a `|` or newline in any `location`/finding string is escaped (`\|`) so untrusted (model/repo-derived) text can't break a table.
 - **Never echo secret material.** A Tier A secret finding (gitleaks/trufflehog) is referenced by **rule + `path:line` only** — never the credential value (or any recognizable fragment). The digest may be posted to a public PR; do not republish what the scanner just flagged as sensitive.
 
-Write the three sections and the footer (everything **after** line 2) to a temp file with `Bash` (`mktemp "${TMPDIR:-/tmp}/rc-digest-body.XXXXXX"`), then assemble the digest in **one** `Bash` call so the sha never passes through you — the §6.5 command with its output redirected, between the marker and the body:
+Write the sections (everything **after** line 2) to a temp file with `Bash` (`mktemp "${TMPDIR:-/tmp}/rc-digest-body.XXXXXX"`), then assemble the digest in **one** `Bash` call so the sha never passes through you — the §6.5 command with its output redirected, between the marker and the body:
 ```bash
 RC_DIGEST="$(mktemp "${TMPDIR:-/tmp}/rc-digest.XXXXXX")"
 { printf '%s\n' '<!-- rc:report -->'
@@ -929,7 +922,7 @@ RC_DIGEST="$(mktemp "${TMPDIR:-/tmp}/rc-digest.XXXXXX")"
 Remember both literal paths (shell variables do not survive between `Bash` calls). If the §6.5 command fails, post nothing and say why.
 
 ### 6.6.4 Re-check earlier inline comments
-A re-run must not leave stale comments open, nor close real problems just because this run didn't mention them. **Skip this subsection when `rc:state` status is `degraded`** (a failed reviewer reports nothing, not "fixed"). Otherwise list our earlier inline comments whose finding this run no longer reports (`<VAR>` as in 6.6.3):
+A re-run must not leave stale comments open, nor close real problems just because this run didn't mention them. **Skip this subsection when `rc:state` status is `degraded`** (a failed reviewer reports nothing, not "fixed"). Otherwise list our earlier inline comments whose finding this run no longer reports (`<VAR>` = the reader-validated `pr_comments.bot_token_env`, `''` when none):
 ```bash
 "${CLAUDE_PLUGIN_ROOT}/scripts/rc-post.sh" stale <pr-number> '<ledger-file>' '<VAR>'
 ```
@@ -948,11 +941,15 @@ echo "$RC_RECHECK"
 Effect in 6.6.5: a `FIXED` comment gets a short "looks fixed" reply and its thread resolved; a `STILL_PRESENT` one is left alone, open; a `covered` finding is not posted again (its earlier comment stands). Remember the literal path.
 
 ### 6.6.5 Confirm, then post (human-confirmed only)
-Show the composed digest, the target, and what the re-check will resolve, and **stop and wait**. In the confirmation, state explicitly: the **PR** (`#<n>` + repo), and the **identity** that will post — the one resolved in 6.6.3 for the footer — plus, when a bot token is used, the **env-var name** it came from. This lets the author catch an unexpected identity (e.g. a mis-set token var) *before* anything is posted. On explicit approval:
+Resolve who will post (`<VAR>` as in 6.6.4; it never prints a token):
+```bash
+"${CLAUDE_PLUGIN_ROOT}/scripts/rc-post.sh" identity '<VAR>'
+```
+Show the composed digest, the target, and what the re-check will resolve, and **stop and wait**. In the confirmation, state explicitly: the **PR** (`#<n>` + repo), and the **identity** that will post (the `identity=` line; empty means GitHub will show the bot's own name) — plus, when a bot token is used, the **env-var name** it came from. This lets the author catch an unexpected identity (e.g. a mis-set token var) *before* anything is posted. On explicit approval:
 ```bash
 "${CLAUDE_PLUGIN_ROOT}/scripts/rc-post.sh" review <pr-number> "$RC_DIGEST" '<ledger-file>' "<pr_comments.bot_token_env>" '<recheck-file or empty>'
 ```
-Pass the resolved `pr_comments.bot_token_env` (from Step 0) as the fourth argument (`""` when none), and the 6.6.4 re-check file as the fifth (`""` when 6.6.4 was skipped or found nothing). The script reads that env var; when it is unset/empty everything posts as the authenticated `gh` user (the default identity), otherwise as the bot that token authenticates. It posts the inline comments as one review (skipping findings we already commented on), resolves the re-checked `fixed` comments, dismisses our earlier "request changes" when nothing blocks any more, then creates or **updates in place** the digest. It prints `action=created|updated`, `url=` (the digest), `review_url=`, `review_event=`, `inline_new=`, `kept=`, `resolved=`, `dismissed=`, `outside=`. Surface the `url` and `review_url` with the counts. On non-zero exit, surface the script's stderr and **do not** claim a post happened. If the ledger file is missing (§5.7 failed), use `post <pr-number> "$RC_DIGEST" "<pr_comments.bot_token_env>"` instead — the digest alone. Then `rm -f '<digest-file>' '<body-file>' '<recheck-file>'` (the literal paths).
+Pass the resolved `pr_comments.bot_token_env` (from Step 0) as the fourth argument (`""` when none), and the 6.6.4 re-check file as the fifth (`""` when 6.6.4 was skipped or found nothing). The script reads that env var; when it is unset/empty everything posts as the authenticated `gh` user (the default identity), otherwise as the bot that token authenticates. It resolves the re-checked `fixed` comments, dismisses our earlier "request changes" when nothing blocks any more, then posts **one review**: the digest as its body and the inline comments (skipping findings we already commented on). If GitHub accepts no review, it posts the digest as a PR comment instead. It prints `action=review|comment`, `url=` (the review, or that comment), `review_url=`, `review_event=`, `inline_new=`, `kept=`, `resolved=`, `dismissed=`, `outside=`. Surface the `url` with the counts. On non-zero exit, surface the script's stderr and **do not** claim a post happened. If the ledger file is missing (§5.7 failed), use `post <pr-number> "$RC_DIGEST" "<pr_comments.bot_token_env>"` instead — the digest alone. Then `rm -f '<digest-file>' '<body-file>' '<recheck-file>'` (the literal paths).
 
 **Under `settings.ci=true`: no confirmation, no wait.** Print the target PR and identity as a plain note, then run the same `review` command at once (it is still the PR from 6.6.1's CI branch — never one from config) and surface its output — or, on failure, its stderr with `digest not posted`; the run still ends normally.
 
