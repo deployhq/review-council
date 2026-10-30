@@ -258,7 +258,18 @@ resolve_identity() {
   _fb_login=""
   if [ -z "$_me" ] && [ "${GITHUB_ACTIONS:-}" = true ] && [ -z "$GH_POST_TOKEN" ]; then
     _fb_login='github-actions[bot]'
+  elif [ -z "$_me" ] && [ -n "$GH_POST_TOKEN" ] && [ -n "${RC_PR_BOT_LOGIN:-}" ]; then
+    # A bot token (e.g. an App's) can't read /user: the caller names its login
+    # (trusted env). Same charset as a GitHub login, optional `[bot]`.
+    if printf '%s' "$RC_PR_BOT_LOGIN" | grep -Eqx '[A-Za-z0-9][A-Za-z0-9-]{0,38}(\[bot\])?'; then
+      _fb_login="$RC_PR_BOT_LOGIN"
+    else
+      echo "rc-post: ignoring invalid RC_PR_BOT_LOGIN" >&2
+    fi
   fi
+  # Unknown = any Bot could be us: then we never resolve or dismiss anything.
+  _known=true
+  [ -n "$_me" ] || [ -n "$_fb_login" ] || _known=false
 }
 
 # ---------------------------------------------------------------------------
@@ -313,7 +324,7 @@ upsert_digest() {
 # ---------------------------------------------------------------------------
 # review / stale: inline review comments + the digest, tracked across runs.
 #
-# Input is the judge's ledger (skills/run/SKILL.md §5.5): a JSON object in the
+# Input is the judge's ledger (skills/run/SKILL.md §5.7): a JSON object in the
 # `review-council/ledger` v1 shape, of which this script reads
 #   .findings[] | {fingerprint, outcome, section, severity, badge, title, issue,
 #                  why_it_matters, recommendation, how_to_verify, origins[].reviewer,
@@ -396,6 +407,9 @@ LEDGER_DEFS='
     (if type == "object" then .findings else null end) | if type == "array" then . else [] end
     | map(select(type == "object" and .outcome == "reported" and ((.section // "main") == "main")
                  and (.title | str)))
+    # Fingerprints are normalised to the marker charset, the same way every
+    # run, so any judge fingerprint can be tracked.
+    | map(. + {fingerprint: (.fingerprint | if type == "string" then gsub("[^A-Za-z0-9._:/@+-]"; "-") | .[0:200] else null end)})
     | map(. + {
         path: (.location.path // null),
         line: (if (.location.line_end | posint) then .location.line_end else .location.line end),
@@ -542,6 +556,11 @@ do_stale() {
   _ledger="${2:?rc-post: stale needs <ledger-file>}"
   _tokname="${3:-}"
   review_setup || return 1
+  # Nothing to re-check when we can't tell our comments from another bot's.
+  if [ "$_known" != true ]; then
+    printf '[]\n'
+    return 0
+  fi
   jq -n --slurpfile f "$_ledger" --slurpfile ex "$_tmp/ours.json" --arg re "$SECRET_RE" "$LEDGER_DEFS"'
     ($f[0] | reported | map(select(.tracked) | .fingerprint)) as $fps
     | [ $ex[0][] | select((.fp as $fp | $fps | index($fp)) == null and (.fixed | not)
@@ -575,7 +594,7 @@ do_review() {
   _covered='[]'
   if [ -n "$_recheck" ]; then
     _fixed="$(jq -c '[.fixed[]? | select(type == "number" and . == floor and . > 0)]' "$_recheck" 2>/dev/null)" || _fixed='[]'
-    _covered="$(jq -c '[.covered[]? | select(type == "string" and test("^[A-Za-z0-9._:/@+-]{1,200}$"))]' "$_recheck" 2>/dev/null)" || _covered='[]'
+    _covered="$(jq -c '[.covered[]? | select(type == "string") | gsub("[^A-Za-z0-9._:/@+-]"; "-") | .[0:200] | select(length > 0)]' "$_recheck" 2>/dev/null)" || _covered='[]'
     [ -n "$_fixed" ] || _fixed='[]'
     [ -n "$_covered" ] || _covered='[]'
   fi
@@ -682,7 +701,9 @@ do_review() {
   _n_res=0
   _n_dis=0
   _short="$(printf '%s' "$_pr_head" | cut -c1-7)"
-  if [ "$_status" != degraded ]; then
+  # Neither when the run is degraded, nor when we can't tell our own threads
+  # and reviews from another bot's (_known=false).
+  if [ "$_status" != degraded ] && [ "$_known" = true ]; then
     jq -r '.resolve[] | "\(.id) \(.thread)"' "$_tmp/plan.json" >"$_tmp/resolve.txt"
     # Resolve first, then one marked reply saying how it went. The marker makes
     # the comment never stale again, so a refused resolve (GitHub may refuse

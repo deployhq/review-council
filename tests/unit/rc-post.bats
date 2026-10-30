@@ -926,3 +926,41 @@ dismissed_fixtures() {
   [ "$(digest_sent | wc -m | tr -d ' ')" -lt 65536 ]
   digest_sent | grep -qE '[0-9]+ more not shown'
 }
+
+@test "review: a bot token with unknown login never resolves or dismisses" {
+  stale_fixtures clean
+  only_suggestions
+  printf '[{"id":300,"state":"CHANGES_REQUESTED","user":{"login":"x[bot]","type":"Bot"},"body":"<!-- rc:review -->"}]\n' >"$REVIEWS"
+  printf '{"fixed":[70]}\n' >"$BATS_TEST_TMPDIR/recheck.json"
+  sed -i.bak 's/"login":"rc-bot"/"login":"x[bot]","type":"Bot"/g' "$RCOMMENTS"
+  MYTOK=t USER_FAIL=1 PATH="$SANDBOX" run "$SCRIPT" review 5 "$BODY" "$LEDGER" MYTOK "$BATS_TEST_TMPDIR/recheck.json"
+  [ "$status" -eq 0 ]
+  has "resolved=0"
+  has "dismissed=0"
+  ! grep -qF mutation "$GHLOG" || return 1
+  MYTOK=t USER_FAIL=1 PATH="$SANDBOX" run "$SCRIPT" stale 5 "$LEDGER" MYTOK
+  [ "$output" = "[]" ]
+}
+
+@test "review: RC_PR_BOT_LOGIN names the bot, so only its comments count and it can resolve" {
+  stale_fixtures
+  printf '{"fixed":[70]}\n' >"$BATS_TEST_TMPDIR/recheck.json"
+  sed -i.bak 's/"login":"rc-bot"/"login":"my-app[bot]","type":"Bot"/g' "$RCOMMENTS"
+  RC_PR_BOT_LOGIN='my-app[bot]' MYTOK=t USER_FAIL=1 PATH="$SANDBOX" run "$SCRIPT" review 5 "$BODY" "$LEDGER" MYTOK "$BATS_TEST_TMPDIR/recheck.json"
+  [ "$status" -eq 0 ]
+  has "resolved=1"
+  # another bot's marked comment is not ours under a named login
+  sed -i.bak 's/"login":"my-app\[bot\]"/"login":"other[bot]"/g' "$RCOMMENTS"
+  RC_PR_BOT_LOGIN='my-app[bot]' MYTOK=t USER_FAIL=1 PATH="$SANDBOX" run "$SCRIPT" stale 5 "$LEDGER" MYTOK
+  [ "$output" = "[]" ]
+}
+
+@test "review: a fingerprint outside the marker charset is normalised and still tracked" {
+  review_fixtures
+  jq '.findings[0].fingerprint = "a.sh::f(x)::bug #1"' "$LEDGER" >"$LEDGER.t" && mv "$LEDGER.t" "$LEDGER"
+  PATH="$SANDBOX" run "$SCRIPT" review 5 "$BODY" "$LEDGER"
+  [ "$status" -eq 0 ]
+  has "inline_new=2"
+  jq -r '.comments[0].body' "$REVIEWBODY" | grep -qF '<!-- rc:finding a.sh::f-x-::bug--1 -->'
+  jq -r .body "$REVIEWBODY.REQUEST_CHANGES" | grep -qF 'a.sh::f-x-::bug--1'
+}

@@ -70,6 +70,10 @@ on:
         description: Run the static-analysis step (Step 2.5) and install its tools (RC_STATIC_ANALYSIS).
         type: boolean
         default: true
+      pr_bot_login:
+        description: With PR_BOT_TOKEN, the login it posts as (e.g. "my-app[bot]"). An App token can't read its own login, and without it the run never resolves threads or dismisses reviews, since it can't tell its own from another bot's.
+        type: string
+        default: ''
       # Workload Identity Federation (opt-in). These IDs are not secrets.
       # Setting anthropic_federation_rule_id switches Claude auth to federation.
       anthropic_federation_rule_id:
@@ -205,6 +209,7 @@ jobs:
           openrouter_api_key: ${{ secrets.OPENROUTER_API_KEY }}
           perplexity_api_key: ${{ secrets.PERPLEXITY_API_KEY }}
           pr_bot_token: ${{ secrets.PR_BOT_TOKEN }}
+          pr_bot_login: ${{ inputs.pr_bot_login }}
           anthropic_federation_rule_id: ${{ inputs.anthropic_federation_rule_id }}
           anthropic_organization_id: ${{ inputs.anthropic_organization_id }}
           anthropic_service_account_id: ${{ inputs.anthropic_service_account_id }}

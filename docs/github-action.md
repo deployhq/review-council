@@ -136,6 +136,7 @@ Comment `/review-council` on an open, non-draft PR. Watch the run in the **Actio
 | `claude_code_version` | string | a pinned version | Version of `@anthropic-ai/claude-code` to install. |
 | `codex_version` | string | `0.163.0` | Version of the Codex CLI to install. |
 | `static_analysis` | boolean | `true` | Run the static-analysis scan (secrets, CVEs, lint) before the review. Missing tools are skipped and noted; the run never stops to ask. |
+| `pr_bot_login` | string | `""` | With `PR_BOT_TOKEN`: the login it posts as, e.g. `my-app[bot]`. See [Who posts](#who-posts). |
 | `anthropic_federation_rule_id` | string | `""` | Federation only. Rule ID (`fdrl_...`). Setting it switches Claude auth to federation. See [Federation (opt-in)](#federation-opt-in). |
 | `anthropic_organization_id` | string | `""` | Federation only (required with it). Anthropic organization ID (a UUID). |
 | `anthropic_service_account_id` | string | `""` | Federation only (required with it). Service account ID (`svac_...`). |
@@ -504,6 +505,8 @@ Static-analysis tools run on the runner. `trufflehog` checks found credentials a
 By default the comment posts as `github-actions[bot]`, using the calling repo's `GITHUB_TOKEN`. No GitHub App is needed.
 
 To post as your own GitHub App or bot user, pass a token as the optional `PR_BOT_TOKEN` secret. The workflow exports it as `RC_PR_BOT_TOKEN` and points `pr_comments.bot_token_env` at it. The token needs write access to issue and PR comments on the repo. Unset means `github-actions[bot]`.
+
+Also set the `pr_bot_login` input to the login that token posts as (for an App, `<app-slug>[bot]`). An App token can't read its own login, so without it the run can't tell its own comments and reviews from another bot's. It then still posts, but never resolves threads or dismisses reviews.
 
 For a bot user, store its fine-grained token as a repo or org secret. For a GitHub App, an installation token (for example from `actions/create-github-app-token`) works, but it expires after an hour and GitHub may refuse to pass a token between jobs as a job output, so test this in your setup.
 

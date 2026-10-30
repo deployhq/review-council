@@ -59,6 +59,10 @@ inputs:
     description: Optional. Token used to post the digest as an App or bot.
     required: false
     default: ''
+  pr_bot_login:
+    description: Optional. The login pr_bot_token posts as (RC_PR_BOT_LOGIN).
+    required: false
+    default: ''
   # Workload Identity Federation (auth_mode federation). Not secrets.
   anthropic_federation_rule_id:
     description: Federation rule ID (fdrl_...).
@@ -184,6 +188,7 @@ runs:
         # falls back to github-actions[bot] via GH_TOKEN.
         RC_PR_BOT_TOKEN: ${{ inputs.pr_bot_token }}
         RC_PR_BOT_TOKEN_ENV: RC_PR_BOT_TOKEN
+        RC_PR_BOT_LOGIN: ${{ inputs.pr_bot_login }}
         PR_NUMBER: ${{ inputs.pr_number }}
         ANTHROPIC_FEDERATION_RULE_ID: ${{ inputs.anthropic_federation_rule_id }}
         ANTHROPIC_ORGANIZATION_ID: ${{ inputs.anthropic_organization_id }}

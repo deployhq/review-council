@@ -78,4 +78,4 @@ jobs:
       OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}           # optional: enables Codex
       OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}   # optional: an OpenRouter custom seat
       PERPLEXITY_API_KEY: ${{ secrets.PERPLEXITY_API_KEY }}   # optional: enables Perplexity
-      # PR_BOT_TOKEN: ${{ secrets.PR_BOT_TOKEN }}             # optional: post as your own App or bot (default: github-actions[bot])
+      # PR_BOT_TOKEN: ${{ secrets.PR_BOT_TOKEN }}             # optional: post as your own App or bot (default: github-actions[bot]); also set pr_bot_login
