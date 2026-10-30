@@ -1,0 +1,17 @@
+name: perm-probe
+# Throwaway probe for permission inheritance into a called workflow.
+on:
+  push:
+    branches: [probe/perm-inherit]
+permissions: {}
+jobs:
+  with-oidc:
+    permissions:
+      contents: read
+      pull-requests: write
+      id-token: write
+    uses: ./.github/workflows/perm-probe-called.yml
+  without-oidc:
+    permissions:
+      contents: read
+    uses: ./.github/workflows/perm-probe-called.yml

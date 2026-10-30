@@ -1,0 +1,15 @@
+name: perm-probe-called
+# Throwaway probe: does a called workflow's job with NO `permissions:` key
+# inherit the caller's GITHUB_TOKEN grant (including id-token: write)?
+on: workflow_call
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Try to mint an OIDC token
+        run: |
+          echo "request url: ${ACTIONS_ID_TOKEN_REQUEST_URL:+set}"
+          if [ -n "${ACTIONS_ID_TOKEN_REQUEST_URL:-}" ]; then
+            code=$(curl -s -o /dev/null -w '%{http_code}' -H "Authorization: bearer $ACTIONS_ID_TOKEN_REQUEST_TOKEN" "$ACTIONS_ID_TOKEN_REQUEST_URL&audience=probe")
+            echo "mint http=$code"
+          fi
