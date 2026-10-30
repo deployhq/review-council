@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # Review Council CI gate (called by .github/actions/gate/action.yml).
 # Inputs (env): GH_TOKEN EVENT_NAME REPO PR_NUMBER COMMENT_ID COMMENTER RUN_BUDGET
+#               SKIP_BOT_PRS
 # Writes proceed / pr_number / head_ref / timeout_minutes to $GITHUB_OUTPUT.
 set -euo pipefail
 
@@ -28,6 +29,11 @@ head_ref="$(jq -r '.head.ref' <<<"$pr_json")"
 [ "$state" = "open" ] || skip "PR #$PR_NUMBER is not open"
 [ "$draft" = "false" ] || skip "PR #$PR_NUMBER is a draft"
 [ "$head_repo" = "$REPO" ] || skip "PR #$PR_NUMBER comes from a fork"
+# Opt-in: bot-opened PRs (Dependabot, Renovate, an App's agent) can carry
+# third-party text. Off by default, since reviewing agent PRs is a main use.
+if [ "${SKIP_BOT_PRS:-false}" = "true" ] && [ "$(jq -r '.user.type // ""' <<<"$pr_json")" = "Bot" ]; then
+  skip "PR #$PR_NUMBER was opened by a bot (skip_bot_prs)"
+fi
 
 if [ "$EVENT_NAME" = "issue_comment" ] && [ -n "${COMMENT_ID:-}" ]; then
   gh api --silent -X POST "repos/$REPO/issues/comments/$COMMENT_ID/reactions" \

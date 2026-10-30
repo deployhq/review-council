@@ -70,6 +70,9 @@ jobs:
       run_budget_seconds: 900
       # Run the static-analysis scan (secrets, CVEs, lint) first.
       static_analysis: true
+      # Skip PRs opened by a bot account (Dependabot, Renovate, a GitHub App).
+      # Their text can come from outside your org. Off: agent PRs get reviewed.
+      skip_bot_prs: false
       # Git ref of deployhq/review-council to load the plugin from.
       # Keep it the same as the ref in `uses:` above.
       plugin_ref: main

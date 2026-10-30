@@ -70,6 +70,10 @@ on:
         description: Run the static-analysis step (Step 2.5) and install its tools (RC_STATIC_ANALYSIS).
         type: boolean
         default: true
+      skip_bot_prs:
+        description: Skip PRs opened by a bot account (Dependabot, Renovate, a GitHub App). Their text can come from outside your org. Off by default, so agent-opened PRs are reviewed.
+        type: boolean
+        default: false
       pr_bot_login:
         description: With PR_BOT_TOKEN, the login it posts as (e.g. "my-app[bot]"). An App token can't read its own login, and without it the run never resolves threads or dismisses reviews, since it can't tell its own from another bot's.
         type: string
@@ -156,6 +160,7 @@ jobs:
         uses: ./rc-plugin/.github/actions/gate
         with:
           run_budget_seconds: ${{ inputs.run_budget_seconds }}
+          skip_bot_prs: ${{ inputs.skip_bot_prs }}
 
   review:
     name: Review Council
