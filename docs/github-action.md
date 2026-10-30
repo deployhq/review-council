@@ -26,8 +26,8 @@ Everything else (inputs, optional secrets, behaviour) is the same in both. See [
 
 **When it runs.**
 
-- A pull request is **marked ready for review**. Drafts are skipped.
-- Someone **comments `/review-council`** on a PR. The commenter must have write access (admin, maintain or write). The workflow reacts with 👀 so you know it started.
+- **By default, only on request:** someone **comments `/review-council`** on a PR. The commenter must have write access (admin, maintain or write). The workflow reacts with 👀 so you know it started. Each run costs a full review, so nothing runs on its own. Comment again after pushing fixes: that re-review is also when fixed findings get resolved.
+- **Optionally, automatically:** uncomment the `pull_request` trigger in the example to also review a draft PR when it's **marked ready for review**.
 
 Either way, the PR must be open and not a draft. It never runs on PRs from forks. See [Fork PRs](#fork-prs).
 
@@ -88,10 +88,10 @@ Copy [`examples/github-action/review-council.yml`](../examples/github-action/rev
 name: Review Council
 
 on:
-  pull_request:
-    types: [ready_for_review]
-  issue_comment:
+  issue_comment:                     # `/review-council` comments (manual)
     types: [created]
+  # pull_request:                    # optional: auto-review when a draft is marked ready
+  #   types: [ready_for_review]
 
 permissions:
   contents: read
@@ -120,11 +120,11 @@ Things to know:
 - **Merge it to your default branch first.** GitHub runs `issue_comment` workflows only from the default branch. Until the file is on `main` (or whatever your default is), `/review-council` does nothing.
 - **Don't add `concurrency:` with `cancel-in-progress` to the caller.** Every PR comment triggers the caller, so any comment would cancel a running review. The reusable workflow already allows one review per PR, and only an authorised trigger can cancel it.
 - **Pinning (optional).** With `main`, every upstream change reaches your runs. If you'd rather control when changes arrive, pin the ref in `uses:` (the *workflow*) and the `plugin_ref` input (the *plugin*) to the same commit SHA.
-- **Want a review on PRs that are opened non-draft?** `ready_for_review` fires only when a draft becomes ready. Add `opened` to the `pull_request` types. Add `synchronize` to review every push (this costs a run per push; the newer run cancels the older). Drafts are skipped on every trigger, including `/review-council` comments.
+- **Want automatic reviews?** Uncomment the `pull_request` trigger. `ready_for_review` fires when a draft becomes ready; add `opened` for PRs opened as non-draft, and `synchronize` to review every push. Each adds a full review's cost per event (the newer run cancels the older). Drafts are skipped on every trigger, including `/review-council` comments.
 
 ### 3. Try it
 
-Open a PR, or comment `/review-council` on an existing one. Watch the run in the **Actions** tab. The digest appears on the PR when the run finishes.
+Comment `/review-council` on an open, non-draft PR. Watch the run in the **Actions** tab. The digest appears on the PR when the run finishes.
 
 ### Inputs
 
@@ -298,10 +298,10 @@ Secrets: `ANTHROPIC_API_KEY`, `OPENAI_API_KEY`. No `config.yml` is needed: Claud
 name: Review Council
 
 on:
-  pull_request:
-    types: [ready_for_review]
-  issue_comment:
+  issue_comment:                     # `/review-council` comments (manual)
     types: [created]
+  # pull_request:                    # optional: auto-review when a draft is marked ready
+  #   types: [ready_for_review]
 
 permissions:
   contents: read
@@ -340,10 +340,10 @@ reviewers:
 name: Review Council
 
 on:
-  pull_request:
-    types: [ready_for_review]
-  issue_comment:
+  issue_comment:                     # `/review-council` comments (manual)
     types: [created]
+  # pull_request:                    # optional: auto-review when a draft is marked ready
+  #   types: [ready_for_review]
 
 permissions:
   contents: read
@@ -374,6 +374,8 @@ Each reported finding that sits on a line of the PR's diff becomes an inline com
 
 - **Where it goes.** Each reviewer reports the exact `file:line` (or `file:start-end`) of a finding. A script checks that line against the PR's diff as GitHub reports it. If it fits, the comment goes there; if not (a file the PR didn't change, a line outside the changed hunks), the finding goes in the digest under **Outside the diff**. Nothing is moved to a "nearby" line.
 - **Request changes.** A run with any Critical or Important finding posts its review as **request changes**, once: not again while that request is still active. A later run with none dismisses it. If GitHub refuses (for example, on a PR opened by `github-actions[bot]` itself), the review is posted as a plain comment.
+- **A person's dismissal sticks.** If someone dismisses the bot's "request changes" review, the findings it listed never request changes again on that PR. Only a new Critical or Important finding does.
+- **Tags.** Each comment shows the finding's confidence tag, the same as in the report: `[verified]`, `[cross-reviewed]`, `[1 reviewer · unverified]`, `[unverified]` or `[tool-only:<rule>]`. The digest explains them under **What the tags mean**.
 - **If GitHub rejects the review** (one bad line fails the whole review), every finding goes in the digest instead. Nothing is lost.
 - **At most 50 inline comments** per run; the rest go in the digest.
 

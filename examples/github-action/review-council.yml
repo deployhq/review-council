@@ -15,22 +15,25 @@
 #      do nothing until it is there.
 #
 # Fork PRs are always skipped. A `/review-council` comment runs only when the
-# commenter has write access to the repo. On `pull_request`, GitHub runs the
-# copy of this file on the PR's branch, so a PR can change these settings for
-# its own run; on `issue_comment` it runs the default-branch copy.
+# commenter has write access to the repo. On `issue_comment` GitHub runs the
+# default-branch copy of this file; if you enable `pull_request`, it runs the
+# copy on the PR's branch, so a PR can change these settings for its own run.
 
 name: Review Council
 
 on:
-  pull_request:
-    # A draft PR marked ready for review. Add `opened` to also review PRs
-    # opened as non-draft, and `synchronize` to review every push (one run per
-    # push; a newer run cancels the older one). Drafts are always skipped,
-    # on both triggers.
-    types: [ready_for_review]
+  # Manual: a review runs only when someone with write access comments
+  # `/review-council` on a PR. Each run costs a full review, so nothing runs on
+  # its own. Comment again after pushing fixes to re-review (that is also when
+  # fixed findings get resolved).
   issue_comment:
-    # A comment starting with `/review-council` on a PR.
     types: [created]
+  # Automatic (optional): uncomment to also review a draft PR when it is marked
+  # ready for review. Add `opened` to review PRs opened as non-draft, and
+  # `synchronize` to review every push (one run per push; a newer run cancels
+  # the older one). Each adds a full review's cost. Drafts are always skipped.
+  # pull_request:
+  #   types: [ready_for_review]
 
 # Required. The review job gets exactly this grant, so grant no more than this.
 # PR comments are issue comments, so issues: write is needed to post.

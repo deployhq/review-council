@@ -769,7 +769,7 @@ RC_LEDGER="$(mktemp "${TMPDIR:-/tmp}/rc-ledger.XXXXXX")" && cat >"$RC_LEDGER" <<
 {"schema": "review-council/ledger", "version": 1,
  "findings": [
   {"fingerprint": "<§5.1 fingerprint, verbatim>", "outcome": "reported|dropped-refuted|suppressed",
-   "section": "main|extra-signals", "severity": "critical|important|suggestion", "badge": "<badge, without brackets>",
+   "section": "main|extra-signals", "severity": "critical|important|suggestion", "badge": "<badge exactly as the report shows it, e.g. [cross-reviewed]>",
    "title": "<one line>", "issue": "…", "why_it_matters": "…", "recommendation": "…", "how_to_verify": "…",
    "origins": [{"reviewer": "<canonical id>"}],
    "location": {"path": "<relpath>", "line": <first line or null>, "line_end": <last line or null>}}
@@ -871,7 +871,7 @@ If it exits non-zero, there is no trustworthy sha: do not post (say so); in CI p
 
 **Gated on `pr_comments.enabled` (resolved in Step 0).** If it is **false** (the default), skip this step entirely — the run stays report-only, byte-identical to today. This is the plugin's one sanctioned outward-posting path, and it **never auto-posts**: a human confirms before anything leaves the session (the `reply-pr` pattern). Posting is fail-soft — any failure is surfaced and the run continues; it never blocks or mutates the review already emitted. **The one exception is `settings.ci=true`** (env `RC_CI` only, set by the workflow — Step 0): no human is present, so each subsection below has a CI branch that posts without the gate; everything else (marker, idempotent upsert, escaping, no secret material, fail-soft) is unchanged.
 
-Posting anchors to a **PR**, so it applies to a PR review (or a code review whose branch has / can open a PR). What gets posted: each reported finding that sits on a line of the PR's diff becomes an **inline review comment** on that line (one GitHub review per run); the **digest** comment carries the summary, `rc:state`, and every finding that can't be placed on the diff. The review **requests changes** when any reported finding is critical or important, else it is a plain comment. All GitHub calls go through the deterministic plumbing in `scripts/rc-post.sh` (it does the mechanics and decides placement from the §5.7 ledger and GitHub's own diff, never any judgment — you compose the digest and re-check stale comments, it posts).
+Posting anchors to a **PR**, so it applies to a PR review (or a code review whose branch has / can open a PR). What gets posted: each reported finding that sits on a line of the PR's diff becomes an **inline review comment** on that line (one GitHub review per run); the **digest** comment carries the summary, `rc:state`, and every finding that can't be placed on the diff. The review **requests changes** when any reported finding is critical or important, else it is a plain comment; findings a person already waved through (by dismissing an earlier "request changes") never raise it again. All GitHub calls go through the deterministic plumbing in `scripts/rc-post.sh` (it does the mechanics and decides placement from the §5.7 ledger and GitHub's own diff, never any judgment — you compose the digest and re-check stale comments, it posts).
 
 ### 6.6.1 Resolve the target PR
 ```bash

@@ -467,7 +467,7 @@ sequenceDiagram
 
 By default Review Council is **report-only**. You can opt in to have it post its findings to the pull request:
 
-- **Inline comments.** Each finding on a line of the PR's diff becomes an inline review comment on that line, all in one review. The review **requests changes** when there is a Critical or Important finding, and is a plain comment otherwise.
+- **Inline comments.** Each finding on a line of the PR's diff becomes an inline review comment on that line, all in one review. The review **requests changes** when there is a Critical or Important finding, and is a plain comment otherwise; once a person dismisses that request, the same findings never raise it again. Each comment carries the finding's confidence tag (e.g. `[cross-reviewed]`), explained in the digest.
 - **One digest comment.** A summary with three sections: **what was found (and by whom)**, **what the council decided**, and **what was fixed** (your triage). Findings that aren't on the diff are written out here in full. Re-running updates the *same* comment in place, so there is no spam.
 - **Re-runs.** A finding already commented on is left alone and new ones are added. An earlier comment the run no longer reports is re-checked by Claude against the current code, and resolved only if it looks fixed.
 
@@ -604,7 +604,7 @@ None met our go bar (full coverage in under ~10 min for under ~$2, with a verifi
 
 Run the council on your PRs with no human in the loop. You call a **reusable workflow** from your repo; it runs headless Claude Code with the plugin loaded and posts one review-digest comment on the PR as `github-actions[bot]` (or your own bot).
 
-- **When:** a PR is marked ready for review, or someone with write access comments `/review-council`. Drafts and PRs from forks are ignored.
+- **When:** someone with write access comments `/review-council` on a PR (and optionally, automatically, when a PR is marked ready for review). Drafts and PRs from forks are ignored.
 - **Claude auth:** one workflow, two modes. By default it takes the `ANTHROPIC_API_KEY` secret and the caller grants no `id-token` permission. Opt-in, set the `anthropic_*` federation inputs to use Anthropic Workload Identity Federation (no stored key, short-lived tokens); only then does the caller grant `id-token: write`, so check your cloud OIDC trust policies first (see the guide). The review job gets exactly the caller's grant.
 - **Secrets:** `ANTHROPIC_API_KEY` (API-key workflow only); `OPENAI_API_KEY` for Codex, `PERPLEXITY_API_KEY`, `OPENROUTER_API_KEY` for custom seats, `PR_BOT_TOKEN` to post as your own App or bot (optional).
 - **Config:** the committed `.review-council/config.yml` (and `learnings.md`) from the PR's branch, with workflow env on top. Custom seats run only when the workflow approves them by slot name (`approved_seats`); the PR's config still defines the seat.

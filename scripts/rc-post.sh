@@ -333,7 +333,8 @@ upsert_digest() {
 #
 # Blocking: when any reported finding is critical or important, the review is
 # posted as "request changes" (once — not again while ours is still active);
-# when none is, our earlier "request changes" reviews are dismissed.
+# when none is, our earlier "request changes" reviews are dismissed. If a
+# person dismisses ours, the findings it listed never request changes again.
 # ---------------------------------------------------------------------------
 INLINE_MARK='<!-- rc:inline -->'
 MAX_INLINE=50
@@ -407,7 +408,7 @@ PLAN_JQ='
     | fence($p) as $fc
     | ([.origins[]?.reviewer | select(str) | oneline] | unique | join(", ")) as $by
     | ("**" + ((.severity | tostring) | sevlabel) + "**"
-       + (if (.badge | str) then " · " + (.badge | oneline) else "" end)
+       + (if (.badge | str) then " · " + (.badge | oneline | gsub("`"; "") | if startswith("[") then . else "[" + . + "]" end | "`" + . + "`") else "" end)
        + (if $by != "" then " · found by " + $by else "" end)
        + "\n\n**" + (.title | oneline) + "**"
        + (if $text != "" then "\n\n" + $text else "" end)
@@ -440,6 +441,7 @@ PLAN_JQ='
   | ([$fs[] | select(.tracked) | .fingerprint]) as $fps
   | {
       block: any($fs[]; .severity == "critical" or .severity == "important"),
+      blocking: [ $fs[] | select(.severity == "critical" or .severity == "important") | if .tracked then .fingerprint else "" end ],
       kept: ([$fs[] | select(.have)] | length),
       new: [ $cand[0:$maxn][] | .a + {path, body: (.md + "\n\n<!-- rc:finding " + .fingerprint + " -->"),
                                       outside: (.loc + "\n\n" + .md)} ],
@@ -569,20 +571,46 @@ do_review() {
     --argjson inline "$_inline" --argjson maxn "$MAX_INLINE" --argjson cov "$_covered" --argjson res "$_fixed" \
     "$LEDGER_DEFS"' $f[0] | '"$PLAN_JQ" >"$_tmp/plan.json" 2>/dev/null; then
     echo "rc-post: could not place the findings; posting the digest only" >&2
-    printf '{"block":false,"kept":0,"new":[],"outside":[],"stale":[],"resolve":[]}\n' >"$_tmp/plan.json"
+    printf '{"block":false,"blocking":[],"kept":0,"new":[],"outside":[],"stale":[],"resolve":[]}\n' >"$_tmp/plan.json"
   fi
 
-  # Our reviews that still request changes (null = unknown: then never post a
-  # second block and never dismiss).
-  # A failed listing must not look like an empty one (that would block again).
+  # Our reviews: `active` = ours still requesting changes; `ack` = blocking
+  # fingerprints (from the hidden `rc:blocking` line of each "request changes"
+  # review we posted) that a PERSON dismissed — those never block again; only
+  # a new critical/important finding does. The dismisser comes from the PR
+  # timeline; if it can't be read, every dismissed review of ours counts as a
+  # person's (never re-raise by mistake). A failed reviews listing must not
+  # look like an empty one: then "unknown" — no new block, no dismissal.
   _active=""
+  _ack='[]'
   if _revs="$(gh_post api --paginate "repos/$_repo/pulls/$_pr/reviews" 2>/dev/null)"; then
-    _active="$(printf '%s' "$_revs" | jq -s -c --arg me "$_me" --arg fb "$_fb_login" '[ .[] | arrays | .[]
-        | select(.state == "CHANGES_REQUESTED"
-            and (if $me != "" then .user.login == $me
-                 else (.user.type == "Bot" and ($fb == "" or .user.login == $fb)) end)) | .id ]' 2>/dev/null)" || _active=""
+    _tl=null
+    if _tlraw="$(gh_post api --paginate "repos/$_repo/issues/$_pr/timeline" 2>/dev/null)"; then
+      _tl="$(printf '%s' "$_tlraw" | jq -s -c '.' 2>/dev/null)" || _tl=null
+      [ -n "$_tl" ] || _tl=null
+    fi
+    # shellcheck disable=SC2016  # jq program, not shell
+    _rv="$(printf '%s' "$_revs" | jq -s -c --arg me "$_me" --arg fb "$_fb_login" --argjson tl "$_tl" '
+        [ .[] | arrays | .[]
+          | select(if $me != "" then .user.login == $me
+                   else (.user.type == "Bot" and ($fb == "" or .user.login == $fb)) end) ] as $ours
+        | (if $tl == null then null
+           else [ $tl[] | arrays | .[] | select(.event == "review_dismissed" and .actor.type == "User")
+                  | .dismissed_review.review_id ] end) as $human
+        | { active: [ $ours[] | select(.state == "CHANGES_REQUESTED") | .id ],
+            ack: ([ $ours[] | select(.state == "DISMISSED") | . as $r
+                    | select($human == null or ($human | index($r.id)) != null)
+                    | (.body // "") | capture("<!-- rc:blocking (?<l>[A-Za-z0-9._:/@+ -]*) -->").l
+                    | split(" ")[] | select(. != "") ] | unique) }' 2>/dev/null)" || _rv=""
+    if [ -n "$_rv" ]; then
+      _active="$(printf '%s' "$_rv" | jq -c '.active')"
+      _ack="$(printf '%s' "$_rv" | jq -c '.ack')"
+    fi
   fi
   _block="$(jq -r '.block' "$_tmp/plan.json")"
+  # Raise a block only for a blocking finding a person hasn't already waved
+  # through (an untracked fingerprint, "", always counts as new).
+  _raise="$(jq -r --argjson ack "$_ack" '[.blocking[] | select(. == "" or (. as $f | $ack | index($f)) == null)] | length > 0' "$_tmp/plan.json")"
   _n_new="$(jq '.new | length' "$_tmp/plan.json")"
 
   # 1. One review: "request changes" when blocking findings exist and none of
@@ -592,7 +620,7 @@ do_review() {
   #    retries as a comment, and a failed comment moves the inline findings
   #    to the digest.
   _event=COMMENT
-  if [ "$_block" = true ] && [ "$_active" = '[]' ]; then _event=REQUEST_CHANGES; fi
+  if [ "$_raise" = true ] && [ "$_active" = '[]' ]; then _event=REQUEST_CHANGES; fi
   _review_url=""
   _posted=0
   for _ev in $_event COMMENT; do
@@ -600,7 +628,9 @@ do_review() {
     jq --arg sha "$_pr_head" --arg ev "$_ev" '{commit_id: $sha, event: $ev,
         body: ((if $ev == "REQUEST_CHANGES" then "Review Council found critical or important findings. Requesting changes. "
                 else "" end)
-               + "The summary comment on this PR has the full report.\n\n---\n\n<sub>Review done with [Review Council](https://github.com/deployhq/review-council/)</sub>"),
+               + "The summary comment on this PR has the full report.\n\n---\n\n<sub>Review done with [Review Council](https://github.com/deployhq/review-council/)</sub>"
+               + (if $ev == "REQUEST_CHANGES"
+                  then "\n\n<!-- rc:blocking " + ([.blocking[] | select(. != "")] | join(" ")) + " -->" else "" end)),
         comments: [.new[] | del(.outside)]}' "$_tmp/plan.json" >"$_tmp/review.raw"
     if redact_file "$_tmp/review.raw" "$_tmp/review.json" \
       && _review_url="$(gh_post api "repos/$_repo/pulls/$_pr/reviews" -X POST --input - <"$_tmp/review.json" 2>/dev/null \
@@ -661,7 +691,14 @@ do_review() {
          (if $p[0].kept > 0 then "\($p[0].kept) already commented" else empty end),
          (if $nr > 0 then "\($nr) resolved as fixed" else empty end) ]
        | if length == 0 then "No inline comments on the diff." else "**On the diff:** " + join(" · ") + "." end) as $line
-    | ($line
+    | ("<details>\n<summary>What the tags mean</summary>\n\n"
+       + "- `[verified]` — backed by a tool: a secret or known-CVE scanner hit, or a lint/security rule a reviewer confirmed.\n"
+       + "- `[cross-reviewed]` — raised by reviewers from two or more model families, or confirmed by a different family when double-checked.\n"
+       + "- `[1 reviewer · unverified]` — only Claude-family reviewers ran, so no other family could check it.\n"
+       + "- `[unverified]` — the double-check could not confirm or refute it (or ran out of time).\n"
+       + "- `[tool-only:<rule>]` — a lint or security rule fired and no reviewer confirmed it.\n\n"
+       + "</details>") as $legend
+    | ($line + "\n\n" + $legend
        + (if ($o | length) > 0
           then "\n\n### Outside the diff (\($o | length))\n\n" + ($o | join("\n\n---\n\n"))
           else "" end)) as $sec

@@ -81,6 +81,7 @@ case "$1" in
       *"api graphql"*mutation*) printf '{}\n' ;;
       *"api graphql"*) cat "$THREADS" ;;
       *"pulls/5/reviews"*) [ -n "${REVIEWS_FAIL:-}" ] && exit 1; cat "$REVIEWS" ;;
+      *"issues/5/timeline"*) [ -n "${TIMELINE_FAIL:-}" ] && exit 1; cat "${TIMELINE:-/dev/null}" 2>/dev/null || printf '[]\n' ;;
       *"pulls/5/files"*)   cat "$FILES" ;;
       *"pulls/5/comments"*) cat "$RCOMMENTS" ;;
       *"repos/owner/repo/pulls/5"*) printf '{"head":{"sha":"%s"}}\n' "${PR_HEAD:-1111111111111111111111111111111111111111}" ;;
@@ -484,7 +485,7 @@ review_fixtures() {
     "${1:-findings}" >"$BODY"
   cat >"$LEDGER" <<'EOF'
 {"schema":"review-council/ledger","version":1,"findings":[
- {"fingerprint":"a.sh::f::bug","outcome":"reported","section":"main","severity":"critical","badge":"verified",
+ {"fingerprint":"a.sh::f::bug","outcome":"reported","section":"main","severity":"critical","badge":"[cross-reviewed]",
   "title":"Crash on empty input","issue":"It crashes.","recommendation":"Guard it.","origins":[{"reviewer":"codex"},{"reviewer":"claude"}],
   "location":{"path":"a.sh","line":3}},
  {"fingerprint":"a.sh::f::range","outcome":"reported","section":"main","severity":"important",
@@ -517,6 +518,8 @@ digest_sent() { jq -r '.body' "$POSTBODY"; }
   [ "$output" = '[{"path":"a.sh","line":3,"start_line":null},{"path":"a.sh","line":3,"start_line":2}]' ]
   jq -r '.comments[0].body' "$REVIEWBODY" | grep -qF '<!-- rc:finding a.sh::f::bug -->'
   jq -r '.comments[0].body' "$REVIEWBODY" | grep -qF 'found by claude, codex'
+  jq -r '.comments[0].body' "$REVIEWBODY" | grep -qF '`[cross-reviewed]`'
+  digest_sent | grep -qF 'What the tags mean'
   jq -r '.comments[0].body' "$REVIEWBODY" | grep -qF 'Prompt for AI agents'
   [ "$(jq -r .commit_id "$REVIEWBODY")" = 1111111111111111111111111111111111111111 ]
   digest_sent | grep -qF 'Outside the diff (1)'
@@ -724,4 +727,52 @@ stale_fixtures() {
   [ "$status" -eq 0 ]
   has "review_event=COMMENT"
   [ ! -f "$REVIEWBODY.REQUEST_CHANGES" ]
+}
+
+# Our earlier "request changes" (id 300) listed both blocking fingerprints.
+dismissed_fixtures() {
+  review_fixtures
+  printf '[{"id":300,"state":"DISMISSED","user":{"login":"rc-bot"},"body":"x\\n\\n<!-- rc:blocking a.sh::f::bug a.sh::f::range -->"}]\n' >"$REVIEWS"
+  TIMELINE="$BATS_TEST_TMPDIR/timeline.json"
+  export TIMELINE
+}
+
+@test "review: the request-changes review lists its blocking fingerprints" {
+  review_fixtures
+  PATH="$SANDBOX" run "$SCRIPT" review 5 "$BODY" "$LEDGER"
+  [ "$status" -eq 0 ]
+  jq -r .body "$REVIEWBODY.REQUEST_CHANGES" | grep -qF '<!-- rc:blocking a.sh::f::bug a.sh::f::range -->'
+}
+
+@test "review: findings in a review a person dismissed never request changes again" {
+  dismissed_fixtures
+  printf '[{"event":"review_dismissed","actor":{"login":"alice","type":"User"},"dismissed_review":{"review_id":300}}]\n' >"$TIMELINE"
+  PATH="$SANDBOX" run "$SCRIPT" review 5 "$BODY" "$LEDGER"
+  [ "$status" -eq 0 ]
+  has "review_event=COMMENT"
+  [ ! -f "$REVIEWBODY.REQUEST_CHANGES" ]
+}
+
+@test "review: a new blocking finding after a person's dismissal requests changes again" {
+  dismissed_fixtures
+  printf '[{"event":"review_dismissed","actor":{"login":"alice","type":"User"},"dismissed_review":{"review_id":300}}]\n' >"$TIMELINE"
+  jq '.findings[2].severity = "critical"' "$LEDGER" >"$LEDGER.t" && mv "$LEDGER.t" "$LEDGER"
+  PATH="$SANDBOX" run "$SCRIPT" review 5 "$BODY" "$LEDGER"
+  [ "$status" -eq 0 ]
+  has "review_event=REQUEST_CHANGES"
+}
+
+@test "review: our own dismissal (a clean run) does not count as a person's" {
+  dismissed_fixtures
+  printf '[{"event":"review_dismissed","actor":{"login":"github-actions[bot]","type":"Bot"},"dismissed_review":{"review_id":300}}]\n' >"$TIMELINE"
+  PATH="$SANDBOX" run "$SCRIPT" review 5 "$BODY" "$LEDGER"
+  [ "$status" -eq 0 ]
+  has "review_event=REQUEST_CHANGES"
+}
+
+@test "review: an unreadable timeline treats our dismissed reviews as a person's" {
+  dismissed_fixtures
+  TIMELINE_FAIL=1 PATH="$SANDBOX" run "$SCRIPT" review 5 "$BODY" "$LEDGER"
+  [ "$status" -eq 0 ]
+  has "review_event=COMMENT"
 }
