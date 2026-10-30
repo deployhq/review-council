@@ -80,7 +80,7 @@ case "$1" in
       *replies*)     cat >/dev/null; printf '{}\n' ;;
       *"api graphql"*mutation*) printf '{}\n' ;;
       *"api graphql"*) cat "$THREADS" ;;
-      *"pulls/5/reviews"*) cat "$REVIEWS" ;;
+      *"pulls/5/reviews"*) [ -n "${REVIEWS_FAIL:-}" ] && exit 1; cat "$REVIEWS" ;;
       *"pulls/5/files"*)   cat "$FILES" ;;
       *"pulls/5/comments"*) cat "$RCOMMENTS" ;;
       *"repos/owner/repo/pulls/5"*) printf '{"head":{"sha":"%s"}}\n' "${PR_HEAD:-1111111111111111111111111111111111111111}" ;;
@@ -579,7 +579,7 @@ digest_sent() { jq -r '.body' "$POSTBODY"; }
 }
 
 @test "review: no blocking finding -> our earlier request-changes is dismissed" {
-  review_fixtures
+  review_fixtures clean
   only_suggestions
   printf '[{"id":300,"state":"CHANGES_REQUESTED","user":{"login":"rc-bot"}},{"id":301,"state":"CHANGES_REQUESTED","user":{"login":"someone"}}]\n' >"$REVIEWS"
   PATH="$SANDBOX" run "$SCRIPT" review 5 "$BODY" "$LEDGER"
@@ -706,4 +706,22 @@ stale_fixtures() {
   PATH="$SANDBOX" run "$SCRIPT" review 5 "$BODY" "$LEDGER"
   [ "$status" -ne 0 ]
   [ ! -f "$REVIEWBODY" ]
+}
+
+@test "review: an unreadable ledger never dismisses a block (rc:state not clean)" {
+  review_fixtures findings
+  printf '{"findings":"garbage"}\n' >"$LEDGER"
+  printf '[{"id":300,"state":"CHANGES_REQUESTED","user":{"login":"rc-bot"}}]\n' >"$REVIEWS"
+  PATH="$SANDBOX" run "$SCRIPT" review 5 "$BODY" "$LEDGER"
+  [ "$status" -eq 0 ]
+  has "dismissed=0"
+  ! grep -qF dismissals "$GHLOG" || return 1
+}
+
+@test "review: a failed reviews listing never requests changes a second time" {
+  review_fixtures
+  REVIEWS_FAIL=1 PATH="$SANDBOX" run "$SCRIPT" review 5 "$BODY" "$LEDGER"
+  [ "$status" -eq 0 ]
+  has "review_event=COMMENT"
+  [ ! -f "$REVIEWBODY.REQUEST_CHANGES" ]
 }

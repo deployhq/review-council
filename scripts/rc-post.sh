@@ -574,11 +574,14 @@ do_review() {
 
   # Our reviews that still request changes (null = unknown: then never post a
   # second block and never dismiss).
-  _active="$(gh_post api --paginate "repos/$_repo/pulls/$_pr/reviews" 2>/dev/null \
-    | jq -s -c --arg me "$_me" --arg fb "$_fb_login" '[ .[] | arrays | .[]
+  # A failed listing must not look like an empty one (that would block again).
+  _active=""
+  if _revs="$(gh_post api --paginate "repos/$_repo/pulls/$_pr/reviews" 2>/dev/null)"; then
+    _active="$(printf '%s' "$_revs" | jq -s -c --arg me "$_me" --arg fb "$_fb_login" '[ .[] | arrays | .[]
         | select(.state == "CHANGES_REQUESTED"
             and (if $me != "" then .user.login == $me
                  else (.user.type == "Bot" and ($fb == "" or .user.login == $fb)) end)) | .id ]' 2>/dev/null)" || _active=""
+  fi
   _block="$(jq -r '.block' "$_tmp/plan.json")"
   _n_new="$(jq '.new | length' "$_tmp/plan.json")"
 
@@ -617,7 +620,7 @@ do_review() {
   fi
 
   # 2. Resolve the stale comments the re-check found fixed; 3. dismiss our
-  #    "request changes" when nothing blocks. Neither on a degraded run.
+  #    "request changes" when the run is clean. Neither on a degraded run.
   _n_res=0
   _n_dis=0
   _short="$(printf '%s' "$_pr_head" | cut -c1-7)"
@@ -635,7 +638,9 @@ do_review() {
         echo "rc-post: could not resolve the thread of inline comment $_cid" >&2
       fi
     done <"$_tmp/resolve.txt"
-    if [ "$_block" = false ] && [ -n "$_active" ] && [ "$_active" != '[]' ]; then
+    # Dismiss only on a run the rc:state line calls clean (no critical or
+    # important finding), so an empty or unreadable ledger never lifts a block.
+    if [ "$_block" = false ] && [ "$_status" = clean ] && [ -n "$_active" ] && [ "$_active" != '[]' ]; then
       printf '%s' "$_active" | jq -r '.[]' >"$_tmp/dismiss.txt"
       while read -r _rid; do
         jq -n --arg s "$_short" '{event: "DISMISS", message: "No critical or important findings in the Review Council review of \($s)."}' >"$_tmp/dismiss.json"
