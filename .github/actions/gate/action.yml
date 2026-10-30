@@ -1,7 +1,7 @@
 name: Review Council gate
 description: >
-  Internal to Review Council's reusable workflows (review-council.yml and
-  review-council-federated.yml). Resolves the PR, enforces the event, fork,
+  Internal to Review Council's reusable workflow (review-council.yml).
+  Resolves the PR, enforces the event, fork,
   draft, open-state and commenter-permission checks, reacts to a
   `/review-council` comment with eyes, and sizes the review step's timeout.
   Holds no credentials beyond the job's GITHUB_TOKEN.

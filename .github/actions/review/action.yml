@@ -1,7 +1,7 @@
 name: Review Council review
 description: >
-  Internal to Review Council's reusable workflows (review-council.yml and
-  review-council-federated.yml). Installs Claude Code, yq, the optional
+  Internal to Review Council's reusable workflow (review-council.yml).
+  Installs Claude Code, yq, the optional
   reviewers' CLIs, the custom-seat harnesses and the static-analysis tools,
   runs `/review-council:run` on the PR checked out at ./repo, and writes a
   redacted job summary. Expects this action's own repo (the plugin) to be
@@ -80,6 +80,20 @@ inputs:
 runs:
   using: composite
   steps:
+    # Fail fast on a bad Claude auth setup (missing key, incomplete federation
+    # IDs, both given, no OIDC grant) before spending minutes on installs. The
+    # checks live in run-review.sh only; --check-auth runs them and exits.
+    - name: Check Claude auth
+      shell: bash
+      env:
+        RC_AUTH_MODE: ${{ inputs.auth_mode }}
+        ANTHROPIC_API_KEY: ${{ inputs.anthropic_api_key }}
+        ANTHROPIC_FEDERATION_RULE_ID: ${{ inputs.anthropic_federation_rule_id }}
+        ANTHROPIC_ORGANIZATION_ID: ${{ inputs.anthropic_organization_id }}
+        ANTHROPIC_SERVICE_ACCOUNT_ID: ${{ inputs.anthropic_service_account_id }}
+        ANTHROPIC_WORKSPACE_ID: ${{ inputs.anthropic_workspace_id }}
+      run: bash "$GITHUB_ACTION_PATH/run-review.sh" --check-auth
+
     - name: Prepare tool directories
       shell: bash
       run: |

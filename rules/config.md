@@ -435,7 +435,9 @@ pr_comments:
 ```
 
 - `enabled` (bool, default `false`) — when true, after the report Review Council offers to
-  post a single review-digest comment to the PR (human-confirmed in a local run; posted
+  post the findings to the PR — inline review comments on the diff (one review; "request
+  changes" on a critical/important finding) plus a single review-digest comment that holds
+  the summary and the findings off the diff (human-confirmed in a local run; posted
   without the confirmation only in [CI mode](#ci-mode-rc_ci-and-rc_approved_seats)).
   `RC_PR_COMMENTS` overrides it (env wins), so CI can force it on.
 - `bot_token_env` (string, default `RC_PR_BOT_TOKEN`) — the **name** of an environment
@@ -467,6 +469,8 @@ pr_comments:
   with the marker — and, under `GITHUB_ACTIONS=true` with no bot token, only one by
   `github-actions[bot]` (the previous digest) — never a human's or another bot's, so CI re-runs
   edit one comment.
+  The same identity rule picks out our earlier inline comments and "request changes"
+  reviews, so a re-run only ever leaves alone, resolves or dismisses its own.
 
 ## Learnings
 

@@ -4,10 +4,12 @@
 #
 # Before the first run:
 #   1. Add the ANTHROPIC_API_KEY secret (Settings -> Secrets and variables ->
-#      Actions). The other secrets below are optional. To authenticate Claude
-#      with Anthropic federation instead (no stored key), use
-#      review-council-federated.yml, not this file. See "Authenticate Claude"
-#      in the guide.
+#      Actions). The other secrets below are optional.
+#      To authenticate Claude with Anthropic federation instead (no stored
+#      key), uncomment the lines marked "federation only" below and drop the
+#      ANTHROPIC_API_KEY line. Use one or the other, never both. Before you do,
+#      check that no cloud trust policy (AWS, GCP, Azure, ...) matches this
+#      repo's PR runs broadly. See "Authenticate Claude" in the guide.
 #   2. Merge this file to your default branch. GitHub runs issue_comment
 #      workflows only from the default branch, so `/review-council` comments
 #      do nothing until it is there.
@@ -30,9 +32,9 @@ on:
     # A comment starting with `/review-council` on a PR.
     types: [created]
 
-# Required. A reusable workflow never gets more than its caller grants.
+# Required. The review job gets exactly this grant, so grant no more than this.
 # PR comments are issue comments, so issues: write is needed to post.
-# No id-token: write here. Only the federated workflow needs it.
+# id-token: write is for federation only: leave it commented out with an API key.
 #
 # Do NOT add a workflow-level `concurrency:` with cancel-in-progress here: every
 # PR comment triggers this workflow and would cancel a running review. The
@@ -42,6 +44,7 @@ permissions:
   contents: read
   pull-requests: write
   issues: write
+  # id-token: write   # federation only: mints the GitHub OIDC token traded for an Anthropic token
 
 jobs:
   review:
@@ -49,6 +52,12 @@ jobs:
     # SHA here and set plugin_ref below to the same SHA.
     uses: deployhq/review-council/.github/workflows/review-council.yml@main
     with:
+      # Anthropic federation (federation only). Not secrets. Setting the rule
+      # ID switches Claude auth to federation.
+      # anthropic_federation_rule_id: fdrl_...
+      # anthropic_organization_id: 00000000-0000-0000-0000-000000000000
+      # anthropic_service_account_id: svac_...
+      # anthropic_workspace_id: wrkspc_...   # only if the rule covers more than one workspace
       # Custom seats from .review-council/config.yml that may run in CI,
       # comma-separated slot names (e.g. "qwen,kimi"). Empty = none approved.
       # Approving a seat approves its slot name only: the PR's config.yml still
@@ -62,7 +71,7 @@ jobs:
       # Keep it the same as the ref in `uses:` above.
       plugin_ref: main
     secrets:
-      ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}     # required
+      ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}     # required with an API key; remove for federation
       OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}           # optional: enables Codex
       OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}   # optional: an OpenRouter custom seat
       PERPLEXITY_API_KEY: ${{ secrets.PERPLEXITY_API_KEY }}   # optional: enables Perplexity

@@ -4,12 +4,12 @@ Review Council can review your pull requests on its own, in GitHub Actions, with
 
 You call it as a **reusable workflow** from your own repo. Your repo's secrets pay for the models. Your repo's `GITHUB_TOKEN` posts the comment.
 
-There are two entry workflows. Call one of them, depending on how Claude authenticates:
+There is one workflow to call, `review-council.yml`. Claude authenticates in one of two modes:
 
-| Workflow | Claude auth | Caller grants `id-token: write` |
+| Auth mode | You pass | Caller grants `id-token: write` |
 |---|---|---|
-| `review-council.yml` (default) | `ANTHROPIC_API_KEY` secret | No |
-| `review-council-federated.yml` (opt-in) | Anthropic Workload Identity Federation (no stored key) | Yes |
+| API key (default) | the `ANTHROPIC_API_KEY` secret | No |
+| Federation (opt-in) | the `anthropic_*` federation inputs (no stored key) | Yes |
 
 Everything else (inputs, optional secrets, behaviour) is the same in both. See [Authenticate Claude](#authenticate-claude).
 
@@ -18,7 +18,7 @@ Everything else (inputs, optional secrets, behaviour) is the same in both. See [
 - [Authenticate Claude](#authenticate-claude)
 - [Configure it](#configure-it)
 - [Example setups](#example-setups)
-- [The digest comment](#the-digest-comment)
+- [What gets posted](#what-gets-posted)
 - [Security model](#security-model)
 - [Troubleshooting](#troubleshooting)
 
@@ -36,14 +36,14 @@ Either way, the PR must be open and not a draft. It never runs on PRs from forks
 1. Checks out the PR's branch.
 2. Installs Claude Code, the Review Council plugin (from a pinned ref), `yq`, and the Codex CLI if you gave it an OpenAI key (or a `harness: codex` seat needs it).
 3. Runs headless Claude Code: `claude -p "/review-council:run <PR number>"`.
-4. Posts the digest on the PR, or updates the one already there. Re-runs never add a second comment.
+4. Posts each finding as an **inline comment** on its line of the diff, in one GitHub review. Findings that aren't on the diff go in the **digest** comment, which it posts or updates (never a second one). See [What gets posted](#what-gets-posted).
 5. Appends the final report to the job summary.
 
 **Which reviewers run.**
 
 | Reviewer | Needs |
 |---|---|
-| Claude + the dedicated Security reviewer | `ANTHROPIC_API_KEY` (`review-council.yml`), or Anthropic federation (`review-council-federated.yml`). See [Authenticate Claude](#authenticate-claude). |
+| Claude + the dedicated Security reviewer | `ANTHROPIC_API_KEY`, or Anthropic federation. See [Authenticate Claude](#authenticate-claude). |
 | Codex | `OPENAI_API_KEY` |
 | Perplexity | `PERPLEXITY_API_KEY` |
 | Custom seats (optional) | a seat in `config.yml`, approved in the workflow, plus its key. See [Custom seats in CI](#custom-seats-in-ci). |
@@ -58,21 +58,21 @@ The Google slot (`agy` / `gemini`) is not set up in CI.
 
 **Concurrency.** One review per PR. The `review` job has a per-PR concurrency group with `cancel-in-progress`. If an authorised trigger starts a new review for the same PR (a second `/review-council`, or another `pull_request` event), the older review is cancelled. A comment that fails the gate never reaches `review`, so it cannot cancel a running review.
 
-**It never blocks a merge.** The digest is advisory. The workflow does not fail the check when it finds problems. If you want a gate, read the [state block](#the-hidden-state-block).
+**It can request changes, but never fails the check.** When the review has a Critical or Important finding, it is posted as **request changes**; otherwise as a plain comment. Whether a "request changes" review blocks the merge depends on your branch protection rules. The workflow itself never fails the check on findings. For a gate of your own, read the [state block](#the-hidden-state-block).
 
 ## Set it up
 
-You need admin access to the repo, an Anthropic API key (or, opt-in, a federation rule; see [Authenticate Claude](#authenticate-claude)), and (recommended) an OpenAI API key. The steps below use the API-key workflow.
+You need admin access to the repo, an Anthropic API key (or, opt-in, a federation rule; see [Authenticate Claude](#authenticate-claude)), and (recommended) an OpenAI API key. The steps below use an API key.
 
 ### 1. Add the secrets
 
 In your repo: **Settings → Secrets and variables → Actions → New repository secret**. Organization secrets work too.
 
-Both workflows take the same optional secrets. Only `review-council.yml` takes `ANTHROPIC_API_KEY`.
+Both auth modes take the same optional secrets. Only the API-key mode takes `ANTHROPIC_API_KEY`.
 
 | Secret | Required | What it does |
 |---|---|---|
-| `ANTHROPIC_API_KEY` | yes, for `review-council.yml` | Runs Claude Code, the Claude reviewer and the Security reviewer. Not accepted by `review-council-federated.yml`, which uses [federation](#federation-opt-in) instead. |
+| `ANTHROPIC_API_KEY` | yes, unless you use [federation](#federation-opt-in) | Runs Claude Code, the Claude reviewer and the Security reviewer. Don't pass it with federation: the run fails if both are set. |
 | `OPENAI_API_KEY` | no (recommended) | Enables the Codex reviewer. The workflow passes it to Codex as `CODEX_API_KEY`, which is the variable Codex reads in non-interactive mode. Without it, the Codex reviewer does not run, even if a `harness: codex` seat installs the Codex CLI. |
 | `OPENROUTER_API_KEY` | no | Key for a custom seat on OpenRouter. |
 | `PERPLEXITY_API_KEY` | no | Enables the Perplexity reviewer. |
@@ -116,7 +116,7 @@ jobs:
 
 Things to know:
 
-- **Keep the `permissions:` block.** A reusable workflow can never get more permissions than its caller grants. Without `pull-requests: write` and `issues: write`, the run cannot post. Comments on a PR are issue comments, so `issues: write` is needed. Don't add `id-token: write`: the API-key workflow doesn't request it. Only [`review-council-federated.yml`](#federation-opt-in) needs it.
+- **Keep the `permissions:` block, and grant no more.** The `review` job has no `permissions:` of its own, so it gets exactly what your caller grants. Without `pull-requests: write` and `issues: write`, the run cannot post. Comments on a PR are issue comments, so `issues: write` is needed. Don't add `id-token: write` with an API key. Only [federation](#federation-opt-in) needs it.
 - **Merge it to your default branch first.** GitHub runs `issue_comment` workflows only from the default branch. Until the file is on `main` (or whatever your default is), `/review-council` does nothing.
 - **Don't add `concurrency:` with `cancel-in-progress` to the caller.** Every PR comment triggers the caller, so any comment would cancel a running review. The reusable workflow already allows one review per PR, and only an authorised trigger can cancel it.
 - **Pinning (optional).** With `main`, every upstream change reaches your runs. If you'd rather control when changes arrive, pin the ref in `uses:` (the *workflow*) and the `plugin_ref` input (the *plugin*) to the same commit SHA.
@@ -128,36 +128,35 @@ Open a PR, or comment `/review-council` on an existing one. Watch the run in the
 
 ### Inputs
 
-| Input | Workflow | Type | Default | What it does |
-|---|---|---|---|---|
-| `anthropic_federation_rule_id` | federated only (required) | string | — | Federation rule ID (`fdrl_...`). See [Federation (opt-in)](#federation-opt-in). |
-| `anthropic_organization_id` | federated only (required) | string | — | Anthropic organization ID (a UUID). |
-| `anthropic_service_account_id` | federated only (required) | string | — | Service account ID (`svac_...`). |
-| `anthropic_workspace_id` | federated only (optional) | string | `""` | Workspace ID (`wrkspc_...`). Only when the rule covers more than one workspace. |
-| `approved_seats` | both | string | `""` | Comma-separated custom-seat slot names that may run. See [Custom seats in CI](#custom-seats-in-ci). |
-| `run_budget_seconds` | both | number | `900` | Soft time budget for the whole review. When spent, the council skips or shrinks the double-check pass and still posts a report. |
-| `plugin_ref` | both | string | `main` | Git ref of `deployhq/review-council` to load the plugin from (and the shared steps). Set it to the same tag or SHA as the `uses:` ref. |
-| `claude_code_version` | both | string | a pinned version | Version of `@anthropic-ai/claude-code` to install. |
-| `codex_version` | both | string | `0.163.0` | Version of the Codex CLI to install. |
-| `static_analysis` | both | boolean | `true` | Run the static-analysis scan (secrets, CVEs, lint) before the review. Missing tools are skipped and noted; the run never stops to ask. |
+| Input | Type | Default | What it does |
+|---|---|---|---|
+| `approved_seats` | string | `""` | Comma-separated custom-seat slot names that may run. See [Custom seats in CI](#custom-seats-in-ci). |
+| `run_budget_seconds` | number | `900` | Soft time budget for the whole review. When spent, the council skips or shrinks the double-check pass and still posts a report. |
+| `plugin_ref` | string | `main` | Git ref of `deployhq/review-council` to load the plugin from (and the shared steps). Set it to the same tag or SHA as the `uses:` ref. |
+| `claude_code_version` | string | a pinned version | Version of `@anthropic-ai/claude-code` to install. |
+| `codex_version` | string | `0.163.0` | Version of the Codex CLI to install. |
+| `static_analysis` | boolean | `true` | Run the static-analysis scan (secrets, CVEs, lint) before the review. Missing tools are skipped and noted; the run never stops to ask. |
+| `anthropic_federation_rule_id` | string | `""` | Federation only. Rule ID (`fdrl_...`). Setting it switches Claude auth to federation. See [Federation (opt-in)](#federation-opt-in). |
+| `anthropic_organization_id` | string | `""` | Federation only (required with it). Anthropic organization ID (a UUID). |
+| `anthropic_service_account_id` | string | `""` | Federation only (required with it). Service account ID (`svac_...`). |
+| `anthropic_workspace_id` | string | `""` | Federation only (optional). Workspace ID (`wrkspc_...`). Only when the rule covers more than one workspace. |
 
-The two workflows share their steps through composite actions in `deployhq/review-council`, loaded at `plugin_ref`. That is one more reason to keep `plugin_ref` and the `uses:` ref the same.
+The workflow loads its steps from composite actions in `deployhq/review-council`, at `plugin_ref`. That is one more reason to keep `plugin_ref` and the `uses:` ref the same.
 
 ## Authenticate Claude
 
-Claude Code needs Anthropic credentials. You choose how by choosing **which workflow file you call**.
+Claude Code needs Anthropic credentials. You always call `review-council.yml`. **What you pass picks the mode:** set `anthropic_federation_rule_id` for federation, or pass `ANTHROPIC_API_KEY` for an API key. Pass one, not both. The run checks this first and fails with a clear error if the setup is mixed or incomplete.
 
 | | API key (default) | Federation (opt-in) |
 |---|---|---|
-| Workflow you call | `review-council.yml` | `review-council-federated.yml` |
-| What you store | The `ANTHROPIC_API_KEY` secret | Nothing secret. Three or four IDs as workflow inputs. |
+| You pass | The `ANTHROPIC_API_KEY` secret | Nothing secret. Three or four IDs as workflow inputs. |
 | Setup | Simplest: one secret | A rule in the Anthropic Console (admin or owner role) |
 | If the credential leaks | A long-lived key, until you rotate it | A token that lasts minutes |
 | Caller grants `id-token: write` | **No** | **Yes** |
 
 ### API key (default)
 
-Call `review-council.yml`, add `ANTHROPIC_API_KEY` as a secret and pass it. The caller grants `contents: read`, `pull-requests: write` and `issues: write`, and **not** `id-token: write`. The full caller is in [step 2 of Set it up](#2-add-the-caller-workflow), and in [`examples/github-action/review-council.yml`](../examples/github-action/review-council.yml).
+Add `ANTHROPIC_API_KEY` as a secret and pass it. Leave the `anthropic_*` inputs unset. The caller grants `contents: read`, `pull-requests: write` and `issues: write`, and **not** `id-token: write`. The full caller is in [step 2 of Set it up](#2-add-the-caller-workflow), and in [`examples/github-action/review-council.yml`](../examples/github-action/review-council.yml).
 
 ```yaml
     uses: deployhq/review-council/.github/workflows/review-council.yml@main
@@ -169,9 +168,9 @@ Call `review-council.yml`, add `ANTHROPIC_API_KEY` as a secret and pass it. The 
 
 With [Workload Identity Federation](https://platform.claude.com/docs/en/manage-claude/workload-identity-federation), the run trades a short-lived GitHub OIDC token for a short-lived Anthropic token. No Anthropic key is stored in your repo.
 
-**Why it's opt-in.** To fetch a GitHub OIDC token, the job needs `id-token: write`. The job runs an AI with shell access that reads PR text. With `id-token: write`, it could also mint a GitHub OIDC token for **another audience**. That matters if a cloud account (AWS, GCP, Azure, …) trusts OIDC tokens from your repo. **Before you use the federated workflow, check that no cloud trust policy matches this repo's PR runs broadly** (for example `repo:<owner>/<repo>:*`). The run strips the token-request variables (`ACTIONS_ID_TOKEN_REQUEST_URL`, `ACTIONS_ID_TOKEN_REQUEST_TOKEN`) from Claude's environment, but that is only a partial guard.
+**Why it's opt-in.** To fetch a GitHub OIDC token, the job needs `id-token: write`. The job runs an AI with shell access that reads PR text. With `id-token: write`, it could also mint a GitHub OIDC token for **another audience**. That matters if a cloud account (AWS, GCP, Azure, …) trusts OIDC tokens from your repo. **Before you use federation, check that no cloud trust policy matches this repo's PR runs broadly** (for example `repo:<owner>/<repo>:*`). The run strips the token-request variables (`ACTIONS_ID_TOKEN_REQUEST_URL`, `ACTIONS_ID_TOKEN_REQUEST_TOKEN`) from Claude's environment, but that is only a partial guard.
 
-This is also why it is a separate file and not a flag. GitHub checks a called job's permissions even when the job is skipped, so one workflow that could do federation would make every caller grant `id-token: write`. With two files, API-key users never grant it.
+**Who grants `id-token: write`.** The `review` job declares no permissions, so it gets exactly the caller's grant. Only a federation caller grants `id-token: write`; an API-key caller does not, and its run has no way to mint OIDC tokens. (If the job declared `id-token: write` itself, GitHub would make every caller grant it, even API-key callers.) If an API-key caller grants it anyway, the run warns.
 
 **1. Create the rule in the Anthropic Console.** Go to **Settings → Workload identity → Connect workload → GitHub Actions**. You need the admin or owner role. Anthropic's guide: [GitHub Actions provider](https://platform.claude.com/docs/en/manage-claude/wif-providers/github-actions).
 
@@ -183,14 +182,14 @@ This is also why it is a separate file and not a flag. GitHub checks a called jo
   audience: https://api.anthropic.com
   claims:
     repository_owner: "<owner>"
-  condition: claims.job_workflow_ref.startsWith("deployhq/review-council/.github/workflows/review-council-federated.yml@")
+  condition: claims.job_workflow_ref.startsWith("deployhq/review-council/.github/workflows/review-council.yml@")
   ```
 
-  Use `subject_prefix`, not an exact subject. The two triggers produce two subject shapes: `repo:<owner>/<repo>:pull_request` and `repo:<owner>/<repo>:ref:refs/heads/<default branch>`. The `condition` pins the rule to the Review Council federated workflow, so other workflows in your repo can't use it.
+  Use `subject_prefix`, not an exact subject. The two triggers produce two subject shapes: `repo:<owner>/<repo>:pull_request` and `repo:<owner>/<repo>:ref:refs/heads/<default branch>`. The `condition` pins the rule to the Review Council workflow, so other workflows in your repo can't use it.
 - **Scope:** `workspace:inference` is enough, since the run only calls Messages. The default `workspace:developer` also works.
 - **Token lifetime:** set `token_lifetime_seconds: 3600`. The wizard fills in 600. With 3600, only GitHub's own limit applies (below).
 
-**2. Call the federated workflow.** Copy [`examples/github-action/review-council-federated.yml`](../examples/github-action/review-council-federated.yml) to `.github/workflows/review-council.yml` in your repo (instead of the API-key caller, not next to it). It grants `id-token: write` and passes the IDs. They are not secrets, so they go under `with:`. There is no `ANTHROPIC_API_KEY`.
+**2. Turn it on in the caller.** In [`examples/github-action/review-council.yml`](../examples/github-action/review-council.yml), uncomment the lines marked "federation only": `id-token: write` and the `anthropic_*` inputs. Remove the `ANTHROPIC_API_KEY` line. The IDs are not secrets, so they go under `with:`.
 
 ```yaml
 permissions:
@@ -201,7 +200,7 @@ permissions:
 
 jobs:
   review:
-    uses: deployhq/review-council/.github/workflows/review-council-federated.yml@main
+    uses: deployhq/review-council/.github/workflows/review-council.yml@main
     with:
       anthropic_federation_rule_id: fdrl_...
       anthropic_organization_id: 00000000-0000-0000-0000-000000000000
@@ -212,7 +211,7 @@ jobs:
       OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
 ```
 
-The first three IDs are required inputs. The other inputs and optional secrets are the same as in the API-key workflow.
+The first three IDs are required for federation. The other inputs and optional secrets are the same as with an API key.
 
 **How it runs.**
 
@@ -287,7 +286,7 @@ Seat roles, families and egress: see [Custom reviewer seats](../README.md#custom
 
 ## Example setups
 
-Two complete setups for one repo. Both use the API-key caller. To use federation instead, call `review-council-federated.yml`, grant `id-token: write`, and replace `ANTHROPIC_API_KEY` with the three federation inputs (see [Federation (opt-in)](#federation-opt-in)).
+Two complete setups for one repo. Both use an API key. To use federation instead, grant `id-token: write` and replace `ANTHROPIC_API_KEY` with the three federation inputs (see [Federation (opt-in)](#federation-opt-in)).
 
 ### (a) Claude + Codex
 
@@ -367,13 +366,35 @@ jobs:
 
 Kimi is a distinct model family (Moonshot), so with `role: reviewer` its findings go in the main list and it counts toward `min_reviewers`. Its findings are double-checked by a Claude verifier.
 
-## The digest comment
+## What gets posted
+
+### Inline comments
+
+Each reported finding that sits on a line of the PR's diff becomes an inline comment on that line (or range), like a human reviewer's. All of a run's comments go in **one** review. Each comment shows the severity, the confidence badge, who found it, the problem, why it matters and the fix, plus a collapsed **Prompt for AI agents** you can paste into a coding agent.
+
+- **Where it goes.** Each reviewer reports the exact `file:line` (or `file:start-end`) of a finding. A script checks that line against the PR's diff as GitHub reports it. If it fits, the comment goes there; if not (a file the PR didn't change, a line outside the changed hunks), the finding goes in the digest under **Outside the diff**. Nothing is moved to a "nearby" line.
+- **Request changes.** A run with any Critical or Important finding posts its review as **request changes**, once: not again while that request is still active. A later run with none dismisses it. If GitHub refuses (for example, on a PR opened by `github-actions[bot]` itself), the review is posted as a plain comment.
+- **If GitHub rejects the review** (one bad line fails the whole review), every finding goes in the digest instead. Nothing is lost.
+- **At most 50 inline comments** per run; the rest go in the digest.
+
+### Re-runs
+
+A re-run (a new push, or `/review-council` again) is matched to earlier comments by each finding's fingerprint, a stable ID like `src/auth.ts::checkauth::missing-authz`:
+
+- **Already commented** → left alone: not posted again, not edited.
+- **New** → a new inline comment.
+- **No longer reported** → AI reviewers don't mention every problem on every run, so silence is not proof of a fix. Claude re-checks each such comment against the current code. Only the ones it finds **fixed** get a short reply ("Re-checked at `<sha>`: this looks fixed. Resolving.") and their thread resolved. The rest stay open. If Claude finds an old comment describes the same problem as a newly worded finding, the new one isn't posted again.
+- **A degraded run** (a reviewer failed) resolves nothing and dismisses nothing.
+
+Only comments posted by the same identity (`github-actions[bot]`, or your bot) count as earlier comments. A comment by anyone else that copies the hidden markers is ignored.
+
+### The digest comment
 
 One comment per PR. A re-run edits it in place.
 
 It has three sections:
 
-1. **What was found, and by whom.** Findings by severity (Critical, Important, Suggestions), with confidence badges and the reviewers that raised them. A reviewer that failed or was skipped is named here. It never fails silently: if every reviewer fails, a short "review could not run" digest is still posted, with status `degraded` and the failed reviewers named.
+1. **What was found, and by whom.** A table of findings by severity (Critical, Important, Suggestions), with confidence badges and the reviewers that raised them. Under it: how many went inline, and the full text of the findings **outside the diff**. A reviewer that failed or was skipped is named here. It never fails silently: if every reviewer fails, a short "review could not run" digest is still posted, with status `degraded` and the failed reviewers named.
 2. **What the council decided.** What was upheld, refuted or left unverified by the double-check pass.
 3. **What was fixed.** In CI this is one line: `Not triaged — automated CI run.`
 
@@ -431,7 +452,7 @@ PRs from forks are ignored completely. That includes `/review-council` comments 
 
 **What the run reads from the PR.** Because fork PRs are skipped, the PR's code, title, body and diff come from people with write access. PR comments and reviews are different: on a public repo anyone can write them. In CI the run reads only comments and reviews whose author is `OWNER`, `MEMBER` or `COLLABORATOR`, and drops the rest. All PR text, trusted or not, is treated as data to review, never as instructions.
 
-**Job permissions.** `contents: read`, `pull-requests: write`, `issues: write`, plus `id-token: write` with `review-council-federated.yml` only. The checkout does not keep credentials (`persist-credentials: false`). The run can read code and post a comment. It cannot push.
+**Job permissions.** The `review` job gets exactly the caller's grant: `contents: read`, `pull-requests: write`, `issues: write`, plus `id-token: write` with federation only. The checkout does not keep credentials (`persist-credentials: false`). The run can read code, post comments and reviews, resolve its own comment threads and dismiss its own reviews. It cannot push.
 
 **The PR's Claude settings never load.** Claude Code runs with `--setting-sources user`, so the reviewed branch's `.claude/` settings and hooks are never loaded into the session that holds the keys.
 
@@ -466,7 +487,7 @@ That is not an escalation: anyone who can push a branch can already edit any wor
 
 Static-analysis tools run on the runner. `trufflehog` checks found credentials against their provider; drop it from `static_analysis.tools` to stop that.
 
-**Federation (opt-in).** With `review-council-federated.yml` there is no long-lived Anthropic key in your repo, and a leaked token lasts minutes. But the job has `id-token: write`, so it can mint GitHub OIDC tokens for your repo, for any audience. Make sure no cloud trust policy (AWS, GCP, Azure, …) matches this repo's PR runs broadly, for example `repo:<owner>/<repo>:*`. The run strips the token-request variables (`ACTIONS_ID_TOKEN_REQUEST_URL`, `ACTIONS_ID_TOKEN_REQUEST_TOKEN`) from Claude's environment, but that is only a partial guard. With `review-council.yml` (API key) the job has no `id-token` permission, so this does not apply.
+**Federation (opt-in).** With federation there is no long-lived Anthropic key in your repo, and a leaked token lasts minutes. But the job has `id-token: write`, so it can mint GitHub OIDC tokens for your repo, for any audience. Make sure no cloud trust policy (AWS, GCP, Azure, …) matches this repo's PR runs broadly, for example `repo:<owner>/<repo>:*`. The run strips the token-request variables (`ACTIONS_ID_TOKEN_REQUEST_URL`, `ACTIONS_ID_TOKEN_REQUEST_TOKEN`) from Claude's environment, but that is only a partial guard. With an API key the caller does not grant `id-token: write`, so this does not apply.
 
 **Residual risk.** The orchestrator is Claude Code with a Bash tool, and the API keys are in its environment (with federation, the Anthropic credential is a token that expires in minutes). It reads the PR's code, title, body and diff, which could contain instructions planted to steer it. Those come from people with write access. Comments and reviews from anyone else are dropped before the run reads them. So a malicious PR author with write access could try to make the run leak the keys. They could already do that without Review Council, by editing a workflow in their branch to print the secrets. Use dedicated keys with spend limits, rotate them if you suspect a leak, and don't use the workflow on repos where people you don't trust have write access.
 
@@ -480,21 +501,26 @@ For a bot user, store its fine-grained token as a repo or org secret. For a GitH
 
 ## Troubleshooting
 
-**The run fails at once with a permissions error, or never posts.** Check the `permissions:` block in your caller workflow. It needs `contents: read`, `pull-requests: write` and `issues: write`, plus `id-token: write` if you call `review-council-federated.yml`.
+**The run fails at once with a permissions error, or never posts.** Check the `permissions:` block in your caller workflow. It needs `contents: read`, `pull-requests: write` and `issues: write`, plus `id-token: write` with federation. Grant no more: the `review` job gets exactly this grant.
 
-**`The nested job 'review' is requesting 'id-token: write', but is only allowed 'none'`** (or similar). You called `review-council-federated.yml` without granting `id-token: write`. Add it to the caller's `permissions:` block, or switch to `review-council.yml` if you meant to use an API key.
+**`No GitHub OIDC token available`.** You set the federation inputs but the caller does not grant `id-token: write`. Add it to the caller's `permissions:` block, or drop the `anthropic_*` inputs if you meant to use an API key.
 
 **`/review-council` does nothing.** The caller workflow must be on your default branch. The commenter needs write access. The PR must be open, not a draft, and not from a fork. The 👀 reaction appears only once these checks pass.
 
-**The workflow fails to start with a missing secret or input.** `review-council.yml` requires the `ANTHROPIC_API_KEY` secret. `review-council-federated.yml` requires `anthropic_federation_rule_id`, `anthropic_organization_id` and `anthropic_service_account_id`, and does not take `ANTHROPIC_API_KEY`. The choice between the two is which file you call.
+**The run fails at the `Check Claude auth` step.** The error says what is wrong:
+
+- `No Claude credentials`: pass the `ANTHROPIC_API_KEY` secret, or set the federation inputs.
+- `Both the ANTHROPIC_API_KEY secret and anthropic_* federation inputs are set`: use one. Remove the secret line for federation, or the `anthropic_*` inputs for an API key.
+- `Federation needs anthropic_organization_id and anthropic_service_account_id`: federation needs all three IDs.
+- `Federation IDs are set but anthropic_federation_rule_id is empty`: set the rule ID too.
 
 **Federation fails with `Authentication failed`.** A 401 always says just that. The reason is in the Anthropic Console, on the rule's authentication-history tab:
 
 - `match_subject_prefix`: the rule's `subject_prefix` doesn't match. Use `repo:<owner>/<repo>:*`, not an exact subject.
 - `jti_reused`: a GitHub token was exchanged twice.
-- Also check: the caller grants `id-token: write`, the audience is `https://api.anthropic.com`, the `condition` names `deployhq/review-council/.github/workflows/review-council-federated.yml@`, and `anthropic_workspace_id` is set if the rule covers more than one workspace.
+- Also check: the caller grants `id-token: write`, the audience is `https://api.anthropic.com`, the `condition` names `deployhq/review-council/.github/workflows/review-council.yml@`, and `anthropic_workspace_id` is set if the rule covers more than one workspace.
 
-**A missing or wrong secret.** Claude needs `ANTHROPIC_API_KEY` (or federation, with the federated workflow); without it, the run fails. Any other missing key just drops that reviewer. A bad key shows up in the digest: the reviewer is listed in `degraded` and the status is `degraded`.
+**A missing or wrong secret.** Claude needs `ANTHROPIC_API_KEY` (or federation); without it, the run fails. Any other missing key just drops that reviewer. A bad key shows up in the digest: the reviewer is listed in `degraded` and the status is `degraded`.
 
 **Codex shows as degraded.** Check `OPENAI_API_KEY` in your secrets. The workflow passes it to Codex as `CODEX_API_KEY`; Codex does not read `OPENAI_API_KEY` in non-interactive mode. A bad key fails in seconds, and the review carries on without Codex.
 

@@ -368,13 +368,12 @@ review-council/
 │   ├── plugin.json          # Plugin metadata
 │   └── marketplace.json     # Marketplace listing
 ├── .github/workflows/
-│   ├── review-council.yml   # Reusable workflow: run the council on PRs in GitHub Actions (API key)
-│   ├── review-council-federated.yml  # Same, with Anthropic federation (opt-in; needs id-token: write)
+│   ├── review-council.yml   # Reusable workflow: run the council on PRs in GitHub Actions (API key or federation)
 │   └── unit-tests.yml       # bats unit tests
 ├── docs/
 │   └── github-action.md     # GitHub Actions guide
 ├── examples/
-│   └── github-action/       # Copy-paste caller workflows (API key, federated) + example config.yml for CI
+│   └── github-action/       # Copy-paste caller workflow (API key; federation as commented lines) + example config.yml for CI
 ├── skills/
 │   ├── run/SKILL.md         # Main command (orchestrator)
 │   ├── setup/SKILL.md       # Provider status checker
@@ -466,7 +465,11 @@ sequenceDiagram
 
 ## Posting to PRs
 
-By default Review Council is **report-only**. You can opt in to have it post a single **review-digest comment** to the pull request — a summary of the AI's run, not an inline line-by-line review. The comment has three sections: **what was found (and by whom)**, **what the council decided**, and **what was fixed** (your triage). Re-running updates the *same* comment in place, so there is no spam.
+By default Review Council is **report-only**. You can opt in to have it post its findings to the pull request:
+
+- **Inline comments.** Each finding on a line of the PR's diff becomes an inline review comment on that line, all in one review. The review **requests changes** when there is a Critical or Important finding, and is a plain comment otherwise.
+- **One digest comment.** A summary with three sections: **what was found (and by whom)**, **what the council decided**, and **what was fixed** (your triage). Findings that aren't on the diff are written out here in full. Re-running updates the *same* comment in place, so there is no spam.
+- **Re-runs.** A finding already commented on is left alone and new ones are added. An earlier comment the run no longer reports is re-checked by Claude against the current code, and resolved only if it looks fixed.
 
 Turn it on in `.review-council/config.yml` (or `config.local.yml`):
 
@@ -476,15 +479,15 @@ pr_comments:
   bot_token_env: RC_PR_BOT_TOKEN # optional; see "Identity" below
 ```
 
-**Locally, it never posts on its own.** After the report you triage each finding (fix / defer / won't-fix), review the composed digest, and explicitly confirm before anything is posted. If the branch has no open PR, it offers to open a **draft** so the digest has a home. Nothing is posted if you decline.
+**Locally, it never posts on its own.** After the report you triage each finding (fix / defer / won't-fix), review the composed digest and what will be resolved, and explicitly confirm before anything is posted. If the branch has no open PR, it offers to open a **draft** so the digest has a home. Nothing is posted if you decline.
 
 **In CI it posts automatically.** The one exception is an unattended run (`RC_CI=true`, set by the [GitHub Actions workflow](#github-actions)): with posting enabled, it posts without asking, skips the triage walk (the "what was fixed" section reads `Not triaged — automated CI run.`), and never opens a draft PR.
 
-**State block and footer.** The comment starts with a hidden `<!-- rc:state {...} -->` line (the reviewed commit SHA, `clean` / `findings` / `degraded`, and counts per severity) that tools and agents can parse, and ends with a footer: `Review done with Review Council · <who posted>`. Likely secrets in the body are replaced with `[REDACTED]` before posting. Details: [docs/github-action.md](docs/github-action.md#the-digest-comment).
+**State block and footer.** The comment starts with a hidden `<!-- rc:state {...} -->` line (the reviewed commit SHA, `clean` / `findings` / `degraded`, and counts per severity) that tools and agents can parse, and ends with a footer: `Review done with Review Council · <who posted>`. Likely secrets in the body are replaced with `[REDACTED]` before posting. Details: [docs/github-action.md](docs/github-action.md#what-gets-posted).
 
 **Identity.** With no token configured, the comment posts under **your own authenticated `gh` account**; the footer marks it as automated (`posted by @you (not a personal comment)`). In GitHub Actions it posts as `github-actions[bot]`, or as your own App or bot via the workflow's `PR_BOT_TOKEN` secret. If a bot token's login can't be read, the footer drops the identity. To post under a distinct identity instead, put a token in the env var named by `bot_token_env` (default `RC_PR_BOT_TOKEN`) — a bot account's fine-grained PAT or a GitHub App installation token; the comment posts as that bot. The token only ever comes from your environment, never from committed config, and the target PR is always taken from your local git — a repo you review can't redirect where comments land.
 
-This reverses the report-only posture behind an explicit opt-in; the digest (findings + your decisions) is sent to GitHub when you post.
+This reverses the report-only posture behind an explicit opt-in; the findings and your decisions are sent to GitHub when you post.
 
 ## Custom reviewer seats
 
@@ -602,7 +605,7 @@ None met our go bar (full coverage in under ~10 min for under ~$2, with a verifi
 Run the council on your PRs with no human in the loop. You call a **reusable workflow** from your repo; it runs headless Claude Code with the plugin loaded and posts one review-digest comment on the PR as `github-actions[bot]` (or your own bot).
 
 - **When:** a PR is marked ready for review, or someone with write access comments `/review-council`. Drafts and PRs from forks are ignored.
-- **Claude auth:** two entry workflows. `review-council.yml` (default) takes the `ANTHROPIC_API_KEY` secret and needs no `id-token` permission. `review-council-federated.yml` (opt-in) uses Anthropic Workload Identity Federation (no stored key, short-lived tokens); only this one requests `id-token: write`, so check your cloud OIDC trust policies first (see the guide).
+- **Claude auth:** one workflow, two modes. By default it takes the `ANTHROPIC_API_KEY` secret and the caller grants no `id-token` permission. Opt-in, set the `anthropic_*` federation inputs to use Anthropic Workload Identity Federation (no stored key, short-lived tokens); only then does the caller grant `id-token: write`, so check your cloud OIDC trust policies first (see the guide). The review job gets exactly the caller's grant.
 - **Secrets:** `ANTHROPIC_API_KEY` (API-key workflow only); `OPENAI_API_KEY` for Codex, `PERPLEXITY_API_KEY`, `OPENROUTER_API_KEY` for custom seats, `PR_BOT_TOKEN` to post as your own App or bot (optional).
 - **Config:** the committed `.review-council/config.yml` (and `learnings.md`) from the PR's branch, with workflow env on top. Custom seats run only when the workflow approves them by slot name (`approved_seats`); the PR's config still defines the seat.
 - **Trust:** the boundary is write access. Fork PRs are skipped, and only comments and reviews from owners, members and collaborators are read. The orchestrator holds your keys, so use dedicated, spend-limited ones.

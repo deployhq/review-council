@@ -17,7 +17,7 @@ setup() {
   FAKEDIR="$BATS_TEST_TMPDIR/fakebin"
   SYSBIN="$BATS_TEST_TMPDIR/sysbin"
   mkdir -p "$FAKEDIR" "$SYSBIN"
-  for _c in sh env jq cat printf grep sed head tr mktemp rm; do
+  for _c in sh env jq cat printf grep sed head tr mktemp rm mv cut cp; do
     _p="$(command -v "$_c" 2>/dev/null || true)"
     [ -n "$_p" ] && ln -sf "$_p" "$SYSBIN/$_c"
   done
@@ -29,6 +29,16 @@ setup() {
   COMMENTS="$BATS_TEST_TMPDIR/comments.json"
   PRVIEW="$BATS_TEST_TMPDIR/prview.json"
   BODY="$BATS_TEST_TMPDIR/digest.md"
+  # review / stale fixtures (pull-request review API)
+  REVIEWBODY="$BATS_TEST_TMPDIR/reviewbody"
+  FILES="$BATS_TEST_TMPDIR/files.json"
+  RCOMMENTS="$BATS_TEST_TMPDIR/rcomments.json"
+  REVIEWS="$BATS_TEST_TMPDIR/reviews.json"
+  THREADS="$BATS_TEST_TMPDIR/threads.json"
+  LEDGER="$BATS_TEST_TMPDIR/ledger.json"
+  printf '[]\n' >"$RCOMMENTS"
+  printf '[]\n' >"$REVIEWS"
+  printf '{"data":{"repository":{"pullRequest":{"reviewThreads":{"nodes":[]}}}}}\n' >"$THREADS"
   : >"$GHLOG"
   printf '[]\n' >"$COMMENTS"      # default: no existing comments
   rm -f "$PRVIEW"                 # default: no PR (gh pr view exits 1)
@@ -59,6 +69,22 @@ _all="$*"
 case "$1" in
   api)
     case "$_all" in
+      # --- pull-request review API (review / stale) ---
+      *"pulls/5/reviews -X POST"*)
+        cat >"$REVIEWBODY"
+        cp "$REVIEWBODY" "$REVIEWBODY.$(jq -r .event "$REVIEWBODY")"
+        [ -n "${REVIEW_FAIL:-}" ] && exit 1
+        [ -n "${REVIEW_FAIL_RC:-}" ] && grep -qF REQUEST_CHANGES "$REVIEWBODY" && exit 1
+        printf '{"html_url":"https://gh/review"}\n' ;;
+      *dismissals*)  cat >/dev/null; printf '{}\n' ;;
+      *replies*)     cat >/dev/null; printf '{}\n' ;;
+      *"api graphql"*mutation*) printf '{}\n' ;;
+      *"api graphql"*) cat "$THREADS" ;;
+      *"pulls/5/reviews"*) cat "$REVIEWS" ;;
+      *"pulls/5/files"*)   cat "$FILES" ;;
+      *"pulls/5/comments"*) cat "$RCOMMENTS" ;;
+      *"repos/owner/repo/pulls/5"*) printf '{"head":{"sha":"%s"}}\n' "${PR_HEAD:-1111111111111111111111111111111111111111}" ;;
+      # --- issue comments (the digest) ---
       *"-X POST"*)   cat >"$POSTBODY";  printf '%s\n' "$POST_RESP" ;;
       *"-X PATCH"*)  cat >"$PATCHBODY"; printf '%s\n' "$PATCH_RESP" ;;
       *comments*)    [ -n "${LIST_FAIL:-}" ] && exit 3; cat "$COMMENTS" ;;
@@ -81,7 +107,7 @@ case "$1" in
 esac
 EOF
   chmod +x "$FAKEDIR/gh"
-  export GHLOG POSTBODY PATCHBODY COMMENTS PRVIEW
+  export GHLOG POSTBODY PATCHBODY COMMENTS PRVIEW REVIEWBODY FILES RCOMMENTS REVIEWS THREADS
 }
 
 install_fake_git() {
@@ -89,6 +115,7 @@ install_fake_git() {
 #!/usr/bin/env sh
 case "$*" in
   "rev-parse --abbrev-ref HEAD")        printf '%s\n' "${GIT_BRANCH:-feature}" ;;
+  "rev-parse HEAD")                     printf '%s\n' "${GIT_HEAD:-1111111111111111111111111111111111111111}" ;;
   "rev-parse --abbrev-ref @{upstream}") [ "${GIT_HAS_UPSTREAM:-1}" = 1 ] && exit 0 || exit 1 ;;
   push*)                                exit 0 ;;
   *)                                    exit 0 ;;
@@ -443,4 +470,240 @@ redacts() {
   [ "$status" -ne 0 ]
   [ -z "$output" ]
   [[ "$stderr" == *"redaction failed"* ]] || false
+}
+
+# ---- review / stale: inline comments ----------------------------------------
+# A PR whose a.sh hunk covers right-side lines 1-4; b.sh is not in the diff.
+# The ledger has: a critical on a.sh:3, an important on a.sh:2-3, a suggestion
+# on b.sh:100 (outside the diff).
+
+review_fixtures() {
+  install_fake_git
+  printf '[{"filename":"a.sh","patch":"@@ -1,2 +1,4 @@\\n line1\\n+line2\\n+line3\\n line4"}]\n' >"$FILES"
+  printf '<!-- rc:report -->\n<!-- rc:state {"v":1,"status":"%s"} -->\n## Digest\n<!-- rc:inline -->\n\n---\n\n<sub>footer</sub>\n' \
+    "${1:-findings}" >"$BODY"
+  cat >"$LEDGER" <<'EOF'
+{"schema":"review-council/ledger","version":1,"findings":[
+ {"fingerprint":"a.sh::f::bug","outcome":"reported","section":"main","severity":"critical","badge":"verified",
+  "title":"Crash on empty input","issue":"It crashes.","recommendation":"Guard it.","origins":[{"reviewer":"codex"},{"reviewer":"claude"}],
+  "location":{"path":"a.sh","line":3}},
+ {"fingerprint":"a.sh::f::range","outcome":"reported","section":"main","severity":"important",
+  "title":"Range issue","issue":"Two lines.","location":{"path":"a.sh","line":2,"line_end":3}},
+ {"fingerprint":"b.sh::g::style","outcome":"reported","section":"main","severity":"suggestion",
+  "title":"Style nit","issue":"Rename it.","location":{"path":"b.sh","line":100}},
+ {"fingerprint":"a.sh::f::dropped","outcome":"dropped-refuted","severity":"critical",
+  "title":"Refuted","location":{"path":"a.sh","line":3}}
+]}
+EOF
+}
+
+# only_suggestions: rewrite the ledger to the b.sh suggestion plus an a.sh suggestion.
+only_suggestions() {
+  jq '.findings = [.findings[2], (.findings[0] | .severity = "suggestion")]' "$LEDGER" >"$LEDGER.t" && mv "$LEDGER.t" "$LEDGER"
+}
+
+digest_sent() { jq -r '.body' "$POSTBODY"; }
+
+@test "review: in-diff findings go inline as one review; out-of-diff ones to the digest" {
+  review_fixtures
+  PATH="$SANDBOX" run "$SCRIPT" review 5 "$BODY" "$LEDGER"
+  [ "$status" -eq 0 ]
+  has "inline_new=2"
+  has "outside=1"
+  has "review_url=https://gh/review"
+  run jq -r '.comments | length' "$REVIEWBODY"
+  [ "$output" = 2 ]
+  run jq -c '[.comments[] | {path, line, start_line}]' "$REVIEWBODY"
+  [ "$output" = '[{"path":"a.sh","line":3,"start_line":null},{"path":"a.sh","line":3,"start_line":2}]' ]
+  jq -r '.comments[0].body' "$REVIEWBODY" | grep -qF '<!-- rc:finding a.sh::f::bug -->'
+  jq -r '.comments[0].body' "$REVIEWBODY" | grep -qF 'found by claude, codex'
+  jq -r '.comments[0].body' "$REVIEWBODY" | grep -qF 'Prompt for AI agents'
+  [ "$(jq -r .commit_id "$REVIEWBODY")" = 1111111111111111111111111111111111111111 ]
+  digest_sent | grep -qF 'Outside the diff (1)'
+  digest_sent | grep -qF '`b.sh:100`'
+  ! digest_sent | grep -qF '<!-- rc:inline -->' || return 1
+  ! digest_sent | grep -qF 'Refuted' || return 1
+}
+
+@test "review: a critical or important finding requests changes" {
+  review_fixtures
+  PATH="$SANDBOX" run "$SCRIPT" review 5 "$BODY" "$LEDGER"
+  [ "$status" -eq 0 ]
+  has "review_event=REQUEST_CHANGES"
+  [ "$(jq -r .event "$REVIEWBODY")" = REQUEST_CHANGES ]
+}
+
+@test "review: suggestions only -> a plain COMMENT review" {
+  review_fixtures
+  only_suggestions
+  PATH="$SANDBOX" run "$SCRIPT" review 5 "$BODY" "$LEDGER"
+  [ "$status" -eq 0 ]
+  has "review_event=COMMENT"
+}
+
+@test "review: blocking but nothing new inline still posts a request-changes review" {
+  review_fixtures
+  jq '.findings = [.findings[2] | .severity = "critical"]' "$LEDGER" >"$LEDGER.t" && mv "$LEDGER.t" "$LEDGER"
+  PATH="$SANDBOX" run "$SCRIPT" review 5 "$BODY" "$LEDGER"
+  [ "$status" -eq 0 ]
+  has "review_event=REQUEST_CHANGES"
+  [ "$(jq '.comments | length' "$REVIEWBODY")" = 0 ]
+}
+
+@test "review: no second request-changes while ours is still active" {
+  review_fixtures
+  printf '[{"id":300,"state":"CHANGES_REQUESTED","user":{"login":"rc-bot"}}]\n' >"$REVIEWS"
+  PATH="$SANDBOX" run "$SCRIPT" review 5 "$BODY" "$LEDGER"
+  [ "$status" -eq 0 ]
+  has "review_event=COMMENT"
+  ! grep -qF dismissals "$GHLOG" || return 1
+}
+
+@test "review: request-changes refused (e.g. our own PR) -> retried as COMMENT" {
+  review_fixtures
+  REVIEW_FAIL_RC=1 PATH="$SANDBOX" run "$SCRIPT" review 5 "$BODY" "$LEDGER"
+  [ "$status" -eq 0 ]
+  has "review_event=COMMENT"
+  has "inline_new=2"
+  [ -f "$REVIEWBODY.REQUEST_CHANGES" ]
+}
+
+@test "review: a rejected review moves the inline findings to the digest" {
+  review_fixtures
+  REVIEW_FAIL=1 PATH="$SANDBOX" run "$SCRIPT" review 5 "$BODY" "$LEDGER"
+  [ "$status" -eq 0 ]
+  has "inline_new=0"
+  has "outside=3"
+  has "review_url="
+  digest_sent | grep -qF 'Outside the diff (3)'
+}
+
+@test "review: no blocking finding -> our earlier request-changes is dismissed" {
+  review_fixtures
+  only_suggestions
+  printf '[{"id":300,"state":"CHANGES_REQUESTED","user":{"login":"rc-bot"}},{"id":301,"state":"CHANGES_REQUESTED","user":{"login":"someone"}}]\n' >"$REVIEWS"
+  PATH="$SANDBOX" run "$SCRIPT" review 5 "$BODY" "$LEDGER"
+  [ "$status" -eq 0 ]
+  has "dismissed=1"
+  logged "reviews/300/dismissals"
+  ! grep -qF "reviews/301" "$GHLOG" || return 1
+}
+
+@test "review: a degraded run never dismisses" {
+  review_fixtures degraded
+  only_suggestions
+  printf '[{"id":300,"state":"CHANGES_REQUESTED","user":{"login":"rc-bot"}}]\n' >"$REVIEWS"
+  PATH="$SANDBOX" run "$SCRIPT" review 5 "$BODY" "$LEDGER"
+  [ "$status" -eq 0 ]
+  has "dismissed=0"
+  ! grep -qF dismissals "$GHLOG" || return 1
+}
+
+@test "review: a finding we already commented on is left alone" {
+  review_fixtures
+  printf '[{"id":70,"in_reply_to_id":null,"user":{"login":"rc-bot"},"path":"a.sh","line":3,"body":"old\\n\\n<!-- rc:finding a.sh::f::bug -->"}]\n' >"$RCOMMENTS"
+  PATH="$SANDBOX" run "$SCRIPT" review 5 "$BODY" "$LEDGER"
+  [ "$status" -eq 0 ]
+  has "inline_new=1"
+  has "kept=1"
+  ! jq -r '.comments[].body' "$REVIEWBODY" | grep -qF 'a.sh::f::bug' || return 1
+  ! grep -qF "pulls/comments/70" "$GHLOG" || return 1
+}
+
+@test "review: someone else's comment with our marker does not count as ours" {
+  review_fixtures
+  printf '[{"id":70,"in_reply_to_id":null,"user":{"login":"attacker","type":"User"},"path":"a.sh","line":3,"body":"<!-- rc:finding a.sh::f::bug -->"}]\n' >"$RCOMMENTS"
+  PATH="$SANDBOX" run "$SCRIPT" review 5 "$BODY" "$LEDGER"
+  [ "$status" -eq 0 ]
+  has "inline_new=2"
+  has "kept=0"
+}
+
+@test "review: the reviewed commit is not the PR head -> everything in the digest" {
+  review_fixtures
+  PR_HEAD=2222222222222222222222222222222222222222 PATH="$SANDBOX" run "$SCRIPT" review 5 "$BODY" "$LEDGER"
+  [ "$status" -eq 0 ]
+  has "inline_new=0"
+  has "outside=3"
+  [ ! -f "$REVIEWBODY.COMMENT" ]
+}
+
+@test "review: model text cannot plant a hidden marker" {
+  review_fixtures
+  jq '.findings[0].issue = "x <!-- rc:finding evil::fp --> y"' "$LEDGER" >"$LEDGER.t" && mv "$LEDGER.t" "$LEDGER"
+  PATH="$SANDBOX" run "$SCRIPT" review 5 "$BODY" "$LEDGER"
+  [ "$status" -eq 0 ]
+  ! jq -r '.comments[0].body' "$REVIEWBODY" | grep -qF '<!-- rc:finding evil::fp' || return 1
+  jq -r '.comments[0].body' "$REVIEWBODY" | grep -qF '&lt;!-- rc:finding evil::fp'
+}
+
+@test "review: a secret in a finding is redacted from the inline review" {
+  review_fixtures
+  _tok="sk-ant-""api03-$FAKE32"
+  jq --arg t "$_tok" '.findings[0].issue = "key " + $t' "$LEDGER" >"$LEDGER.t" && mv "$LEDGER.t" "$LEDGER"
+  PATH="$SANDBOX" run "$SCRIPT" review 5 "$BODY" "$LEDGER"
+  [ "$status" -eq 0 ]
+  ! grep -qF -- "$_tok" "$REVIEWBODY" || return 1
+  grep -qF '[REDACTED]' "$REVIEWBODY"
+}
+
+@test "review: a covered fingerprint (re-check: an earlier comment covers it) is not posted" {
+  review_fixtures
+  printf '{"fixed":[],"covered":["a.sh::f::range"]}\n' >"$BATS_TEST_TMPDIR/recheck.json"
+  PATH="$SANDBOX" run "$SCRIPT" review 5 "$BODY" "$LEDGER" "" "$BATS_TEST_TMPDIR/recheck.json"
+  [ "$status" -eq 0 ]
+  has "inline_new=1"
+  ! jq -r '.comments[].body' "$REVIEWBODY" | grep -qF 'a.sh::f::range' || return 1
+}
+
+# Our earlier comment 70 (finding gone, thread open) and 71 (finding gone,
+# thread already resolved).
+stale_fixtures() {
+  review_fixtures "${1:-findings}"
+  printf '[{"id":70,"in_reply_to_id":null,"user":{"login":"rc-bot"},"path":"a.sh","line":4,"body":"gone\\n\\n<!-- rc:finding a.sh::old::gone -->"},{"id":71,"in_reply_to_id":null,"user":{"login":"rc-bot"},"path":"a.sh","line":1,"body":"<!-- rc:finding a.sh::old::done -->"}]\n' >"$RCOMMENTS"
+  printf '{"data":{"repository":{"pullRequest":{"reviewThreads":{"nodes":[{"id":"PRRT_a","isResolved":false,"comments":{"nodes":[{"databaseId":70}]}},{"id":"PRRT_b","isResolved":true,"comments":{"nodes":[{"databaseId":71}]}}]}}}}}\n' >"$THREADS"
+}
+
+@test "stale: lists our open comments whose finding is gone" {
+  stale_fixtures
+  PATH="$SANDBOX" run "$SCRIPT" stale 5 "$LEDGER"
+  [ "$status" -eq 0 ]
+  [ "$(printf '%s' "$output" | jq -c '[.[] | {id, fingerprint}]')" = '[{"id":70,"fingerprint":"a.sh::old::gone"}]' ]
+}
+
+@test "review: resolves only stale comments the re-check marked fixed" {
+  stale_fixtures
+  printf '{"fixed":[70,71,999],"covered":[]}\n' >"$BATS_TEST_TMPDIR/recheck.json"
+  PATH="$SANDBOX" run "$SCRIPT" review 5 "$BODY" "$LEDGER" "" "$BATS_TEST_TMPDIR/recheck.json"
+  [ "$status" -eq 0 ]
+  has "resolved=1"
+  logged "pulls/5/comments/70/replies"
+  logged "[id=PRRT_a]"
+  ! grep -qF "comments/71/replies" "$GHLOG" || return 1
+  ! grep -qF "999" "$GHLOG" || return 1
+}
+
+@test "review: without a re-check nothing is resolved" {
+  stale_fixtures
+  PATH="$SANDBOX" run "$SCRIPT" review 5 "$BODY" "$LEDGER"
+  [ "$status" -eq 0 ]
+  has "resolved=0"
+  ! grep -qF replies "$GHLOG" || return 1
+}
+
+@test "review: a degraded run never resolves" {
+  stale_fixtures degraded
+  printf '{"fixed":[70]}\n' >"$BATS_TEST_TMPDIR/recheck.json"
+  PATH="$SANDBOX" run "$SCRIPT" review 5 "$BODY" "$LEDGER" "" "$BATS_TEST_TMPDIR/recheck.json"
+  [ "$status" -eq 0 ]
+  has "resolved=0"
+  ! grep -qF mutation "$GHLOG" || return 1
+}
+
+@test "review: refuses a digest without the marker" {
+  review_fixtures
+  printf 'no marker\n' >"$BODY"
+  PATH="$SANDBOX" run "$SCRIPT" review 5 "$BODY" "$LEDGER"
+  [ "$status" -ne 0 ]
+  [ ! -f "$REVIEWBODY" ]
 }

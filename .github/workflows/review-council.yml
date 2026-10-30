@@ -1,19 +1,29 @@
 name: Review Council
 
 # Reusable workflow: run a Review Council review of a pull request, unattended,
-# and post (or update) the single review-digest comment on it. Claude
-# authenticates with the ANTHROPIC_API_KEY secret.
+# and post (or update) the single review-digest comment on it.
 #
-# To authenticate Claude with Anthropic Workload Identity Federation instead
-# (no stored key), call review-council-federated.yml. The two workflows share
-# their steps through the composite actions in .github/actions/ (gate, review);
-# only this one never needs `id-token: write`.
+# Claude authenticates in one of two ways:
+#   - API key (default): pass the ANTHROPIC_API_KEY secret.
+#   - Anthropic Workload Identity Federation (opt-in, no stored key): set
+#     anthropic_federation_rule_id (plus the organization and service account
+#     IDs) and grant `id-token: write` in the caller. The job mints GitHub OIDC
+#     tokens and Claude Code trades them for short-lived Anthropic tokens.
+# The mode is federation when anthropic_federation_rule_id is set, else
+# api_key. A mixed or incomplete setup fails early in run-review.sh.
 #
 # Call it from a workflow in your repo that triggers on `pull_request` and/or
 # `issue_comment` (see examples/github-action/review-council.yml and
-# docs/github-action.md). A called workflow can never exceed its caller's
-# grant, so the caller must grant:
+# docs/github-action.md). The caller must grant:
 #   contents: read, pull-requests: write, issues: write
+#   + id-token: write  (federation only; API-key callers must NOT grant it)
+#
+# Permissions: the `review` job declares no `permissions:` and this file has
+# no workflow-level grant, so the review job runs with exactly what the caller
+# grants. Callers must therefore grant the minimum above and nothing more.
+# (A job that declared `id-token: write` here would force every caller to
+# grant it, even API-key callers, since GitHub validates skipped jobs too.)
+# The `gate` job keeps its own narrow grant.
 #
 # Security model, in short:
 #   - Fork PRs are skipped (secrets would be exposed to untrusted code paths).
@@ -26,7 +36,9 @@ name: Review Council
 #     runs after the gate passes, takes the per-PR group with cancel-in-progress
 #     — so a comment from a user without write access cannot cancel a review.
 #   - The reviewed repo is checked out without persisted credentials; the
-#     token used to post is GITHUB_TOKEN, scoped by `permissions:`.
+#     token used to post is GITHUB_TOKEN, scoped by the caller's grant.
+#   - In federation mode the OIDC request variables are stripped from Claude's
+#     environment; only the token refresh loop in the review action holds them.
 #   - The composite actions are loaded from deployhq/review-council at
 #     `plugin_ref`, the same ref as the plugin itself.
 on:
@@ -56,10 +68,28 @@ on:
         description: Run the static-analysis step (Step 2.5) and install its tools (RC_STATIC_ANALYSIS).
         type: boolean
         default: true
+      # Workload Identity Federation (opt-in). These IDs are not secrets.
+      # Setting anthropic_federation_rule_id switches Claude auth to federation.
+      anthropic_federation_rule_id:
+        description: Federation rule ID (fdrl_...). Set it to authenticate Claude with federation instead of ANTHROPIC_API_KEY; the caller must then grant id-token write.
+        type: string
+        default: ''
+      anthropic_organization_id:
+        description: Anthropic organization ID (UUID). Required with federation.
+        type: string
+        default: ''
+      anthropic_service_account_id:
+        description: Service account ID (svac_...) the federation rule targets. Required with federation.
+        type: string
+        default: ''
+      anthropic_workspace_id:
+        description: Optional workspace ID (wrkspc_...); only needed when the federation rule covers more than one workspace.
+        type: string
+        default: ''
     secrets:
       ANTHROPIC_API_KEY:
-        description: Anthropic API key for Claude.
-        required: true
+        description: Anthropic API key for Claude. Required unless anthropic_federation_rule_id is set.
+        required: false
       OPENAI_API_KEY:
         description: Optional. Enables the Codex reviewer (exported to Codex as CODEX_API_KEY).
         required: false
@@ -73,10 +103,8 @@ on:
         description: Optional. A token (e.g. a GitHub App installation token minted in the caller) used to post the digest as that App or bot instead of github-actions[bot].
         required: false
 
-# No workflow-level grant: each job declares the minimum it needs. The union
-# (contents: read, pull-requests: write, issues: write) is what the caller
-# must grant.
-permissions: {}
+# Deliberately no workflow-level `permissions:`: the review job inherits the
+# caller's grant (see the header). The gate job sets its own below.
 
 jobs:
   gate:
@@ -131,10 +159,9 @@ jobs:
     # Backstop only: run-review.sh enforces the gate's per-run timeout itself
     # (a step inside a composite action can't set timeout-minutes).
     timeout-minutes: 120
-    permissions:
-      contents: read
-      pull-requests: write  # post/update the review digest
-      issues: write         # the digest is an issue comment on the PR
+    # Deliberately NO `permissions:` key: this job gets exactly the caller's
+    # grant (contents: read, pull-requests: write, issues: write, plus
+    # id-token: write for federation only). See the header.
     # Taken only after the gate passed, so only an authorised trigger can
     # cancel (supersede) a review in progress for the same PR.
     concurrency:
@@ -163,7 +190,7 @@ jobs:
       - name: Review Council
         uses: ./rc-plugin/.github/actions/review
         with:
-          auth_mode: api_key
+          auth_mode: ${{ inputs.anthropic_federation_rule_id != '' && 'federation' || 'api_key' }}
           pr_number: ${{ needs.gate.outputs.pr_number }}
           timeout_minutes: ${{ needs.gate.outputs.timeout_minutes }}
           approved_seats: ${{ inputs.approved_seats }}
@@ -176,3 +203,7 @@ jobs:
           openrouter_api_key: ${{ secrets.OPENROUTER_API_KEY }}
           perplexity_api_key: ${{ secrets.PERPLEXITY_API_KEY }}
           pr_bot_token: ${{ secrets.PR_BOT_TOKEN }}
+          anthropic_federation_rule_id: ${{ inputs.anthropic_federation_rule_id }}
+          anthropic_organization_id: ${{ inputs.anthropic_organization_id }}
+          anthropic_service_account_id: ${{ inputs.anthropic_service_account_id }}
+          anthropic_workspace_id: ${{ inputs.anthropic_workspace_id }}
