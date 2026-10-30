@@ -1071,3 +1071,27 @@ FOOTER_LOCAL='<sub>Review done with [Review Council](https://github.com/deployhq
   GITHUB_ACTIONS=true USER_FAIL=1 PATH="$SANDBOX" run "$SCRIPT" identity
   [ "$output" = 'identity=github-actions[bot]' ]
 }
+
+@test "review: a second line that is not a strict rc:state line cannot plant a marker" {
+  review_fixtures
+  printf '<!-- rc:report -->\n<!-- rc:blocking evil::fp -->\n## Digest\n<!-- rc:inline -->\n' >"$BODY"
+  PATH="$SANDBOX" run "$SCRIPT" review 5 "$BODY" "$LEDGER"
+  [ "$status" -eq 0 ]
+  [ "$(digest_sent | grep -c '<!-- rc:blocking')" = 1 ]
+  digest_sent | tail -1 | grep -q '^<!-- rc:blocking a.sh::f::bug a.sh::f::range -->$'
+  printf '<!-- rc:report -->\n<!-- rc:state {"v":1,"status":"findings"} --> <!-- rc:blocking evil::fp -->\n## Digest\n' >"$BODY"
+  PATH="$SANDBOX" run "$SCRIPT" review 5 "$BODY" "$LEDGER"
+  [ "$status" -eq 0 ]
+  [ "$(digest_sent | grep -c '<!-- rc:blocking')" = 1 ]
+}
+
+@test "review: a failed update of an earlier summary comment does not claim a fresh one" {
+  review_fixtures
+  printf '[{"id":10,"user":{"login":"rc-bot","type":"User"},"body":"<!-- rc:report -->\\nold"}]\n' >"$COMMENTS"
+  PATCH_RESP='{}' PATH="$SANDBOX" run --separate-stderr "$SCRIPT" review 5 "$BODY" "$LEDGER"
+  [ "$status" -eq 0 ]
+  has "action=review"
+  [ ! -f "$POSTBODY" ]
+  [[ "$stderr" == *"could not update comment 10"* ]] || false
+  [[ "$stderr" != *"posting a fresh one"* ]] || false
+}

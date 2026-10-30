@@ -339,6 +339,10 @@ upsert_digest() {
       _DG_ACTION=updated
       return 0
     fi
+    if [ "${3:-}" = update-only ]; then
+      echo "rc-post: could not update comment $_id" >&2
+      return 1
+    fi
     echo "rc-post: could not update comment $_id; posting a fresh one" >&2
   fi
   [ "${3:-}" != update-only ] || return 1
@@ -810,17 +814,23 @@ do_review() {
 # fallback comment) into $_tmp/body.md: the digest, the counts in place of its
 # `rc:inline` line, the tags legend, the findings outside the diff (with the
 # inline ones too when <with-inline> is false), then the footer. Hidden-marker
-# openers in the model-written part are neutralised, so only the lines this
-# script writes are markers. Needs _tmp, _body, _n_res, _footer.
+# openers are neutralised everywhere except the rc:report line and a strict
+# rc:state line, so only those and the lines this script writes are markers.
+# Needs _tmp, _body, _n_res, _footer.
 compose_body() {
   jq -n -r --rawfile dg "$_body" --slurpfile p "$_tmp/plan.json" --arg mark "$INLINE_MARK" \
-    --argjson wi "$1" --argjson nr "$_n_res" --arg footer "$_footer" '
+    --argjson wi "$1" --argjson nr "$_n_res" --arg footer "$_footer" --arg mk "$MARKER" '
+    def defuse: gsub("<!--"; "&lt;!--");
     ($dg | split("\n")) as $l
-    | ($l[1] // "" | capture("^<!-- rc:state (?<j>.*) -->$").j | fromjson? // {}) as $st
-    | ($l[0:2] | join("\n")) as $head
+    # The state line is printed from model-filled values: keep it only in its
+    # exact shape (no angle brackets inside), so it cannot carry a marker.
+    | ($l[1] // "" | test("^<!-- rc:state \\{[^<>]*\\} -->$")) as $hasst
+    | (if $hasst then $l[1] | capture("^<!-- rc:state (?<j>.*) -->$").j | fromjson? // {} else {} end) as $st
+    | ([ ($l[0] // "" | if . == $mk then . else defuse end) ] + (if $hasst then [$l[1]] else [] end)
+       | join("\n")) as $head
     # Only our markers stay markers: the model-written rest keeps the
     # rc:inline placeholder, and every other comment opener is neutralised.
-    | ($l[2:] | join("\n") | split($mark) | map(gsub("<!--"; "&lt;!--")) | join($mark)) as $rest
+    | ($l[(if $hasst then 2 else 1 end):] | join("\n") | split($mark) | map(defuse) | join($mark)) as $rest
     | (if $wi then $p[0].new | length else 0 end) as $nn
     | ($p[0].outside + (if $wi then [] else [$p[0].new[].outside] end)) as $o
     | ([ ("critical", "important", "suggestion") as $k
