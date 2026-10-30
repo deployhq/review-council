@@ -70,3 +70,9 @@ fails_with() { [ "$status" -ne 0 ] && printf '%s' "$output" | grep -qF "$1"; }
   check ANTHROPIC_API_KEY=k RC_CLAUDE_MODEL='opus; id'
   fails_with 'claude_model'
 }
+
+@test "auth: a multi-line claude_model is refused, and the value isn't echoed" {
+  check ANTHROPIC_API_KEY=k RC_CLAUDE_MODEL="$(printf 'sonnet\nevil')"
+  fails_with 'claude_model'
+  ! printf '%s' "$output" | grep -qF 'evil' || return 1
+}

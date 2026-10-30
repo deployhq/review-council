@@ -56,12 +56,13 @@ MARKER='<!-- rc:report -->'
 # Oniguruma regex for jq: Anthropic sk-ant-, OpenRouter sk-or-, OpenAI
 # sk-proj-/sk-svcacct-/sk-admin- and legacy sk-<32+ alnum>, GitHub
 # ghp_/gho_/ghs_/ghu_/ghr_ and github_pat_, Perplexity pplx-, AWS access key ids
-# AKIA/ASIA, Google AIza, Slack xox[abpr]-, Stripe sk_live_/rk_live_, and PEM
+# AKIA/ASIA, Google AIza, Slack xox[abpr]-, Stripe sk_live_/rk_live_, JWTs
+# (OAuth/OIDC/access tokens, e.g. a Codex access token's login file), and PEM
 # private key blocks (the whole block when its END line is there). The
 # lookbehind/lookahead keep it to whole tokens; `_` is NOT in the
 # lookbehind so a token wrapped in markdown italics (`_sk-ant-..._`) is still
 # caught. The length floors keep ordinary text ("sk-learn", a 40-hex SHA) out.
-SECRET_RE='(?<![A-Za-z0-9-])(?:sk-(?:ant|or|proj|svcacct|admin)-[A-Za-z0-9_-]{20,}|sk-[A-Za-z0-9]{32,}|gh[pousr]_[A-Za-z0-9]{36,}|github_pat_[A-Za-z0-9_]{22,}|pplx-[A-Za-z0-9]{32,}|(?:AKIA|ASIA)[0-9A-Z]{16}(?![0-9A-Za-z])|AIza[0-9A-Za-z_-]{35}|xox[abpr]-[A-Za-z0-9-]{10,}|[sr]k_live_[A-Za-z0-9]{20,}|-----BEGIN [A-Z ]*PRIVATE KEY-----(?:[\s\S]*?-----END [A-Z ]*PRIVATE KEY-----)?)'
+SECRET_RE='(?<![A-Za-z0-9-])(?:sk-(?:ant|or|proj|svcacct|admin)-[A-Za-z0-9_-]{20,}|sk-[A-Za-z0-9]{32,}|gh[pousr]_[A-Za-z0-9]{36,}|github_pat_[A-Za-z0-9_]{22,}|pplx-[A-Za-z0-9]{32,}|(?:AKIA|ASIA)[0-9A-Z]{16}(?![0-9A-Za-z])|AIza[0-9A-Za-z_-]{35}|xox[abpr]-[A-Za-z0-9-]{10,}|[sr]k_live_[A-Za-z0-9]{20,}|eyJ[A-Za-z0-9_-]{10,}\.eyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}|-----BEGIN [A-Z ]*PRIVATE KEY-----(?:[\s\S]*?-----END [A-Z ]*PRIVATE KEY-----)?)'
 GH_POST_TOKEN=''  # set by `post` from the named env var; empty = ambient gh auth
 
 # ---------------------------------------------------------------------------
@@ -261,7 +262,9 @@ resolve_identity() {
   elif [ -z "$_me" ] && [ -n "$GH_POST_TOKEN" ] && [ -n "${RC_PR_BOT_LOGIN:-}" ]; then
     # A bot token (e.g. an App's) can't read /user: the caller names its login
     # (trusted env). Same charset as a GitHub login, optional `[bot]`.
-    if printf '%s' "$RC_PR_BOT_LOGIN" | grep -Eqx '[A-Za-z0-9][A-Za-z0-9-]{0,38}(\[bot\])?'; then
+    # One line only: grep -x matches line by line, so reject newlines first.
+    if [ "$(printf '%s' "$RC_PR_BOT_LOGIN" | wc -l | tr -d ' ')" = 0 ] \
+      && printf '%s' "$RC_PR_BOT_LOGIN" | grep -Eqx '[A-Za-z0-9][A-Za-z0-9-]{0,38}(\[bot\])?'; then
       _fb_login="$RC_PR_BOT_LOGIN"
     else
       echo "rc-post: ignoring invalid RC_PR_BOT_LOGIN" >&2

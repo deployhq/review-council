@@ -17,7 +17,7 @@ setup() {
   FAKEDIR="$BATS_TEST_TMPDIR/fakebin"
   SYSBIN="$BATS_TEST_TMPDIR/sysbin"
   mkdir -p "$FAKEDIR" "$SYSBIN"
-  for _c in sh env jq cat printf grep sed head tr mktemp rm mv cut cp; do
+  for _c in sh env jq cat printf grep sed head tr mktemp rm mv cut cp wc; do
     _p="$(command -v "$_c" 2>/dev/null || true)"
     [ -n "$_p" ] && ln -sf "$_p" "$SYSBIN/$_c"
   done
@@ -853,8 +853,9 @@ dismissed_fixtures() {
   ! grep -qF -- "$_tok" "$REVIEWBODY" || return 1
 }
 
-@test "redact: newer shapes (Google, Slack, Stripe, PEM private key block)" {
+@test "redact: newer shapes (Google, Slack, Stripe, JWT, PEM private key block)" {
   redacts "AIza""FAKEfakeFAKEfakeFAKEfakeFAKEfake123"
+  redacts "eyJ""hbGciOiJIUzI1NiJ9.eyJ""zdWIiOiJmYWtlZmFrZSJ9.FAKEfakeFAKEfake123"
   redacts "xoxb-""1234567890-FAKEfake"
   redacts "sk_live_""$FAKE32"
   post_body "$(printf 'key:\n-----BEGIN RSA PRIVATE KEY-----\nMIIFAKEFAKE\n-----END RSA PRIVATE KEY-----\nafter')"
@@ -963,4 +964,11 @@ dismissed_fixtures() {
   has "inline_new=2"
   jq -r '.comments[0].body' "$REVIEWBODY" | grep -qF '<!-- rc:finding a.sh::f-x-::bug--1 -->'
   jq -r .body "$REVIEWBODY.REQUEST_CHANGES" | grep -qF 'a.sh::f-x-::bug--1'
+}
+
+@test "review: a multi-line RC_PR_BOT_LOGIN is ignored" {
+  stale_fixtures
+  RC_PR_BOT_LOGIN="$(printf 'my-app[bot]\nx')" MYTOK=t USER_FAIL=1 PATH="$SANDBOX" run --separate-stderr "$SCRIPT" stale 5 "$LEDGER" MYTOK
+  [ "$output" = "[]" ]
+  printf '%s' "$stderr" | grep -qF 'invalid RC_PR_BOT_LOGIN'
 }

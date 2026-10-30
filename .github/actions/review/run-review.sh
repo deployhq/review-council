@@ -47,8 +47,10 @@ if [ -n "${CODEX_API_KEY:-}" ] && [ -n "${CODEX_ACCESS_TOKEN:-}" ]; then
   echo "::error::Give Codex only one credential: the OPENAI_API_KEY secret or the CODEX_ACCESS_TOKEN secret."
   exit 1
 fi
-if [ -n "${RC_CLAUDE_MODEL:-}" ] && ! printf '%s' "$RC_CLAUDE_MODEL" | grep -Eqx '[A-Za-z0-9][A-Za-z0-9._:-]{0,79}(\[[A-Za-z0-9]{1,8}\])?'; then
-  echo "::error::Invalid claude_model '${RC_CLAUDE_MODEL}' (letters, digits, . _ : - and an optional [1m] suffix)."
+# Whole-string match ([[ =~ ]], not grep -x, which passes a multi-line value).
+model_re='^[A-Za-z0-9][A-Za-z0-9._:-]{0,79}(\[[A-Za-z0-9]{1,8}\])?$'
+if [ -n "${RC_CLAUDE_MODEL:-}" ] && ! [[ "$RC_CLAUDE_MODEL" =~ $model_re ]]; then
+  echo "::error::Invalid claude_model (allowed: letters, digits, . _ : - and an optional [1m] suffix)."
   exit 1
 fi
 case "${RC_AUTH_MODE:-}" in
