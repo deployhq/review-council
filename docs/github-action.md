@@ -282,6 +282,7 @@ Limits in CI:
 - **Use `harness: claude` (or `opencode`) for OpenRouter.** Don't use `codex` with OpenRouter: it cannot send `data_collection: deny`, and its sandbox does not stop it reading files (including its own key).
 - **No local models.** `provider: ollama` needs a model on the machine; the runner has none.
 - **The key is `OPENROUTER_API_KEY`.** `api_key_env`, `harness_options.flags` and `harness_options.env` are ignored from committed config. Typed options (`effort`, `timeout_minutes`, `max_turns`, …) still work.
+- **Run time limit.** The run normally gets the run budget plus 30 minutes (45 by default). When an approved seat may run longer, the limit grows to that seat's `timeout_minutes` plus 20 (a seat without one counts as 30). The job's cap is 120 minutes, so keep seat `timeout_minutes` at 90 or less; above that the run is capped and the log shows a warning.
 - The seat's harness is installed only when the config names it.
 
 Seat roles, families and egress: see [Custom reviewer seats](../README.md#custom-reviewer-seats) in the README.

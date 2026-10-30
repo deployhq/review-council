@@ -96,10 +96,14 @@ else
 fi
 unset oidc_url oidc_tok
 
-# A composite step cannot set timeout-minutes, so enforce the gate's timeout
-# here: TERM to claude's process group, KILL 60s later if it is still alive.
-timeout_min="${RC_TIMEOUT_MINUTES:-}"
+# A composite step cannot set timeout-minutes, so enforce the timeout here:
+# TERM to claude's process group, KILL 60s later if it is still alive. The
+# gate's limit is raised to fit the longest custom seat the run's config will
+# run (same config, same env as the run itself).
+timeout_min="$("$plugin_dir/scripts/rc-config.sh" .review-council 2>/dev/null \
+  | bash "$GITHUB_ACTION_PATH/review-timeout.sh" "${RC_TIMEOUT_MINUTES:-}")" || timeout_min="${RC_TIMEOUT_MINUTES:-}"
 case "$timeout_min" in ''|*[!0-9]*|0) timeout_min=45 ;; esac
+echo "Review time limit: ${timeout_min} minutes"
 
 rc=0
 # --setting-sources user: the reviewed PR's .claude/ settings and hooks never
