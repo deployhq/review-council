@@ -1,0 +1,69 @@
+# .review-council/config.yml — example for running Review Council in GitHub Actions.
+#
+# Copy to .review-council/config.yml in your repo. Every key is optional; an
+# all-commented file means built-in defaults. Full schema: rules/config.md.
+# Guide: docs/github-action.md.
+#
+# In CI this file is read from the PR's branch, so a PR can change it and see
+# the effect in its own review. Env vars set by the workflow win over it:
+#   RC_CI=true            -> never asks, posts automatically, never writes
+#                            learnings.md, auto_retry=true
+#   RC_PR_COMMENTS=true   -> posting is always on in CI (pr_comments.enabled not needed)
+#   RC_RUN_BUDGET         -> from the run_budget_seconds input
+#   RC_STATIC_ANALYSIS    -> from the static_analysis input
+# config.local.yml is not used in CI (it is gitignored, so not in the checkout).
+# .review-council/learnings.md is also read from the PR's branch: a PR can add
+# Suppressions to its own review. Set settings.learn: false to stop CI reading it.
+
+# reviewers:                          # uncomment this line and the block you need
+  # Built-in reviewers run when their key is present in the workflow secrets:
+  # Claude + Security (ANTHROPIC_API_KEY, CLAUDE_CODE_OAUTH_TOKEN or federation),
+  # Codex (OPENAI_API_KEY or CODEX_ACCESS_TOKEN), Perplexity (PERPLEXITY_API_KEY). Turn one off here if you don't want it.
+  # perplexity:
+  #   enabled: false
+
+  # ── Optional: custom seats ───────────────────────────────────────────────
+  # A seat that sends code to OpenRouter runs in CI only if the caller workflow
+  # approves it by slot name:
+  #
+  #     with:
+  #       approved_seats: "kimi"
+  #     secrets:
+  #       OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
+  #
+  # Not approved -> skipped, with "kimi: skipped — not approved for CI".
+  # Approval covers the slot name only: this file still sets the seat's
+  # harness, provider and model, and a PR can change them.
+  # Every approved seat runs. Unapproved seats: at most one from this file,
+  # and in CI one that needs approval is skipped (nobody can confirm it).
+  # Use harness `claude` (or `opencode`) for OpenRouter, not `codex`.
+  # Do not set api_key_env, harness_options.flags or harness_options.env here:
+  # they are ignored from committed config. The key is OPENROUTER_API_KEY.
+  # Local models (provider: ollama) do not work on a CI runner.
+  #
+  # custom:
+  #   kimi:                              # slot name — must match approved_seats
+  #     harness: claude
+  #     provider: openrouter
+  #     model: moonshotai/kimi-k2.7-code
+  #     role: reviewer                   # signal (default) = separate "Extra signals" section
+  #     harness_options:
+  #       max_turns: 40
+  #       timeout_minutes: 15
+
+# settings:
+#   verify: true                # double-check findings with a different model family
+#   verify_max_findings: 12
+#   min_reviewers: 2
+#   reviewer_timeout_seconds: 600
+#   claude_max_turns: 100       # lower it to cap Claude-side cost
+#   learn: false                # in CI: stop reading learnings.md (CI never writes it)
+#   # run_budget_seconds and auto_retry are set by the workflow in CI.
+
+# static_analysis:
+#   tools: [gitleaks, trufflehog, osv-scanner, semgrep, ruff, shellcheck, actionlint, hadolint]
+#   timeout_seconds: 60
+#   semgrep_config: p/default
+
+# lenses:
+#   performance: { enabled: false }

@@ -18,6 +18,8 @@ setup() {
   # machine running the tests: point it at a per-test path (absent by default).
   USERCFG="$BATS_TEST_TMPDIR/user/config.yml"
   export RC_USER_CONFIG="$USERCFG"
+  # CI switches must not leak in from the machine running the tests.
+  unset RC_CI RC_APPROVED_SEATS
 }
 
 # no_line_matching <ERE>: assert no stdout line matches.
@@ -1438,4 +1440,156 @@ pr_comments:
   no_line_matching '^reviewer\.custom\.c\.'
   [[ "$stderr" == *"rc-config: reviewer.custom.c: only one seat from the repo's committed config runs per review"* ]] || false
   [[ "$stderr" != *"reviewer.custom.b: only one seat"* ]] || false
+}
+
+# ---- CI mode (RC_CI) and seat pre-approval (RC_APPROVED_SEATS) --------------
+
+@test "ci: default -> settings.ci=false, learn/auto_retry untouched" {
+  run --separate-stderr "$SCRIPT" "$CFG"
+  [ "$status" -eq 0 ]
+  has_line "settings.ci=false"
+  has_line "settings.learn=true"
+  has_line "settings.auto_retry=false"
+}
+
+@test "ci: RC_CI=true forces auto_retry=true and learn=false over files AND their env vars" {
+  printf 'settings:\n  learn: true\n  auto_retry: false\n' >"$CFG/config.yml"
+  RC_CI=true RC_LEARN=true RC_AUTO_RETRY=false run --separate-stderr "$SCRIPT" "$CFG"
+  [ "$status" -eq 0 ]
+  has_line "settings.ci=true"
+  has_line "settings.learn=false"
+  has_line "settings.auto_retry=true"
+  no_line_matching '^settings\.learn=true$'
+  no_line_matching '^settings\.auto_retry=false$'
+  [[ "$stderr" == *"settings.learn: forced to false in CI mode"* ]] || false
+  [[ "$stderr" == *"settings.auto_retry: forced to true in CI mode"* ]] || false
+}
+
+@test "recall: outside CI, settings.recall equals settings.learn" {
+  run --separate-stderr "$SCRIPT" "$CFG"
+  [ "$status" -eq 0 ]
+  has_line "settings.learn=true"
+  has_line "settings.recall=true"
+  printf 'settings:\n  learn: false\n' >"$CFG/config.yml"
+  run --separate-stderr "$SCRIPT" "$CFG"
+  [ "$status" -eq 0 ]
+  has_line "settings.learn=false"
+  has_line "settings.recall=false"
+}
+
+@test "recall: RC_CI=true forces learn=false but recall keeps the configured true" {
+  printf 'settings:\n  learn: true\n' >"$CFG/config.yml"
+  RC_CI=true run --separate-stderr "$SCRIPT" "$CFG"
+  [ "$status" -eq 0 ]
+  has_line "settings.learn=false"
+  has_line "settings.recall=true"
+}
+
+@test "recall: RC_CI=true with learn turned off -> recall=false (file or RC_LEARN)" {
+  printf 'settings:\n  learn: false\n' >"$CFG/config.yml"
+  RC_CI=true run --separate-stderr "$SCRIPT" "$CFG"
+  [ "$status" -eq 0 ]
+  has_line "settings.learn=false"
+  has_line "settings.recall=false"
+  rm -f "$CFG/config.yml"
+  RC_CI=true RC_LEARN=false run --separate-stderr "$SCRIPT" "$CFG"
+  [ "$status" -eq 0 ]
+  has_line "settings.learn=false"
+  has_line "settings.recall=false"
+}
+
+@test "ci: RC_CI=false is honoured and changes nothing else" {
+  RC_CI=false run --separate-stderr "$SCRIPT" "$CFG"
+  [ "$status" -eq 0 ]
+  has_line "settings.ci=false"
+  has_line "settings.learn=true"
+}
+
+@test "ci: an invalid RC_CI is ignored with a note (ci=false)" {
+  RC_CI='yes;x' run --separate-stderr "$SCRIPT" "$CFG"
+  [ "$status" -eq 0 ]
+  has_line "settings.ci=false"
+  has_line "settings.learn=true"
+  [[ "$stderr" == *"settings.ci: invalid RC_CI="* ]] || false
+}
+
+@test "ci: settings.ci in a config file is ignored (env-only)" {
+  printf 'settings:\n  ci: true\n' >"$CFG/config.yml"
+  printf 'settings:\n  ci: true\n' >"$CFG/config.local.yml"
+  run --separate-stderr "$SCRIPT" "$CFG"
+  [ "$status" -eq 0 ]
+  has_line "settings.ci=false"
+  has_line "settings.learn=true"
+  has_line "settings.auto_retry=false"
+}
+
+@test "approved: a committed OpenRouter seat listed in RC_APPROVED_SEATS -> no confirm" {
+  printf 'reviewers:\n  custom:\n    q:\n      harness: ocr\n      model: qwen/x\n' >"$CFG/config.yml"
+  RC_APPROVED_SEATS=q run --separate-stderr "$SCRIPT" "$CFG"
+  [ "$status" -eq 0 ]
+  has_line "reviewer.custom.q.source=committed"
+  has_line "reviewer.custom.q.needs_confirm=false"
+  no_line_matching '^confirm\.'
+  [[ "$stderr" == *"rc-config: seat 'q' approved via RC_APPROVED_SEATS"* ]] || false
+}
+
+@test "approved: works without RC_CI too, and with RC_CI=true" {
+  printf 'reviewers:\n  custom:\n    q:\n      harness: ocr\n      model: qwen/x\n' >"$CFG/config.yml"
+  RC_CI=true RC_APPROVED_SEATS=q run --separate-stderr "$SCRIPT" "$CFG"
+  [ "$status" -eq 0 ]
+  has_line "reviewer.custom.q.needs_confirm=false"
+  no_line_matching '^confirm\.'
+}
+
+@test "approved: an unlisted committed seat keeps its confirm line (CI skips it)" {
+  printf 'reviewers:\n  custom:\n    q:\n      harness: ocr\n      model: qwen/x\n' >"$CFG/config.yml"
+  RC_CI=true RC_APPROVED_SEATS=other run --separate-stderr "$SCRIPT" "$CFG"
+  [ "$status" -eq 0 ]
+  has_line "reviewer.custom.q.needs_confirm=true"
+  has_line "confirm.1=Seat 'q' is enabled only by the repo's committed config, and sends code to OpenRouter (model qwen/x), billed to your OPENROUTER_API_KEY."
+  [[ "$stderr" == *"RC_APPROVED_SEATS: no configured seat 'other'; ignored"* ]] || false
+}
+
+@test "approved: list is trimmed; invalid names are ignored with a note, valid ones still apply" {
+  printf 'reviewers:\n  custom:\n    q:\n      harness: ocr\n      model: qwen/x\n' >"$CFG/config.yml"
+  RC_APPROVED_SEATS=' bad;rm ,, $(x) , q ' run --separate-stderr "$SCRIPT" "$CFG"
+  [ "$status" -eq 0 ]
+  has_line "reviewer.custom.q.needs_confirm=false"
+  no_line_matching '^confirm\.'
+  [[ "$stderr" == *"RC_APPROVED_SEATS: invalid slot name 'bad;rm'; ignored"* ]] || false
+  [[ "$stderr" == *"RC_APPROVED_SEATS: invalid slot name '\$(x)'; ignored"* ]] || false
+}
+
+@test "approved: approved seats do not count toward the one-committed-seat cap" {
+  printf 'reviewers:\n  custom:\n    a:\n      harness: ocr\n      model: qwen/x\n    b:\n      harness: ocr\n      model: qwen/y\n' >"$CFG/config.yml"
+  RC_APPROVED_SEATS=a,b run --separate-stderr "$SCRIPT" "$CFG"
+  [ "$status" -eq 0 ]
+  has_line "reviewer.custom_slots=a,b"
+  has_line "reviewer.custom.a.needs_confirm=false"
+  has_line "reviewer.custom.b.needs_confirm=false"
+  no_line_matching '^confirm\.'
+  [[ "$stderr" != *"only one seat from the repo's committed config"* ]] || false
+}
+
+@test "approved: with only one approved, the other committed seat follows the existing rules" {
+  printf 'reviewers:\n  custom:\n    a:\n      harness: ocr\n      model: qwen/x\n    b:\n      harness: ocr\n      model: qwen/y\n    c:\n      harness: ocr\n      model: qwen/z\n' >"$CFG/config.yml"
+  RC_APPROVED_SEATS=a run --separate-stderr "$SCRIPT" "$CFG"
+  [ "$status" -eq 0 ]
+  # a: approved, runs, does not use up the slot; b: takes the one committed
+  # slot and still needs confirmation; c: over the cap, dropped.
+  has_line "reviewer.custom_slots=a,b"
+  has_line "reviewer.custom.a.needs_confirm=false"
+  has_line "reviewer.custom.b.needs_confirm=true"
+  has_line "confirm.1=Seat 'b' is enabled only by the repo's committed config, and sends code to OpenRouter (model qwen/y), billed to your OPENROUTER_API_KEY."
+  no_line_matching '^confirm\.2='
+  no_line_matching '^reviewer\.custom\.c\.'
+  [[ "$stderr" == *"rc-config: reviewer.custom.c: only one seat from the repo's committed config runs per review"* ]] || false
+}
+
+@test "approved: a seat that needs no confirm is unaffected (no approval note)" {
+  printf 'reviewers:\n  custom:\n    o:\n      harness: ocr\n      provider: ollama\n      model: qwen/x\n' >"$CFG/config.yml"
+  RC_APPROVED_SEATS=o run --separate-stderr "$SCRIPT" "$CFG"
+  [ "$status" -eq 0 ]
+  has_line "reviewer.custom.o.needs_confirm=false"
+  [[ "$stderr" != *"approved via RC_APPROVED_SEATS"* ]] || false
 }

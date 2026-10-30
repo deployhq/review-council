@@ -1,0 +1,94 @@
+# .github/workflows/review-council.yml — run Review Council on your PRs.
+#
+# Copy this file into your repo. Guide: https://github.com/deployhq/review-council/blob/main/docs/github-action.md
+#
+# Before the first run:
+#   1. Add one Claude credential as a secret (Settings -> Secrets and
+#      variables -> Actions). The default is ANTHROPIC_API_KEY (pay per token).
+#      Give Claude exactly one of:
+#        - ANTHROPIC_API_KEY (the default, below);
+#        - CLAUDE_CODE_OAUTH_TOKEN, a Claude subscription token from
+#          `claude setup-token` (usage counts against its creator's seat);
+#        - Anthropic federation (no stored key): uncomment the lines marked
+#          "federation only" below. Before you do, check that no cloud trust
+#          policy (AWS, GCP, Azure, ...) matches this repo's PR runs broadly.
+#      Swap the ANTHROPIC_API_KEY line out for the one you pick. Two at once
+#      fails the run. See "Authenticate Claude" in the guide. The other
+#      secrets below are optional.
+#   2. Merge this file to your default branch. GitHub runs issue_comment
+#      workflows only from the default branch, so `/review-council` comments
+#      do nothing until it is there.
+#
+# Fork PRs are always skipped. A `/review-council` comment runs only when the
+# commenter has write access to the repo. On `issue_comment` GitHub runs the
+# default-branch copy of this file; if you enable `pull_request`, it runs the
+# copy on the PR's branch, so a PR can change these settings for its own run.
+
+name: Review Council
+
+on:
+  # Manual: a review runs only when someone with write access comments
+  # `/review-council` on a PR. Each run costs a full review, so nothing runs on
+  # its own. Comment again after pushing fixes to re-review (that is also when
+  # fixed findings get resolved).
+  issue_comment:
+    types: [created]
+  # Automatic (optional): uncomment to also review a draft PR when it is marked
+  # ready for review. Add `opened` to review PRs opened as non-draft, and
+  # `synchronize` to review every push (one run per push; a newer run cancels
+  # the older one). Each adds a full review's cost. Drafts are always skipped.
+  # pull_request:
+  #   types: [ready_for_review]
+
+# Required. The review job gets exactly this grant, so grant no more than this.
+# PR comments are issue comments, so issues: write is needed to post.
+# id-token: write is for federation only: leave it commented out with an API key.
+#
+# Do NOT add a workflow-level `concurrency:` with cancel-in-progress here: every
+# PR comment triggers this workflow and would cancel a running review. The
+# reusable workflow already allows one review per PR, and only an authorised
+# trigger can cancel it.
+permissions:
+  contents: read
+  pull-requests: write
+  issues: write
+  # id-token: write   # federation only: mints the GitHub OIDC token traded for an Anthropic token
+
+jobs:
+  review:
+    # `main` picks up every upstream change. If you'd rather not, pin a commit
+    # SHA here and set plugin_ref below to the same SHA.
+    uses: deployhq/review-council/.github/workflows/review-council.yml@main
+    with:
+      # Anthropic federation (federation only). Not secrets. Setting the rule
+      # ID switches Claude auth to federation.
+      # anthropic_federation_rule_id: fdrl_...
+      # anthropic_organization_id: 00000000-0000-0000-0000-000000000000
+      # anthropic_service_account_id: svac_...
+      # anthropic_workspace_id: wrkspc_...   # only if the rule covers more than one workspace
+      # The model Claude Code runs, e.g. "claude-opus-5-5" or an alias like
+      # "sonnet". Empty = Claude Code's default for your credential.
+      # claude_model: ""
+      # Custom seats from .review-council/config.yml that may run in CI,
+      # comma-separated slot names (e.g. "qwen,kimi"). Empty = none approved.
+      # Approving a seat approves its slot name only: the PR's config.yml still
+      # sets its harness, provider and model.
+      approved_seats: ""
+      # Soft time budget for the whole review, in seconds.
+      run_budget_seconds: 900
+      # Run the static-analysis scan (secrets, CVEs, lint) first.
+      static_analysis: true
+      # Skip PRs opened by a bot account (Dependabot, Renovate, a GitHub App).
+      # Their text can come from outside your org. Off: agent PRs get reviewed.
+      skip_bot_prs: false
+      # Git ref of deployhq/review-council to load the plugin from.
+      # Keep it the same as the ref in `uses:` above.
+      plugin_ref: main
+    secrets:
+      ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}     # one Claude credential is required; remove for the token or federation
+      # CLAUDE_CODE_OAUTH_TOKEN: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}   # instead of the API key: a Claude subscription (`claude setup-token`)
+      OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}           # optional: enables Codex
+      # CODEX_ACCESS_TOKEN: ${{ secrets.CODEX_ACCESS_TOKEN }}   # instead of OPENAI_API_KEY: Codex on ChatGPT Enterprise plan usage
+      OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}   # optional: an OpenRouter custom seat
+      PERPLEXITY_API_KEY: ${{ secrets.PERPLEXITY_API_KEY }}   # optional: enables Perplexity
+      # PR_BOT_TOKEN: ${{ secrets.PR_BOT_TOKEN }}             # optional: post as your own App or bot (default: github-actions[bot]); also set pr_bot_login

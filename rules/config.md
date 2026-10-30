@@ -50,6 +50,10 @@ env  >  config.local.yml  >  config.yml  >  built-in default
   `config.local.yml` (untracked) > `~/.review-council/config.yml` > `config.yml` (and a
   tracked `config.local.yml`) > default. See the block's own section for the keys that only
   trusted layers may set.
+- **Env-only switches.** `RC_CI` (→ `settings.ci`) and `RC_APPROVED_SEATS` (seat
+  pre-approval) are read **only** from the environment — no config file can set them, so a
+  reviewed repo cannot switch off a human gate by committing a value. See
+  [CI mode](#ci-mode-rc_ci-and-rc_approved_seats).
 
 ## `reviewers:` block
 
@@ -75,7 +79,10 @@ reviewers:
 | `reviewer.perplexity.enabled` | `true` |
 | `reviewer.perplexity.model` | `sonar` |
 
-An empty model means "let the reviewer use its own default model" — nothing is passed. The
+An empty model means "let the reviewer use its own default model" — nothing is passed. In
+GitHub Actions, the workflow's `claude_model` input is separate: it sets the model Claude Code
+itself runs, which the Claude and Security reviewer subagents inherit; `reviewer.claude.model`
+still pins only the Claude reviewer subagent (see `docs/github-action.md`). The
 council still needs `settings.min_reviewers` participants after disabling; if too few remain
 (also after availability detection), the existing min-reviewers handling applies (single-
 reviewer mode or a prompt).
@@ -187,6 +194,16 @@ trigger is a seat defined only in the committed `config.yml` that sends code off
 on your key without your say-so. Values that are never legitimate from committed config
 (`api_key_env`, `flags`, `env`) are ignored with a note — no question asked.
 
+**Pre-approval from the environment (`RC_APPROVED_SEATS`).** A comma-separated list of slot
+names (each validated like a slot name; an invalid one is ignored with a note, and a name no
+emitted seat carries is noted too). A listed seat that would need confirmation gets
+`needs_confirm=false` and no `confirm.<n>` line (stderr: `seat '<s>' approved via
+RC_APPROVED_SEATS`); a listed seat also does not count toward the one-committed-seat cap
+(below). Env is trusted, so this is the operator's yes given in advance — it works with or
+without `RC_CI`. **In CI (`RC_CI=true`)** nobody can answer the question: approved seats run,
+and any seat that still carries a `confirm.<n>` line is skipped for the run with the note
+`<slot>: skipped — not approved for CI (add it to approved_seats)`.
+
 ### Role
 
 `role` is the only knob for how a seat behaves in the council:
@@ -260,7 +277,8 @@ To give only this seat more time, set its `timeout_minutes`; there is no need to
 - **At most one seat from the repo's committed config.** Of the seats only the committed
   `config.yml` (or a tracked `config.local.yml`) names, the first runs and the rest are
   dropped with a note — a reviewed repo cannot field a crowd of seats. Name a seat in your own
-  file to run more.
+  file, or list it in `RC_APPROVED_SEATS`, to run more: an approved seat neither counts toward
+  nor uses up the one slot.
 - **Availability:** the harness binary and `jq` installed; for Ollama, the model already
   pulled (seats never pull models); for OpenRouter, the
   variable `api_key_env` names is set and non-empty. An `ocr` seat also needs a target with a
@@ -335,6 +353,7 @@ settings:
 | `settings.verify` | `true` | `RC_VERIFY` | Run the verification pass over findings. |
 | `settings.verify_max_findings` | `12` | `RC_VERIFY_CAP` | Cap on findings sent to the verification pass. |
 | `settings.learn` | `true` | `RC_LEARN` | Enable learnings recall (Step 0.5) and capture (Step 7) — see [Learnings](#learnings) below. |
+| `settings.recall` | = `settings.learn` | — (derived) | **Output only, not a config key.** The *configured* learn value (files + `RC_LEARN`) before CI mode forces `learn=false`. Gates Step 0.5 (recall); outside CI it always equals `settings.learn`. |
 | `settings.min_reviewers` | `2` | `RC_MIN_REVIEWERS` | Minimum participating reviewers for council mode. |
 | `settings.reviewer_timeout_seconds` | `600` | `RC_REVIEWER_TIMEOUT` | Per-invocation wall-clock cap (seconds) for CLI/API reviewers. |
 | `settings.run_budget_seconds` | `600` | `RC_RUN_BUDGET` | Total wall-clock budget (seconds) for the whole run. |
@@ -342,8 +361,30 @@ settings:
 | `settings.health_probe` | `false` | `RC_HEALTH_PROBE` | Opt-in Step-0 health probe (Codex + Google slots) so `available`/`min_reviewers` reflect *usable*, not merely installed. Default off; a provider is dropped only on positive hard-fail evidence (auth/quota/overload), fail-open otherwise. |
 | `settings.health_probe_timeout_seconds` | `20` | `RC_HEALTH_PROBE_TIMEOUT` | Short wall-clock cap (seconds) for each health probe. |
 | `settings.claude_max_turns` | `100` | `RC_CLAUDE_MAX_TURNS` | Turn budget (`maxTurns`) for the native Claude and Security reviewer subagents. Default 100 (lenient); lower it to cap local review cost. |
+| `settings.ci` | `false` | `RC_CI` (**env only**) | "No human is present" — see [CI mode](#ci-mode-rc_ci-and-rc_approved_seats). Never read from a config file. |
 
 Booleans must be `true`/`false`; numeric knobs must be positive integers.
+
+### CI mode (`RC_CI` and `RC_APPROVED_SEATS`)
+
+Both are **environment-only**: the reader never reads them (or a `settings.ci` key) from any
+config file, because the committed config is untrusted and these switches remove human gates.
+
+- **`RC_CI=true|false`** (validated like any boolean; an invalid value is ignored with a note)
+  → `settings.ci`. When `true`, the run never asks a question: the reader also forces
+  `settings.auto_retry=true` and `settings.learn=false` (overriding the files **and**
+  `RC_AUTO_RETRY`/`RC_LEARN`, with a note) — the Capture Gate (Step 7) needs a human, while
+  Step 0.5 may still *read* `learnings.md`: it is gated on `settings.recall`, which carries the
+  configured (pre-force) learn value, so an operator who set `learn: false` / `RC_LEARN=false`
+  gets no recall in CI either. Missing static-analysis tools are skipped (noted in
+  the report); with `pr_comments.enabled` the digest is posted without the confirmation or the
+  triage walk, and a draft PR is never opened.
+- **`RC_APPROVED_SEATS=<slot>[,<slot>…]`** — pre-approves custom seats, see
+  [the confirm gate](#trust-where-a-seat-comes-from). Without it, a committed-only OpenRouter
+  seat is skipped in CI.
+
+`rc-ocr.sh` / `rc-seat.sh` re-read the config themselves, so they see the same approvals as long
+as `RC_APPROVED_SEATS` is in their environment.
 
 ## `static_analysis:` block
 
@@ -397,7 +438,10 @@ pr_comments:
 ```
 
 - `enabled` (bool, default `false`) — when true, after the report Review Council offers to
-  post a single review-digest comment to the PR (always human-confirmed, never automatic).
+  post the findings to the PR — inline review comments on the diff (one review; "request
+  changes" on a critical/important finding), whose text is the summary with the findings
+  off the diff (human-confirmed in a local run; posted
+  without the confirmation only in [CI mode](#ci-mode-rc_ci-and-rc_approved_seats)).
   `RC_PR_COMMENTS` overrides it (env wins), so CI can force it on.
 - `bot_token_env` (string, default `RC_PR_BOT_TOKEN`) — the **name** of an environment
   variable that (optionally) holds a GitHub token. When that variable is set and non-empty
@@ -417,6 +461,22 @@ pr_comments:
   which are attacker-controlled when reviewing an untrusted repo. Otherwise a reviewed repo could point it at a local secret
   (e.g. `AWS_SECRET_ACCESS_KEY` — a perfectly valid identifier). The destination PR is always
   taken from local git, never from config.
+- **Secret redaction.** Before posting, `rc-post.sh` replaces likely secrets in the digest
+  (Anthropic `sk-ant-…`, OpenRouter `sk-or-…`, OpenAI `sk-proj-…`/legacy `sk-…`, GitHub
+  `ghp_`/`gho_`/`ghs_`/`ghu_`/`ghr_`/`github_pat_…`, Perplexity `pplx-…`, AWS `AKIA…`/`ASIA…`,
+  Google API keys `AIza…`, Slack `xoxb-`/`xoxp-`/`xoxa-`/`xoxr-`, Stripe live keys
+  `sk_live_`/`rk_live_`, and `-----BEGIN … PRIVATE KEY-----` blocks) with `[REDACTED]` and
+  notes only the count on stderr — it still posts (fail-soft). Inline comments are redacted
+  the same way, one comment at a time, before they are encoded into the review. The same
+  implementation is exposed as `rc-post.sh redact` (stdin → redacted stdout, count on stderr,
+  non-zero exit and no output if redaction fails) for other outputs such as a CI job summary.
+- **Identity under `GITHUB_TOKEN`.** The Actions token cannot read `/user`, so `rc-post.sh`
+  cannot learn its login; it then updates only a **Bot**-authored comment whose body *starts*
+  with the marker — and, under `GITHUB_ACTIONS=true` with no bot token, only one by
+  `github-actions[bot]` (the previous digest) — never a human's or another bot's, so CI re-runs
+  edit one comment.
+  The same identity rule picks out our earlier inline comments and "request changes"
+  reviews, so a re-run only ever leaves alone, resolves or dismisses its own.
 
 ## Learnings
 
@@ -452,7 +512,7 @@ skeleton the first time it writes, if the file doesn't already exist:
 
 ### Recall (Step 0.5 — read side)
 
-If `settings.learn` is true, Step 0.5 reads the file from the **target repo** (the repo being
+If `settings.recall` is true (it equals `settings.learn` except in CI mode), Step 0.5 reads the file from the **target repo** (the repo being
 reviewed, alongside `.review-council/config.yml`). A missing file is skipped silently — it is
 the normal case, not a warning. Once read, the two sections travel different paths:
 
@@ -618,6 +678,7 @@ uncomment only what you want to change.
 #   health_probe:                 false    # RC_HEALTH_PROBE
 #   health_probe_timeout_seconds: 20       # RC_HEALTH_PROBE_TIMEOUT
 #   claude_max_turns:             100      # RC_CLAUDE_MAX_TURNS
+#   # ci: false — env-only (RC_CI); a `ci:` key here is ignored. So is RC_APPROVED_SEATS.
 
 # static_analysis:               # deterministic tool layer (each also settable via its RC_* env var, which wins)
 #   enabled: true                    # RC_STATIC_ANALYSIS

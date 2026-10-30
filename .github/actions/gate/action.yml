@@ -1,0 +1,49 @@
+name: Review Council gate
+description: >
+  Internal to Review Council's reusable workflow (review-council.yml).
+  Resolves the PR, enforces the event, fork,
+  draft, open-state and commenter-permission checks, reacts to a
+  `/review-council` comment with eyes, and sizes the review step's timeout.
+  Holds no credentials beyond the job's GITHUB_TOKEN.
+
+inputs:
+  run_budget_seconds:
+    description: Review Council run budget in seconds; sizes the review timeout.
+    required: false
+    default: '900'
+  skip_bot_prs:
+    description: "'true' skips PRs opened by a bot account (Dependabot, Renovate, Apps)."
+    required: false
+    default: 'false'
+
+outputs:
+  proceed:
+    description: "'true' when the review should run."
+    value: ${{ steps.gate.outputs.proceed }}
+  pr_number:
+    description: The pull request number.
+    value: ${{ steps.gate.outputs.pr_number }}
+  head_ref:
+    description: The PR head branch (same-repo PRs only).
+    value: ${{ steps.gate.outputs.head_ref }}
+  timeout_minutes:
+    description: Timeout for the review run, in minutes.
+    value: ${{ steps.gate.outputs.timeout_minutes }}
+
+runs:
+  using: composite
+  steps:
+    - name: Resolve PR and check gates
+      id: gate
+      shell: bash
+      # Event-derived values reach the script only through env.
+      env:
+        GH_TOKEN: ${{ github.token }}
+        EVENT_NAME: ${{ github.event_name }}
+        REPO: ${{ github.repository }}
+        PR_NUMBER: ${{ github.event.pull_request.number || github.event.issue.number }}
+        COMMENT_ID: ${{ github.event.comment.id }}
+        COMMENTER: ${{ github.event.comment.user.login }}
+        RUN_BUDGET: ${{ inputs.run_budget_seconds }}
+        SKIP_BOT_PRS: ${{ inputs.skip_bot_prs }}
+      run: bash "$GITHUB_ACTION_PATH/gate.sh"

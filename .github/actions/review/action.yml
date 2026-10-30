@@ -1,0 +1,222 @@
+name: Review Council review
+description: >
+  Internal to Review Council's reusable workflow (review-council.yml).
+  Installs Claude Code, yq, the optional
+  reviewers' CLIs, the custom-seat harnesses and the static-analysis tools,
+  runs `/review-council:run` on the PR checked out at ./repo, and writes a
+  redacted job summary. Expects this action's own repo (the plugin) to be
+  checked out, since the plugin directory is resolved from the action path.
+
+# Composite actions cannot read `secrets`: the calling job passes secret values
+# in as inputs, and each step exposes them only through its own `env:`.
+inputs:
+  auth_mode:
+    description: "How Claude authenticates: 'api_key' (the API key or the OAuth token secret) or 'federation'."
+    required: true
+  pr_number:
+    description: PR number to review (from the gate).
+    required: true
+  timeout_minutes:
+    description: Timeout for the review run, in minutes (from the gate).
+    required: false
+    default: '45'
+  approved_seats:
+    description: Comma-separated custom-seat slot names pre-approved for CI (RC_APPROVED_SEATS).
+    required: false
+    default: ''
+  run_budget_seconds:
+    description: Review Council run budget in seconds (RC_RUN_BUDGET).
+    required: false
+    default: '900'
+  claude_code_version:
+    description: Version of @anthropic-ai/claude-code to install.
+    required: true
+  codex_version:
+    description: Version of @openai/codex to install when needed.
+    required: true
+  static_analysis:
+    description: "'true' to install the static-analysis tools and run Step 2.5."
+    required: false
+    default: 'true'
+  claude_model:
+    description: Optional. The model Claude Code runs (RC_CLAUDE_MODEL); empty = Claude Code's default.
+    required: false
+    default: ''
+  # Secret values (passed from the calling job's `secrets`).
+  anthropic_api_key:
+    description: Anthropic API key (auth_mode api_key).
+    required: false
+    default: ''
+  claude_code_oauth_token:
+    description: Claude subscription OAuth token from `claude setup-token` (auth_mode api_key).
+    required: false
+    default: ''
+  openai_api_key:
+    description: Optional. Enables the Codex reviewer.
+    required: false
+    default: ''
+  codex_access_token:
+    description: Optional. A ChatGPT Enterprise Codex access token; enables the Codex reviewer on plan usage.
+    required: false
+    default: ''
+  openrouter_api_key:
+    description: Optional. Key for custom seats on OpenRouter.
+    required: false
+    default: ''
+  perplexity_api_key:
+    description: Optional. Enables the Perplexity reviewer.
+    required: false
+    default: ''
+  pr_bot_token:
+    description: Optional. Token used to post the digest as an App or bot.
+    required: false
+    default: ''
+  pr_bot_login:
+    description: Optional. The login pr_bot_token posts as (RC_PR_BOT_LOGIN).
+    required: false
+    default: ''
+  # Workload Identity Federation (auth_mode federation). Not secrets.
+  anthropic_federation_rule_id:
+    description: Federation rule ID (fdrl_...).
+    required: false
+    default: ''
+  anthropic_organization_id:
+    description: Anthropic organization ID (UUID).
+    required: false
+    default: ''
+  anthropic_service_account_id:
+    description: Service account ID (svac_...).
+    required: false
+    default: ''
+  anthropic_workspace_id:
+    description: Optional workspace ID (wrkspc_...).
+    required: false
+    default: ''
+
+runs:
+  using: composite
+  steps:
+    # Fail fast on a bad Claude auth setup (missing key, incomplete federation
+    # IDs, both given, no OIDC grant) before spending minutes on installs. The
+    # checks live in run-review.sh only; --check-auth runs them and exits.
+    - name: Check Claude auth
+      shell: bash
+      env:
+        RC_AUTH_MODE: ${{ inputs.auth_mode }}
+        RC_CLAUDE_MODEL: ${{ inputs.claude_model }}
+        ANTHROPIC_API_KEY: ${{ inputs.anthropic_api_key }}
+        CLAUDE_CODE_OAUTH_TOKEN: ${{ inputs.claude_code_oauth_token }}
+        CODEX_API_KEY: ${{ inputs.openai_api_key }}
+        CODEX_ACCESS_TOKEN: ${{ inputs.codex_access_token }}
+        ANTHROPIC_FEDERATION_RULE_ID: ${{ inputs.anthropic_federation_rule_id }}
+        ANTHROPIC_ORGANIZATION_ID: ${{ inputs.anthropic_organization_id }}
+        ANTHROPIC_SERVICE_ACCOUNT_ID: ${{ inputs.anthropic_service_account_id }}
+        ANTHROPIC_WORKSPACE_ID: ${{ inputs.anthropic_workspace_id }}
+      run: bash "$GITHUB_ACTION_PATH/run-review.sh" --check-auth
+
+    - name: Prepare tool directories
+      shell: bash
+      run: |
+        npm_prefix="$GITHUB_WORKSPACE/.npm-global"
+        mkdir -p "$npm_prefix/bin" "$HOME/.local/bin"
+        echo "npm_config_prefix=$npm_prefix" >> "$GITHUB_ENV"
+        echo "$npm_prefix/bin" >> "$GITHUB_PATH"
+        echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+
+    - name: Install Claude Code
+      shell: bash
+      env:
+        CLAUDE_CODE_VERSION: ${{ inputs.claude_code_version }}
+      run: |
+        npm install -g "@anthropic-ai/claude-code@${CLAUDE_CODE_VERSION}"
+        claude --version
+
+    # Pinned tool versions live in the steps' `env:` below (not inputs — bump them here).
+    - name: Install yq (mikefarah v4)
+      shell: bash
+      env:
+        YQ_VERSION: v4.44.6
+      run: |
+        curl -fsSL "https://github.com/mikefarah/yq/releases/download/${YQ_VERSION}/yq_linux_amd64" -o "$HOME/.local/bin/yq"
+        chmod +x "$HOME/.local/bin/yq"
+        "$HOME/.local/bin/yq" --version
+
+    - name: Install Codex CLI
+      if: inputs.openai_api_key != '' || inputs.codex_access_token != ''
+      shell: bash
+      env:
+        CODEX_VERSION: ${{ inputs.codex_version }}
+      run: |
+        npm install -g "@openai/codex@${CODEX_VERSION}"
+        codex --version
+
+    # Install only the harnesses the resolved config actually uses. The reader
+    # gets the same trusted env (RC_CI, RC_APPROVED_SEATS) the review does.
+    - name: Install custom-seat harnesses
+      shell: bash
+      working-directory: ${{ github.workspace }}/repo
+      env:
+        RC_CI: 'true'
+        RC_APPROVED_SEATS: ${{ inputs.approved_seats }}
+        CODEX_VERSION: ${{ inputs.codex_version }}
+        OPENCODE_VERSION: 1.19.3
+        OCR_VERSION: 1.13.3
+      run: bash "$GITHUB_ACTION_PATH/install-seats.sh"
+
+    # Best effort: with RC_CI=true a missing tool is noted in the report and the
+    # review proceeds without it, so a download hiccup must not fail the job.
+    # Note: trufflehog's verified mode makes outbound calls to confirm a secret
+    # is live; drop it via static_analysis.tools in config to opt out.
+    - name: Install static-analysis tools
+      if: inputs.static_analysis == 'true'
+      continue-on-error: true
+      shell: bash
+      env:
+        GITLEAKS_VERSION: 8.30.1
+        TRUFFLEHOG_VERSION: 3.99.2
+        OSV_SCANNER_VERSION: 2.7.0
+        ACTIONLINT_VERSION: 1.7.12
+        HADOLINT_VERSION: 2.15.1
+        SEMGREP_VERSION: 1.180.0
+        RUFF_VERSION: 0.17.0
+      run: bash "$GITHUB_ACTION_PATH/install-static.sh"
+
+    # Composite steps take no `timeout-minutes`; run-review.sh enforces
+    # timeout_minutes itself with coreutils `timeout`.
+    - name: Run Review Council
+      shell: bash
+      working-directory: ${{ github.workspace }}/repo
+      env:
+        RC_AUTH_MODE: ${{ inputs.auth_mode }}
+        RC_TIMEOUT_MINUTES: ${{ inputs.timeout_minutes }}
+        RC_CI: 'true'
+        RC_PR_COMMENTS: 'true'
+        RC_APPROVED_SEATS: ${{ inputs.approved_seats }}
+        RC_RUN_BUDGET: ${{ inputs.run_budget_seconds }}
+        RC_STATIC_ANALYSIS: ${{ inputs.static_analysis }}
+        GH_TOKEN: ${{ github.token }}
+        RC_CLAUDE_MODEL: ${{ inputs.claude_model }}
+        ANTHROPIC_API_KEY: ${{ inputs.anthropic_api_key }}
+        CLAUDE_CODE_OAUTH_TOKEN: ${{ inputs.claude_code_oauth_token }}
+        # codex ignores OPENAI_API_KEY on its own; CODEX_API_KEY is what it reads.
+        CODEX_API_KEY: ${{ inputs.openai_api_key }}
+        # Logged in once by run-review.sh, then dropped from the env.
+        CODEX_ACCESS_TOKEN: ${{ inputs.codex_access_token }}
+        OPENROUTER_API_KEY: ${{ inputs.openrouter_api_key }}
+        PERPLEXITY_API_KEY: ${{ inputs.perplexity_api_key }}
+        # Optional bot identity for the digest; unset when empty, so posting
+        # falls back to github-actions[bot] via GH_TOKEN.
+        RC_PR_BOT_TOKEN: ${{ inputs.pr_bot_token }}
+        RC_PR_BOT_TOKEN_ENV: RC_PR_BOT_TOKEN
+        RC_PR_BOT_LOGIN: ${{ inputs.pr_bot_login }}
+        PR_NUMBER: ${{ inputs.pr_number }}
+        ANTHROPIC_FEDERATION_RULE_ID: ${{ inputs.anthropic_federation_rule_id }}
+        ANTHROPIC_ORGANIZATION_ID: ${{ inputs.anthropic_organization_id }}
+        ANTHROPIC_SERVICE_ACCOUNT_ID: ${{ inputs.anthropic_service_account_id }}
+        ANTHROPIC_WORKSPACE_ID: ${{ inputs.anthropic_workspace_id }}
+      run: bash "$GITHUB_ACTION_PATH/run-review.sh"
+
+    - name: Write job summary
+      if: always()
+      shell: bash
+      run: bash "$GITHUB_ACTION_PATH/summary.sh"
