@@ -375,9 +375,12 @@ Each reported finding that sits on a line of the PR's diff becomes an inline com
 - **Where it goes.** Each reviewer reports the exact `file:line` (or `file:start-end`) of a finding. A script checks that line against the PR's diff as GitHub reports it. If it fits, the comment goes there; if not (a file the PR didn't change, a line outside the changed hunks), the finding goes in the digest under **Outside the diff**. Nothing is moved to a "nearby" line.
 - **Request changes.** A run with any Critical or Important finding posts its review as **request changes**, once: not again while that request is still active. A later run with none dismisses it. If GitHub refuses (for example, on a PR opened by `github-actions[bot]` itself), the review is posted as a plain comment.
 - **A person's dismissal sticks.** If someone dismisses the bot's "request changes" review, the findings it listed never request changes again on that PR. Only a new Critical or Important finding does.
+- **Dismissing may be refused.** On a protected branch that limits who can dismiss reviews, GitHub may refuse the bot's dismissal. Then its "request changes" stays until a person dismisses it (and that dismissal sticks, as above).
 - **Tags.** Each comment shows the finding's confidence tag, the same as in the report: `[verified]`, `[cross-reviewed]`, `[1 reviewer · unverified]`, `[unverified]` or `[tool-only:<rule>]`. The digest explains them under **What the tags mean**.
 - **If GitHub rejects the review** (one bad line fails the whole review), every finding goes in the digest instead. Nothing is lost.
 - **At most 50 inline comments** per run; the rest go in the digest.
+- **If the PR head moved during the run** (a push landed), nothing goes inline, nothing requests changes and nothing is dismissed. Every finding goes in the digest.
+- **No pings.** `@mentions` in finding text are neutralised, so the bot never notifies anyone.
 
 ### Re-runs
 
@@ -386,6 +389,9 @@ A re-run (a new push, or `/review-council` again) is matched to earlier comments
 - **Already commented** → left alone: not posted again, not edited.
 - **New** → a new inline comment.
 - **No longer reported** → AI reviewers don't mention every problem on every run, so silence is not proof of a fix. Claude re-checks each such comment against the current code. Only the ones it finds **fixed** get a short reply ("Re-checked at `<sha>`: this looks fixed. Resolving.") and their thread resolved. The rest stay open. If Claude finds an old comment describes the same problem as a newly worded finding, the new one isn't posted again.
+- **Resolving may be refused.** With the Actions token, GitHub may refuse to resolve a thread. The bot still posts its one "looks fixed" reply (marked, never repeated), and the thread stays open for a person to resolve.
+- **Fixed, then back.** If a finding the bot resolved as fixed is reported again on a later run, it gets a new comment.
+- **Resolved by a person** → left alone. The bot never re-opens, replies to or re-posts a thread a person resolved.
 - **A degraded run** (a reviewer failed) resolves nothing and dismisses nothing.
 
 Only comments posted by the same identity (`github-actions[bot]`, or your bot) count as earlier comments. A comment by anyone else that copies the hidden markers is ignored.
@@ -396,7 +402,7 @@ One comment per PR. A re-run edits it in place.
 
 It has three sections:
 
-1. **What was found, and by whom.** A table of findings by severity (Critical, Important, Suggestions), with confidence badges and the reviewers that raised them. Under it: how many went inline, and the full text of the findings **outside the diff**. A reviewer that failed or was skipped is named here. It never fails silently: if every reviewer fails, a short "review could not run" digest is still posted, with status `degraded` and the failed reviewers named.
+1. **What was found, and by whom.** A table of findings by severity (Critical, Important, Suggestions), with confidence badges and the reviewers that raised them. Under it: how many went inline, and the full text of the findings **outside the diff**. A reviewer that failed or was skipped is named here. It never fails silently: if every reviewer fails, a short "review could not run" digest is still posted, with status `degraded` and the failed reviewers named. The digest is capped in size: findings that don't fit are counted as "N more not shown".
 2. **What the council decided.** What was upheld, refuted or left unverified by the double-check pass.
 3. **What was fixed.** In CI this is one line: `Not triaged — automated CI run.`
 
@@ -452,9 +458,9 @@ PRs from forks are ignored completely. That includes `/review-council` comments 
 
 **Who can trigger.** The `pull_request` trigger runs for branches pushed to your repo, which needs write access. The `/review-council` trigger checks the commenter's permission (`GET /repos/{owner}/{repo}/collaborators/{user}/permission`) and runs only for `admin`, `maintain` or `write`. All checks run in the `gate` job; the `review` job runs only if they pass.
 
-**What the run reads from the PR.** Because fork PRs are skipped, the PR's code, title, body and diff come from people with write access. PR comments and reviews are different: on a public repo anyone can write them. In CI the run reads only comments and reviews whose author is `OWNER`, `MEMBER` or `COLLABORATOR`, and drops the rest. All PR text, trusted or not, is treated as data to review, never as instructions.
+**What the run reads from the PR.** Because fork PRs are skipped, every PR is opened by a person or bot with write access. But a bot PR (Dependabot, Renovate, an agent that opens PRs) can carry text written by others: upstream release notes in the body, vendored code in the diff. PR comments and reviews are different again: on a public repo anyone can write them. In CI the run reads only comments and reviews whose author is `OWNER`, `MEMBER` or `COLLABORATOR`, and drops the rest. That is wider than the write-access rule for `/review-council`: `MEMBER` is any org member, and `COLLABORATOR` is any collaborator, including read and triage access. All PR text, trusted or not, is treated as data to review, never as instructions. It can still try to steer the run; see **Residual risk** below.
 
-**Job permissions.** The `review` job gets exactly the caller's grant: `contents: read`, `pull-requests: write`, `issues: write`, plus `id-token: write` with federation only. The checkout does not keep credentials (`persist-credentials: false`). The run can read code, post comments and reviews, resolve its own comment threads and dismiss its own reviews. It cannot push.
+**Job permissions.** The `review` job gets exactly the caller's grant: `contents: read`, `pull-requests: write`, `issues: write`, plus `id-token: write` with federation only. The checkout does not keep credentials (`persist-credentials: false`). The run can read code, post comments and reviews, resolve its own comment threads and dismiss its own reviews (GitHub may refuse either; see [What gets posted](#what-gets-posted)). It cannot push.
 
 **The PR's Claude settings never load.** Claude Code runs with `--setting-sources user`, so the reviewed branch's `.claude/` settings and hooks are never loaded into the session that holds the keys.
 
@@ -477,7 +483,7 @@ That is not an escalation: anyone who can push a branch can already edit any wor
 
 ### Secrets, data egress and residual risk
 
-**Secret scan before posting.** Before the digest is posted, and before the report is written to the job summary, likely secrets are replaced with `[REDACTED]`. Both use one shared list (`rc-post.sh redact`): Anthropic (`sk-ant-…`), OpenAI (`sk-…`, `sk-proj-…`), OpenRouter (`sk-or-…`), Perplexity (`pplx-…`), GitHub (`ghp_…`, `gho_…`, `ghs_…`, `ghu_…`, `ghr_…`, `github_pat_…`) and AWS (`AKIA…`, `ASIA…`). The comment is still posted. The log shows only how many values were redacted, never the values.
+**Secret scan before posting.** Before the digest and inline comments are posted, and before the report is written to the job summary, likely secrets are replaced with `[REDACTED]`. Both use one shared list (`rc-post.sh redact`): Anthropic (`sk-ant-…`), OpenAI (`sk-…`, `sk-proj-…`), OpenRouter (`sk-or-…`), Perplexity (`pplx-…`), GitHub (`ghp_…`, `gho_…`, `ghs_…`, `ghu_…`, `ghr_…`, `github_pat_…`), AWS (`AKIA…`, `ASIA…`), Google API keys (`AIza…`), Slack (`xoxb-…`, `xoxp-…`, `xoxa-…`, `xoxr-…`), Stripe live keys (`sk_live_…`, `rk_live_…`) and private key blocks (`-----BEGIN … PRIVATE KEY-----`). Inline comments are redacted too, one comment at a time, before they are encoded into the review. The comment is still posted. The log shows only how many values were redacted, never the values.
 
 **Where your code goes.** The PR's diff and the files the reviewers read are sent, under **your** keys, to:
 
@@ -491,7 +497,7 @@ Static-analysis tools run on the runner. `trufflehog` checks found credentials a
 
 **Federation (opt-in).** With federation there is no long-lived Anthropic key in your repo, and a leaked token lasts minutes. But the job has `id-token: write`, so it can mint GitHub OIDC tokens for your repo, for any audience. Make sure no cloud trust policy (AWS, GCP, Azure, …) matches this repo's PR runs broadly, for example `repo:<owner>/<repo>:*`. The run strips the token-request variables (`ACTIONS_ID_TOKEN_REQUEST_URL`, `ACTIONS_ID_TOKEN_REQUEST_TOKEN`) from Claude's environment, but that is only a partial guard. With an API key the caller does not grant `id-token: write`, so this does not apply.
 
-**Residual risk.** The orchestrator is Claude Code with a Bash tool, and the API keys are in its environment (with federation, the Anthropic credential is a token that expires in minutes). It reads the PR's code, title, body and diff, which could contain instructions planted to steer it. Those come from people with write access. Comments and reviews from anyone else are dropped before the run reads them. So a malicious PR author with write access could try to make the run leak the keys. They could already do that without Review Council, by editing a workflow in their branch to print the secrets. Use dedicated keys with spend limits, rotate them if you suspect a leak, and don't use the workflow on repos where people you don't trust have write access.
+**Residual risk.** The orchestrator is Claude Code with a Bash tool, and the API keys are in its environment (with federation, the Anthropic credential is a token that expires in minutes). It reads the PR's code, title, body and diff, which could contain instructions planted to steer it. The PR is opened by a person or bot with write access, but a bot PR can carry text written by others (release notes, vendored code). Comments and reviews from untrusted authors are dropped before the run reads them. So a malicious PR author with write access could try to make the run leak the keys. They could already do that without Review Council, by editing a workflow in their branch to print the secrets. Third-party text in a bot PR is the case write access does not cover: it is treated as data, but a prompt injection in it still runs in a session that holds the keys. If that worries you, don't comment `/review-council` on dependency-bot PRs. Use dedicated keys with spend limits, rotate them if you suspect a leak, and don't use the workflow on repos where people you don't trust have write access.
 
 ### Who posts
 

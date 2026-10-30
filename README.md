@@ -469,7 +469,7 @@ By default Review Council is **report-only**. You can opt in to have it post its
 
 - **Inline comments.** Each finding on a line of the PR's diff becomes an inline review comment on that line, all in one review. The review **requests changes** when there is a Critical or Important finding, and is a plain comment otherwise; once a person dismisses that request, the same findings never raise it again. Each comment carries the finding's confidence tag (e.g. `[cross-reviewed]`), explained in the digest.
 - **One digest comment.** A summary with three sections: **what was found (and by whom)**, **what the council decided**, and **what was fixed** (your triage). Findings that aren't on the diff are written out here in full. Re-running updates the *same* comment in place, so there is no spam.
-- **Re-runs.** A finding already commented on is left alone and new ones are added. An earlier comment the run no longer reports is re-checked by Claude against the current code, and resolved only if it looks fixed.
+- **Re-runs.** A finding already commented on is left alone and new ones are added. An earlier comment the run no longer reports is re-checked by Claude against the current code, and resolved only if it looks fixed (if GitHub refuses, the bot replies once and a person resolves it). A thread a person resolved is left alone; a fixed finding that comes back gets a new comment. If GitHub refuses to dismiss the bot's "request changes" (protected-branch rules), a person dismisses it.
 
 Turn it on in `.review-council/config.yml` (or `config.local.yml`):
 

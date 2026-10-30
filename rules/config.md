@@ -460,8 +460,11 @@ pr_comments:
   taken from local git, never from config.
 - **Secret redaction.** Before posting, `rc-post.sh` replaces likely secrets in the digest
   (Anthropic `sk-ant-…`, OpenRouter `sk-or-…`, OpenAI `sk-proj-…`/legacy `sk-…`, GitHub
-  `ghp_`/`gho_`/`ghs_`/`ghu_`/`ghr_`/`github_pat_…`, Perplexity `pplx-…`, AWS `AKIA…`/`ASIA…`)
-  with `[REDACTED]` and notes only the count on stderr — it still posts (fail-soft). The same
+  `ghp_`/`gho_`/`ghs_`/`ghu_`/`ghr_`/`github_pat_…`, Perplexity `pplx-…`, AWS `AKIA…`/`ASIA…`,
+  Google API keys `AIza…`, Slack `xoxb-`/`xoxp-`/`xoxa-`/`xoxr-`, Stripe live keys
+  `sk_live_`/`rk_live_`, and `-----BEGIN … PRIVATE KEY-----` blocks) with `[REDACTED]` and
+  notes only the count on stderr — it still posts (fail-soft). Inline comments are redacted
+  the same way, one comment at a time, before they are encoded into the review. The same
   implementation is exposed as `rc-post.sh redact` (stdin → redacted stdout, count on stderr,
   non-zero exit and no output if redaction fails) for other outputs such as a CI job summary.
 - **Identity under `GITHUB_TOKEN`.** The Actions token cannot read `/user`, so `rc-post.sh`

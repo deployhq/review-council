@@ -37,8 +37,10 @@ name: Review Council
 #     — so a comment from a user without write access cannot cancel a review.
 #   - The reviewed repo is checked out without persisted credentials; the
 #     token used to post is GITHUB_TOKEN, scoped by the caller's grant.
-#   - In federation mode the OIDC request variables are stripped from Claude's
-#     environment; only the token refresh loop in the review action holds them.
+#   - In federation mode run-review.sh unsets the OIDC request variables
+#     before starting Claude, so they are not in Claude's environment. This
+#     is a partial guard only: a process with Bash on the runner can still
+#     read them (e.g. from /proc, or via sudo on hosted runners).
 #   - The composite actions are loaded from deployhq/review-council at
 #     `plugin_ref`, the same ref as the plugin itself.
 on:

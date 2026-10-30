@@ -56,10 +56,12 @@ MARKER='<!-- rc:report -->'
 # Oniguruma regex for jq: Anthropic sk-ant-, OpenRouter sk-or-, OpenAI
 # sk-proj-/sk-svcacct-/sk-admin- and legacy sk-<32+ alnum>, GitHub
 # ghp_/gho_/ghs_/ghu_/ghr_ and github_pat_, Perplexity pplx-, AWS access key ids
-# AKIA/ASIA. The lookbehind/lookahead keep it to whole tokens; `_` is NOT in the
+# AKIA/ASIA, Google AIza, Slack xox[abpr]-, Stripe sk_live_/rk_live_, and PEM
+# private key blocks (the whole block when its END line is there). The
+# lookbehind/lookahead keep it to whole tokens; `_` is NOT in the
 # lookbehind so a token wrapped in markdown italics (`_sk-ant-..._`) is still
 # caught. The length floors keep ordinary text ("sk-learn", a 40-hex SHA) out.
-SECRET_RE='(?<![A-Za-z0-9-])(?:sk-(?:ant|or|proj|svcacct|admin)-[A-Za-z0-9_-]{20,}|sk-[A-Za-z0-9]{32,}|gh[pousr]_[A-Za-z0-9]{36,}|github_pat_[A-Za-z0-9_]{22,}|pplx-[A-Za-z0-9]{32,}|(?:AKIA|ASIA)[0-9A-Z]{16}(?![0-9A-Za-z]))'
+SECRET_RE='(?<![A-Za-z0-9-])(?:sk-(?:ant|or|proj|svcacct|admin)-[A-Za-z0-9_-]{20,}|sk-[A-Za-z0-9]{32,}|gh[pousr]_[A-Za-z0-9]{36,}|github_pat_[A-Za-z0-9_]{22,}|pplx-[A-Za-z0-9]{32,}|(?:AKIA|ASIA)[0-9A-Z]{16}(?![0-9A-Za-z])|AIza[0-9A-Za-z_-]{35}|xox[abpr]-[A-Za-z0-9-]{10,}|[sr]k_live_[A-Za-z0-9]{20,}|-----BEGIN [A-Z ]*PRIVATE KEY-----(?:[\s\S]*?-----END [A-Z ]*PRIVATE KEY-----)?)'
 GH_POST_TOKEN=''  # set by `post` from the named env var; empty = ambient gh auth
 
 # ---------------------------------------------------------------------------
@@ -365,18 +367,30 @@ OURS_JQ='
    | map({key: (.comments.nodes[0].databaseId | tostring), value: {id: .id, resolved: .isResolved}})
    | from_entries) as $th
   | [ .[] | arrays | .[]
-      | select((.body | type) == "string" and .in_reply_to_id == null
+      | select((.body | type) == "string"
           and (if $me != "" then .user.login == $me
-               else (.user.type == "Bot" and ($fb == "" or .user.login == $fb)) end))
+               else (.user.type == "Bot" and ($fb == "" or .user.login == $fb)) end)) ] as $mine
+  # Roots we already answered "looks fixed" (resolved or not): never stale
+  # again, and a finding that comes back gets a new comment.
+  | ([ $mine[] | select(.in_reply_to_id != null and (.body | contains("<!-- rc:fixed -->")))
+       | .in_reply_to_id | tostring ]) as $fixed
+  | [ $mine[] | select(.in_reply_to_id == null)
       | (.body | capture("<!-- rc:finding (?<fp>[A-Za-z0-9._:/@+-]{1,200}) -->\\s*$") .fp) as $fp
-      | {id, fp: $fp, path, line: (.line // .original_line), body, thread: $th[.id | tostring]} ]'
+      | {id, fp: $fp, path, line: (.line // .original_line), body, thread: $th[.id | tostring],
+         fixed: (.id | tostring | IN($fixed[]))} ]'
 
 # Shared jq definitions: the ledger's reported findings, normalised.
 # shellcheck disable=SC2016  # jq program, not shell
 LEDGER_DEFS='
   def str: type == "string" and . != "";
   def posint: type == "number" and . == floor and . > 0 and . < 10000000;
-  def clean: tostring | gsub("\r"; "") | gsub("<!--"; "&lt;!--");
+  # Model text: no hidden markers, no secrets (redacted here, before JSON
+  # encoding, so a secret at the start of a line is still caught), and no
+  # live @mentions outside code spans (a zero-width space after the @).
+  def clean: tostring | gsub("\r"; "") | gsub("<!--"; "&lt;!--") | gsub($re; "[REDACTED]")
+    | [splits("`")] | to_entries
+    | map(if .key % 2 == 0 then .value | gsub("@(?<c>[A-Za-z0-9_])"; "@\u200b\(.c)") else .value end)
+    | join("`");
   def oneline: clean | gsub("\n+"; " ") | .[0:300];
   def reported:
     (if type == "object" then .findings else null end) | if type == "array" then . else [] end
@@ -435,7 +449,7 @@ PLAN_JQ='
       else .out += [$x] end)
   | .out
   | map(. + {md: render, loc: loc})
-  | ([$ex[0][].fp] + ($cov | map(tostring))) as $have
+  | ([$ex[0][] | select(.fixed | not) | .fp] + ($cov | map(tostring))) as $have
   | map(. as $x | . + {have: ($x.tracked and ($have | index($x.fingerprint)) != null)}) as $fs
   | [ $fs[] | select((.have | not) and .tracked) | . + {a: anchor} | select(.a != null) ] as $cand
   | ([$fs[] | select(.tracked) | .fingerprint]) as $fps
@@ -447,7 +461,8 @@ PLAN_JQ='
                                       outside: (.loc + "\n\n" + .md)} ],
       outside: ([ $fs[] | select(.have | not) | select(. as $x | any($cand[0:$maxn][]; .fingerprint == $x.fingerprint) | not)
                   | .loc + "\n\n" + .md ]),
-      stale: [ $ex[0][] | select((.fp as $fp | $fps | index($fp)) == null and .thread != null and .thread.resolved == false) ],
+      stale: [ $ex[0][] | select((.fp as $fp | $fps | index($fp)) == null and (.fixed | not)
+                                 and .thread != null and .thread.resolved == false) ],
     }
   | .resolve = [ .stale[] | select(.id as $i | $res | index($i)) | select(.thread.id | test("^[A-Za-z0-9_=-]+$"))
                  | {id, thread: .thread.id} ]'
@@ -527,9 +542,10 @@ do_stale() {
   _ledger="${2:?rc-post: stale needs <ledger-file>}"
   _tokname="${3:-}"
   review_setup || return 1
-  jq -n --slurpfile f "$_ledger" --slurpfile ex "$_tmp/ours.json" "$LEDGER_DEFS"'
+  jq -n --slurpfile f "$_ledger" --slurpfile ex "$_tmp/ours.json" --arg re "$SECRET_RE" "$LEDGER_DEFS"'
     ($f[0] | reported | map(select(.tracked) | .fingerprint)) as $fps
-    | [ $ex[0][] | select((.fp as $fp | $fps | index($fp)) == null and .thread != null and .thread.resolved == false)
+    | [ $ex[0][] | select((.fp as $fp | $fps | index($fp)) == null and (.fixed | not)
+                          and .thread != null and .thread.resolved == false)
         | {id, fingerprint: .fp, path, line, body} ]'
 }
 
@@ -569,6 +585,7 @@ do_review() {
 
   if ! jq -n --slurpfile f "$_ledger" --slurpfile d "$_tmp/diff.json" --slurpfile ex "$_tmp/ours.json" \
     --argjson inline "$_inline" --argjson maxn "$MAX_INLINE" --argjson cov "$_covered" --argjson res "$_fixed" \
+    --arg re "$SECRET_RE" \
     "$LEDGER_DEFS"' $f[0] | '"$PLAN_JQ" >"$_tmp/plan.json" 2>/dev/null; then
     echo "rc-post: could not place the findings; posting the digest only" >&2
     printf '{"block":false,"blocking":[],"kept":0,"new":[],"outside":[],"stale":[],"resolve":[]}\n' >"$_tmp/plan.json"
@@ -583,28 +600,36 @@ do_review() {
   # look like an empty one: then "unknown" — no new block, no dismissal.
   _active=""
   _ack='[]'
+  # Every review we post carries `<!-- rc:review -->`: another bot's (or
+  # another workflow's) review is never ours to count or dismiss. The
+  # timeline goes through a file, never argv (Linux caps one argument at
+  # 128 KB, and a busy PR's timeline is bigger).
   if _revs="$(gh_post api --paginate "repos/$_repo/pulls/$_pr/reviews" 2>/dev/null)"; then
-    _tl=null
+    printf 'null\n' >"$_tmp/tl.json"
     if _tlraw="$(gh_post api --paginate "repos/$_repo/issues/$_pr/timeline" 2>/dev/null)"; then
-      _tl="$(printf '%s' "$_tlraw" | jq -s -c '.' 2>/dev/null)" || _tl=null
-      [ -n "$_tl" ] || _tl=null
+      printf '%s' "$_tlraw" | jq -s -c '.' >"$_tmp/tl.json" 2>/dev/null || printf 'null\n' >"$_tmp/tl.json"
     fi
     # shellcheck disable=SC2016  # jq program, not shell
-    _rv="$(printf '%s' "$_revs" | jq -s -c --arg me "$_me" --arg fb "$_fb_login" --argjson tl "$_tl" '
+    _rv="$(printf '%s' "$_revs" | jq -s -c --arg me "$_me" --arg fb "$_fb_login" --slurpfile tl "$_tmp/tl.json" '
         [ .[] | arrays | .[]
-          | select(if $me != "" then .user.login == $me
-                   else (.user.type == "Bot" and ($fb == "" or .user.login == $fb)) end) ] as $ours
-        | (if $tl == null then null
-           else [ $tl[] | arrays | .[] | select(.event == "review_dismissed" and .actor.type == "User")
-                  | .dismissed_review.review_id ] end) as $human
+          | select((.body // "" | contains("<!-- rc:review -->"))
+              and (if $me != "" then .user.login == $me
+                   else (.user.type == "Bot" and ($fb == "" or .user.login == $fb)) end)) ] as $ours
+        # A person = a User actor other than the identity we post as.
+        | (if $tl[0] == null then null
+           else [ $tl[0][] | arrays | .[]
+                  | select(.event == "review_dismissed" and .actor.type == "User" and .actor.login != $me)
+                  | .dismissed_review.review_id | tostring ] end) as $human
         | { active: [ $ours[] | select(.state == "CHANGES_REQUESTED") | .id ],
             ack: ([ $ours[] | select(.state == "DISMISSED") | . as $r
-                    | select($human == null or ($human | index($r.id)) != null)
+                    | select($human == null or ($r.id | tostring | IN($human[])))
                     | (.body // "") | capture("<!-- rc:blocking (?<l>[A-Za-z0-9._:/@+ -]*) -->").l
                     | split(" ")[] | select(. != "") ] | unique) }' 2>/dev/null)" || _rv=""
     if [ -n "$_rv" ]; then
       _active="$(printf '%s' "$_rv" | jq -c '.active')"
       _ack="$(printf '%s' "$_rv" | jq -c '.ack')"
+    else
+      echo "rc-post: could not read our earlier reviews; not requesting changes or dismissing this run" >&2
     fi
   fi
   _block="$(jq -r '.block' "$_tmp/plan.json")"
@@ -620,7 +645,9 @@ do_review() {
   #    retries as a comment, and a failed comment moves the inline findings
   #    to the digest.
   _event=COMMENT
-  if [ "$_raise" = true ] && [ "$_active" = '[]' ]; then _event=REQUEST_CHANGES; fi
+  # Only on the reviewed head (_inline): never block or dismiss a commit we
+  # didn't review.
+  if [ "$_inline" = true ] && [ "$_raise" = true ] && [ "$_active" = '[]' ]; then _event=REQUEST_CHANGES; fi
   _review_url=""
   _posted=0
   for _ev in $_event COMMENT; do
@@ -629,6 +656,7 @@ do_review() {
         body: ((if $ev == "REQUEST_CHANGES" then "Review Council found critical or important findings. Requesting changes. "
                 else "" end)
                + "The summary comment on this PR has the full report.\n\n---\n\n<sub>Review done with [Review Council](https://github.com/deployhq/review-council/)</sub>"
+               + "\n\n<!-- rc:review -->"
                + (if $ev == "REQUEST_CHANGES"
                   then "\n\n<!-- rc:blocking " + ([.blocking[] | select(. != "")] | join(" ")) + " -->" else "" end)),
         comments: [.new[] | del(.outside)]}' "$_tmp/plan.json" >"$_tmp/review.raw"
@@ -656,21 +684,27 @@ do_review() {
   _short="$(printf '%s' "$_pr_head" | cut -c1-7)"
   if [ "$_status" != degraded ]; then
     jq -r '.resolve[] | "\(.id) \(.thread)"' "$_tmp/plan.json" >"$_tmp/resolve.txt"
+    # Resolve first, then one marked reply saying how it went. The marker makes
+    # the comment never stale again, so a refused resolve (GitHub may refuse
+    # the Actions token) costs one reply, not one per run.
     while read -r _cid _tid; do
-      jq -n --arg s "$_short" '{body: "Re-checked at \($s): this looks fixed. Resolving."}' >"$_tmp/reply.json"
-      gh_post api "repos/$_repo/pulls/$_pr/comments/$_cid/replies" -X POST --input - <"$_tmp/reply.json" >/dev/null 2>&1 \
-        || echo "rc-post: could not reply on inline comment $_cid" >&2
       # shellcheck disable=SC2016  # GraphQL variables, not shell
       if gh_post api graphql -f id="$_tid" \
         -f query='mutation($id: ID!) { resolveReviewThread(input: {threadId: $id}) { thread { isResolved } } }' >/dev/null 2>&1; then
         _n_res=$((_n_res + 1))
+        _rmsg="Re-checked at $_short: this looks fixed. Resolved."
       else
         echo "rc-post: could not resolve the thread of inline comment $_cid" >&2
+        _rmsg="Re-checked at $_short: this looks fixed. (The thread could not be resolved automatically.)"
       fi
+      jq -n --arg m "$_rmsg" '{body: ($m + "\n\n<!-- rc:fixed -->")}' >"$_tmp/reply.json"
+      gh_post api "repos/$_repo/pulls/$_pr/comments/$_cid/replies" -X POST --input - <"$_tmp/reply.json" >/dev/null 2>&1 \
+        || echo "rc-post: could not reply on inline comment $_cid" >&2
     done <"$_tmp/resolve.txt"
     # Dismiss only on a run the rc:state line calls clean (no critical or
     # important finding), so an empty or unreadable ledger never lifts a block.
-    if [ "$_block" = false ] && [ "$_status" = clean ] && [ -n "$_active" ] && [ "$_active" != '[]' ]; then
+    if [ "$_inline" = true ] && [ "$_block" = false ] && [ "$_status" = clean ] \
+      && [ -n "$_active" ] && [ "$_active" != '[]' ]; then
       printf '%s' "$_active" | jq -r '.[]' >"$_tmp/dismiss.txt"
       while read -r _rid; do
         jq -n --arg s "$_short" '{event: "DISMISS", message: "No critical or important findings in the Review Council review of \($s)."}' >"$_tmp/dismiss.json"
@@ -698,14 +732,25 @@ do_review() {
        + "- `[unverified]` — the double-check could not confirm or refute it (or ran out of time).\n"
        + "- `[tool-only:<rule>]` — a lint or security rule fired and no reviewer confirmed it.\n\n"
        + "</details>") as $legend
+    # GitHub caps a comment at 65,536 characters: keep the findings that fit
+    # in about 60,000 and count the rest.
+    | (60000 - ($dg | length) - ($line | length) - ($legend | length) - 200) as $room
+    | (reduce $o[] as $x ({used: 0, kept: [], more: 0};
+         if .more == 0 and .used + ($x | length) + 9 <= $room
+         then .used += ($x | length) + 9 | .kept += [$x] else .more += 1 end)) as $fit
     | ($line + "\n\n" + $legend
        + (if ($o | length) > 0
-          then "\n\n### Outside the diff (\($o | length))\n\n" + ($o | join("\n\n---\n\n"))
+          then "\n\n### Outside the diff (\($o | length))\n\n" + ($fit.kept | join("\n\n---\n\n"))
+               + (if $fit.more > 0 then "\n\n_\($fit.more) more not shown: too long for one comment. The run'"'"'s report lists them._" else "" end)
           else "" end)) as $sec
-    | ($dg | index($mark)) as $i
-    | if $i != null then $dg[0:$i] + $sec + $dg[($i + ($mark | length)):]
-      else ($dg | rindex("\n---\n")) as $j
-      | if $j != null then $dg[0:$j] + "\n\n" + $sec + "\n" + $dg[$j:] else $dg + "\n\n" + $sec + "\n" end
+    # split/join, not index/rindex: jq 1.7 returns byte offsets for those,
+    # which corrupts the splice as soon as the digest has non-ASCII text.
+    | ($dg | split($mark)) as $parts
+    | if ($parts | length) > 1 then $parts[0] + $sec + ($parts[1:] | join($mark))
+      else ($dg | split("\n---\n")) as $f
+      | if ($f | length) > 1
+        then ($f[:-1] | join("\n---\n")) + "\n\n" + $sec + "\n" + "\n---\n" + $f[-1]
+        else $dg + "\n\n" + $sec + "\n" end
       end' >"$_tmp/digest.md" || {
     echo "rc-post: could not compose the digest; not posting it" >&2
     return 1
