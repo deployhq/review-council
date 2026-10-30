@@ -4,14 +4,15 @@ Review Council can review your pull requests on its own, in GitHub Actions, with
 
 You call it as a **reusable workflow** from your own repo. Your repo's secrets pay for the models. Your repo's `GITHUB_TOKEN` posts the comment.
 
-There is one workflow to call, `review-council.yml`. Claude authenticates in one of two modes:
+There is one workflow to call, `review-council.yml`. Claude authenticates in one of three ways:
 
-| Auth mode | You pass | Caller grants `id-token: write` |
+| Claude credential | You pass | Caller grants `id-token: write` |
 |---|---|---|
 | API key (default) | the `ANTHROPIC_API_KEY` secret | No |
+| Subscription token | the `CLAUDE_CODE_OAUTH_TOKEN` secret | No |
 | Federation (opt-in) | the `anthropic_*` federation inputs (no stored key) | Yes |
 
-Everything else (inputs, optional secrets, behaviour) is the same in both. See [Authenticate Claude](#authenticate-claude).
+Pass exactly one. Everything else (inputs, optional secrets, behaviour) is the same for all three. See [Authenticate Claude](#authenticate-claude).
 
 - [How it works](#how-it-works)
 - [Set it up](#set-it-up)
@@ -34,7 +35,7 @@ Either way, the PR must be open and not a draft. It never runs on PRs from forks
 **What it does.**
 
 1. Checks out the PR's branch.
-2. Installs Claude Code, the Review Council plugin (from a pinned ref), `yq`, and the Codex CLI if you gave it an OpenAI key (or a `harness: codex` seat needs it).
+2. Installs Claude Code, the Review Council plugin (from a pinned ref), `yq`, and the Codex CLI if you gave it a Codex credential (an OpenAI key or a Codex access token), or a `harness: codex` seat needs it.
 3. Runs headless Claude Code: `claude -p "/review-council:run <PR number>"`.
 4. Posts each finding as an **inline comment** on its line of the diff, in one GitHub review. Findings that aren't on the diff go in the **digest** comment, which it posts or updates (never a second one). See [What gets posted](#what-gets-posted).
 5. Appends the final report to the job summary.
@@ -43,16 +44,16 @@ Either way, the PR must be open and not a draft. It never runs on PRs from forks
 
 | Reviewer | Needs |
 |---|---|
-| Claude + the dedicated Security reviewer | `ANTHROPIC_API_KEY`, or Anthropic federation. See [Authenticate Claude](#authenticate-claude). |
-| Codex | `OPENAI_API_KEY` |
+| Claude + the dedicated Security reviewer | One of `ANTHROPIC_API_KEY`, `CLAUDE_CODE_OAUTH_TOKEN`, or Anthropic federation. See [Authenticate Claude](#authenticate-claude). |
+| Codex | One of `OPENAI_API_KEY` or `CODEX_ACCESS_TOKEN`. See [Codex on Enterprise seats](#codex-on-enterprise-seats). |
 | Perplexity | `PERPLEXITY_API_KEY` |
 | Custom seats (optional) | a seat in `config.yml`, approved in the workflow, plus its key. See [Custom seats in CI](#custom-seats-in-ci). |
 
-Claude and Security are the same model family. With only Claude, the council runs in single-reviewer mode: findings are not cross-checked by a second family. **Add `OPENAI_API_KEY`** to get the real council: Codex reviews, and it double-checks the other reviewers' findings.
+Claude and Security are the same model family. With only Claude, the council runs in single-reviewer mode: findings are not cross-checked by a second family. **Add a Codex credential** (`OPENAI_API_KEY`, or `CODEX_ACCESS_TOKEN` on ChatGPT Enterprise) to get the real council: Codex reviews, and it double-checks the other reviewers' findings.
 
 The Google slot (`agy` / `gemini`) is not set up in CI.
 
-**Time and cost.** In our local test, a headless run on a tiny diff took about **3.5 minutes** and cost about **$3 on the Claude side**. Real PRs cost more: cost grows with the size of the diff and the number of reviewers. Codex, Perplexity and seat costs are billed separately by each provider. The run is bounded by the existing caps (`run_budget_seconds`, per-reviewer timeouts, turn limits). There is no separate spend cap.
+**Time and cost.** In our local test, a headless run on a tiny diff took about **3.5 minutes** and cost about **$3 on the Claude side**. Real PRs cost more: cost grows with the size of the diff and the number of reviewers. Codex, Perplexity and seat costs are billed separately by each provider. With a subscription token (Claude) or a Codex access token, usage counts against that plan's limits instead of per-token billing. The run is bounded by the existing caps (`run_budget_seconds`, per-reviewer timeouts, turn limits). There is no separate spend cap.
 
 **Two jobs.** The reusable workflow has a `gate` job and a `review` job. `gate` does every check (event, draft, fork, commenter permission) and has no concurrency group, so any PR comment can start it without side effects. `review` runs only if `gate` passes (`needs: gate`).
 
@@ -62,18 +63,20 @@ The Google slot (`agy` / `gemini`) is not set up in CI.
 
 ## Set it up
 
-You need admin access to the repo, an Anthropic API key (or, opt-in, a federation rule; see [Authenticate Claude](#authenticate-claude)), and (recommended) an OpenAI API key. The steps below use an API key.
+You need admin access to the repo, one Claude credential (an Anthropic API key, a subscription token, or, opt-in, a federation rule; see [Authenticate Claude](#authenticate-claude)), and (recommended) a Codex credential. The steps below use an API key.
 
 ### 1. Add the secrets
 
 In your repo: **Settings → Secrets and variables → Actions → New repository secret**. Organization secrets work too.
 
-Both auth modes take the same optional secrets. Only the API-key mode takes `ANTHROPIC_API_KEY`.
+Claude takes exactly one credential, and Codex at most one. The run fails early with a clear error if you pass two.
 
 | Secret | Required | What it does |
 |---|---|---|
-| `ANTHROPIC_API_KEY` | yes, unless you use [federation](#federation-opt-in) | Runs Claude Code, the Claude reviewer and the Security reviewer. Don't pass it with federation: the run fails if both are set. |
-| `OPENAI_API_KEY` | no (recommended) | Enables the Codex reviewer. The workflow passes it to Codex as `CODEX_API_KEY`, which is the variable Codex reads in non-interactive mode. Without it, the Codex reviewer does not run, even if a `harness: codex` seat installs the Codex CLI. |
+| `ANTHROPIC_API_KEY` | one Claude credential is required | Runs Claude Code, the Claude reviewer and the Security reviewer. Pay per token. The default. |
+| `CLAUDE_CODE_OAUTH_TOKEN` | one Claude credential is required | Same, but on a Claude subscription instead of the API. See [Subscription token](#subscription-token). |
+| `OPENAI_API_KEY` | no (recommended) | Enables the Codex reviewer. The workflow passes it to Codex as `CODEX_API_KEY`, which is the variable Codex reads in non-interactive mode. Without a Codex credential, the Codex reviewer does not run, even if a `harness: codex` seat installs the Codex CLI. |
+| `CODEX_ACCESS_TOKEN` | no | Enables the Codex reviewer on ChatGPT Enterprise plan usage instead of API billing. Use it or `OPENAI_API_KEY`, not both. See [Codex on Enterprise seats](#codex-on-enterprise-seats). |
 | `OPENROUTER_API_KEY` | no | Key for a custom seat on OpenRouter. |
 | `PERPLEXITY_API_KEY` | no | Enables the Perplexity reviewer. |
 | `PR_BOT_TOKEN` | no | A GitHub token to post as your own App or bot instead of `github-actions[bot]`. See [Who posts](#who-posts). |
@@ -107,8 +110,10 @@ jobs:
       approved_seats: ""        # e.g. "kimi" — see "Custom seats in CI"
       run_budget_seconds: 900
     secrets:
-      ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}   # required
+      ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}   # one Claude credential is required
+      # CLAUDE_CODE_OAUTH_TOKEN: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}   # instead of the API key: a Claude subscription
       OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+      # CODEX_ACCESS_TOKEN: ${{ secrets.CODEX_ACCESS_TOKEN }}             # instead of OPENAI_API_KEY: ChatGPT Enterprise
       OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
       PERPLEXITY_API_KEY: ${{ secrets.PERPLEXITY_API_KEY }}
       # PR_BOT_TOKEN: ${{ secrets.PR_BOT_TOKEN }}   # optional: post as your own App or bot
@@ -116,7 +121,7 @@ jobs:
 
 Things to know:
 
-- **Keep the `permissions:` block, and grant no more.** The `review` job has no `permissions:` of its own, so it gets exactly what your caller grants. Without `pull-requests: write` and `issues: write`, the run cannot post. Comments on a PR are issue comments, so `issues: write` is needed. Don't add `id-token: write` with an API key. Only [federation](#federation-opt-in) needs it.
+- **Keep the `permissions:` block, and grant no more.** The `review` job has no `permissions:` of its own, so it gets exactly what your caller grants. Without `pull-requests: write` and `issues: write`, the run cannot post. Comments on a PR are issue comments, so `issues: write` is needed. Don't add `id-token: write` with an API key or a subscription token. Only [federation](#federation-opt-in) needs it.
 - **Merge it to your default branch first.** GitHub runs `issue_comment` workflows only from the default branch. Until the file is on `main` (or whatever your default is), `/review-council` does nothing.
 - **Don't add `concurrency:` with `cancel-in-progress` to the caller.** Every PR comment triggers the caller, so any comment would cancel a running review. The reusable workflow already allows one review per PR, and only an authorised trigger can cancel it.
 - **Pinning (optional).** With `main`, every upstream change reaches your runs. If you'd rather control when changes arrive, pin the ref in `uses:` (the *workflow*) and the `plugin_ref` input (the *plugin*) to the same commit SHA.
@@ -135,6 +140,7 @@ Comment `/review-council` on an open, non-draft PR. Watch the run in the **Actio
 | `plugin_ref` | string | `main` | Git ref of `deployhq/review-council` to load the plugin from (and the shared steps). Set it to the same tag or SHA as the `uses:` ref. |
 | `claude_code_version` | string | a pinned version | Version of `@anthropic-ai/claude-code` to install. |
 | `codex_version` | string | `0.163.0` | Version of the Codex CLI to install. |
+| `claude_model` | string | `""` | The model Claude Code runs, e.g. `claude-opus-5-5` or an alias like `sonnet`. Empty = Claude Code's default for your credential. The reviewer subagents inherit it. See [Pick the Claude model](#pick-the-claude-model). |
 | `static_analysis` | boolean | `true` | Run the static-analysis scan (secrets, CVEs, lint) before the review. Missing tools are skipped and noted; the run never stops to ask. |
 | `skip_bot_prs` | boolean | `false` | Skip PRs opened by a bot account (Dependabot, Renovate, a GitHub App). Their text can come from outside your org. Off by default, so agent-opened PRs are reviewed. |
 | `pr_bot_login` | string | `""` | With `PR_BOT_TOKEN`: the login it posts as, e.g. `my-app[bot]`. See [Who posts](#who-posts). |
@@ -147,14 +153,15 @@ The workflow loads its steps from composite actions in `deployhq/review-council`
 
 ## Authenticate Claude
 
-Claude Code needs Anthropic credentials. You always call `review-council.yml`. **What you pass picks the mode:** set `anthropic_federation_rule_id` for federation, or pass `ANTHROPIC_API_KEY` for an API key. Pass one, not both. The run checks this first and fails with a clear error if the setup is mixed or incomplete.
+Claude Code needs one Anthropic credential. You always call `review-council.yml`. **What you pass picks the mode:** the `ANTHROPIC_API_KEY` secret, the `CLAUDE_CODE_OAUTH_TOKEN` secret, or the `anthropic_*` federation inputs. Pass exactly one. The run checks this first and fails with a clear error if the setup is mixed or incomplete.
 
-| | API key (default) | Federation (opt-in) |
-|---|---|---|
-| You pass | The `ANTHROPIC_API_KEY` secret | Nothing secret. Three or four IDs as workflow inputs. |
-| Setup | Simplest: one secret | A rule in the Anthropic Console (admin or owner role) |
-| If the credential leaks | A long-lived key, until you rotate it | A token that lasts minutes |
-| Caller grants `id-token: write` | **No** | **Yes** |
+| | API key (default) | Subscription token | Federation (opt-in) |
+|---|---|---|---|
+| You pass | The `ANTHROPIC_API_KEY` secret | The `CLAUDE_CODE_OAUTH_TOKEN` secret | Nothing secret. Three or four IDs as workflow inputs. |
+| Who pays | Pay per token, on the API | The subscription seat of the person who made the token | Pay per token, on the API |
+| Setup | Simplest: one secret | `claude setup-token`, then one secret | A rule in the Anthropic Console (admin or owner role) |
+| If the credential leaks | A long-lived key, until you rotate it | A long-lived token (about a year), until you revoke it | A token that lasts minutes |
+| Caller grants `id-token: write` | **No** | **No** | **Yes** |
 
 ### API key (default)
 
@@ -165,6 +172,26 @@ Add `ANTHROPIC_API_KEY` as a secret and pass it. Leave the `anthropic_*` inputs 
     secrets:
       ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
 ```
+
+### Subscription token
+
+Run Claude on a Claude subscription instead of the API.
+
+1. On your own machine, run `claude setup-token`. It works on Pro, Max, Team and Enterprise plans, and prints a long-lived OAuth token.
+2. Add it as the `CLAUDE_CODE_OAUTH_TOKEN` secret.
+3. In the caller, pass it in place of `ANTHROPIC_API_KEY`. Leave the `anthropic_*` inputs unset, and don't grant `id-token: write`.
+
+```yaml
+    uses: deployhq/review-council/.github/workflows/review-council.yml@main
+    secrets:
+      CLAUDE_CODE_OAUTH_TOKEN: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+```
+
+Know before you use it:
+
+- **It's one person's seat.** Usage counts against the seat, and the usage limits, of whoever created the token. A busy repo can use up that person's limits.
+- **Someone must renew it.** Third-party guides say it lasts about a year. Note who owns it and when it expires.
+- **Shared across many repos?** Anthropic recommends an API key for that.
 
 ### Federation (opt-in)
 
@@ -191,7 +218,7 @@ With [Workload Identity Federation](https://platform.claude.com/docs/en/manage-c
 - **Scope:** `workspace:inference` is enough, since the run only calls Messages. The default `workspace:developer` also works.
 - **Token lifetime:** set `token_lifetime_seconds: 3600`. The wizard fills in 600. With 3600, only GitHub's own limit applies (below).
 
-**2. Turn it on in the caller.** In [`examples/github-action/review-council.yml`](../examples/github-action/review-council.yml), uncomment the lines marked "federation only": `id-token: write` and the `anthropic_*` inputs. Remove the `ANTHROPIC_API_KEY` line. The IDs are not secrets, so they go under `with:`.
+**2. Turn it on in the caller.** In [`examples/github-action/review-council.yml`](../examples/github-action/review-council.yml), uncomment the lines marked "federation only": `id-token: write` and the `anthropic_*` inputs. Remove the `ANTHROPIC_API_KEY` line (and don't pass `CLAUDE_CODE_OAUTH_TOKEN`). The IDs are not secrets, so they go under `with:`.
 
 ```yaml
 permissions:
@@ -224,6 +251,17 @@ The first three IDs are required for federation. The other inputs and optional s
 
 **Not yet proven:** whether Claude Code refreshes its token in the middle of a long review. A live run longer than 10 minutes will check this. Until then, if long reviews fail with `Authentication failed` partway through, use an API key.
 
+### Pick the Claude model
+
+The `claude_model` input sets the model Claude Code runs, e.g. `claude-opus-5-5` or an alias like `sonnet`. Leave it empty for Claude Code's default for your credential. The Claude and Security reviewer subagents inherit it.
+
+```yaml
+    with:
+      claude_model: sonnet
+```
+
+It works with all three credentials. A value with characters other than letters, digits, `.`, `_`, `:`, `-` (and an optional `[1m]` suffix) fails the run early. Separately, `reviewers.claude.model` in `config.yml` pins only the Claude reviewer subagent (see [`rules/config.md`](../rules/config.md#reviewers-block)).
+
 ## Configure it
 
 ### Where settings come from
@@ -246,6 +284,31 @@ Precedence is per key: **workflow env > `config.yml` > built-in default.**
 - **`config.local.yml` is not used in CI.** It is gitignored, so it is not in the checkout.
 
 Start from [`examples/github-action/config.yml`](../examples/github-action/config.yml). The full schema is in [`rules/config.md`](../rules/config.md).
+
+### Codex on Enterprise seats
+
+On ChatGPT Enterprise, Codex can run on plan usage instead of API billing, with a Codex access token.
+
+1. A workspace admin allows Codex access tokens for the workspace.
+2. A member creates an access token.
+3. Add it as the `CODEX_ACCESS_TOKEN` secret, and pass it in place of `OPENAI_API_KEY`:
+
+   ```yaml
+       secrets:
+         CODEX_ACCESS_TOKEN: ${{ secrets.CODEX_ACCESS_TOKEN }}
+   ```
+
+How it runs:
+
+- Before the review, the run logs Codex in with `codex login --with-access-token`, then drops the variable from the environment. The log says `Codex auth: access token (ChatGPT Enterprise)`.
+- If the login fails, the run warns and goes on without native Codex.
+- Use it **or** `OPENAI_API_KEY`, not both. The run fails early if both are set.
+
+Know before you use it:
+
+- **OpenAI recommends API keys for automation**, and warns against running Codex in untrusted environments.
+- **The login file stays on the runner** for the rest of the job. The same prompt-injection risk as any other key applies (see [Residual risk](#secrets-data-egress-and-residual-risk)).
+- **Don't copy a personal `~/.codex/auth.json`** into a secret. Use an access token made for this.
 
 ### Custom seats in CI
 
@@ -289,7 +352,7 @@ Seat roles, families and egress: see [Custom reviewer seats](../README.md#custom
 
 ## Example setups
 
-Two complete setups for one repo. Both use an API key. To use federation instead, grant `id-token: write` and replace `ANTHROPIC_API_KEY` with the three federation inputs (see [Federation (opt-in)](#federation-opt-in)).
+Two complete setups for one repo. Both use API keys. To use a subscription token, replace `ANTHROPIC_API_KEY` with `CLAUDE_CODE_OAUTH_TOKEN` (see [Subscription token](#subscription-token)). To use federation, grant `id-token: write` and replace `ANTHROPIC_API_KEY` with the three federation inputs (see [Federation (opt-in)](#federation-opt-in)). For Codex on ChatGPT Enterprise, replace `OPENAI_API_KEY` with `CODEX_ACCESS_TOKEN` (see [Codex on Enterprise seats](#codex-on-enterprise-seats)).
 
 ### (a) Claude + Codex
 
@@ -490,8 +553,8 @@ That is not an escalation: anyone who can push a branch can already edit any wor
 
 **Where your code goes.** The PR's diff and the files the reviewers read are sent, under **your** keys, to:
 
-- **Anthropic** — always (Claude Code, the Claude and Security reviewers). With federation, the GitHub OIDC token is also sent to Anthropic's token endpoint.
-- **OpenAI** — if `OPENAI_API_KEY` is set (Codex).
+- **Anthropic** — always (Claude Code, the Claude and Security reviewers), whichever Claude credential you use. With federation, the GitHub OIDC token is also sent to Anthropic's token endpoint.
+- **OpenAI** — if `OPENAI_API_KEY` or `CODEX_ACCESS_TOKEN` is set (Codex).
 - **Perplexity** — if `PERPLEXITY_API_KEY` is set.
 - **OpenRouter and the model's host** — for an approved OpenRouter seat (with `data_collection: deny`).
 - **GitHub** — the digest comment and the job summary.
@@ -500,7 +563,7 @@ Static-analysis tools run on the runner. `trufflehog` checks found credentials a
 
 **Federation (opt-in).** With federation there is no long-lived Anthropic key in your repo, and a leaked token lasts minutes. But the job has `id-token: write`, so it can mint GitHub OIDC tokens for your repo, for any audience. Make sure no cloud trust policy (AWS, GCP, Azure, …) matches this repo's PR runs broadly, for example `repo:<owner>/<repo>:*`. The run strips the token-request variables (`ACTIONS_ID_TOKEN_REQUEST_URL`, `ACTIONS_ID_TOKEN_REQUEST_TOKEN`) from Claude's environment, but that is only a partial guard. With an API key the caller does not grant `id-token: write`, so this does not apply.
 
-**Residual risk.** The orchestrator is Claude Code with a Bash tool, and the API keys are in its environment (with federation, the Anthropic credential is a token that expires in minutes). It reads the PR's code, title, body and diff, which could contain instructions planted to steer it. The PR is opened by a person or bot with write access, but a bot PR can carry text written by others (release notes, vendored code). Comments and reviews from untrusted authors are dropped before the run reads them. So a malicious PR author with write access could try to make the run leak the keys. They could already do that without Review Council, by editing a workflow in their branch to print the secrets. Third-party text in a bot PR is the case write access does not cover: it is treated as data, but a prompt injection in it still runs in a session that holds the keys. If that worries you, don't comment `/review-council` on dependency-bot PRs, or set `skip_bot_prs: true` so the workflow never reviews PRs opened by a bot account (Dependabot, Renovate, any GitHub App, including an agent's App). Use dedicated keys with spend limits, rotate them if you suspect a leak, and don't use the workflow on repos where people you don't trust have write access.
+**Residual risk.** The orchestrator is Claude Code with a Bash tool, and the API keys are in its environment (with federation, the Anthropic credential is a token that expires in minutes; with a Codex access token, the Codex login file is on the runner instead). It reads the PR's code, title, body and diff, which could contain instructions planted to steer it. The PR is opened by a person or bot with write access, but a bot PR can carry text written by others (release notes, vendored code). Comments and reviews from untrusted authors are dropped before the run reads them. So a malicious PR author with write access could try to make the run leak the keys. They could already do that without Review Council, by editing a workflow in their branch to print the secrets. Third-party text in a bot PR is the case write access does not cover: it is treated as data, but a prompt injection in it still runs in a session that holds the keys. If that worries you, don't comment `/review-council` on dependency-bot PRs, or set `skip_bot_prs: true` so the workflow never reviews PRs opened by a bot account (Dependabot, Renovate, any GitHub App, including an agent's App). Use dedicated keys with spend limits, rotate them if you suspect a leak, and don't use the workflow on repos where people you don't trust have write access.
 
 ### Who posts
 
@@ -516,16 +579,20 @@ For a bot user, store its fine-grained token as a repo or org secret. For a GitH
 
 **The run fails at once with a permissions error, or never posts.** Check the `permissions:` block in your caller workflow. It needs `contents: read`, `pull-requests: write` and `issues: write`, plus `id-token: write` with federation. Grant no more: the `review` job gets exactly this grant.
 
-**`No GitHub OIDC token available`.** You set the federation inputs but the caller does not grant `id-token: write`. Add it to the caller's `permissions:` block, or drop the `anthropic_*` inputs if you meant to use an API key.
+**`No GitHub OIDC token available`.** You set the federation inputs but the caller does not grant `id-token: write`. Add it to the caller's `permissions:` block, or drop the `anthropic_*` inputs if you meant to use an API key or a subscription token.
 
 **`/review-council` does nothing.** The caller workflow must be on your default branch. The commenter needs write access. The PR must be open, not a draft, and not from a fork. The 👀 reaction appears only once these checks pass.
 
 **The run fails at the `Check Claude auth` step.** The error says what is wrong:
 
-- `No Claude credentials`: pass the `ANTHROPIC_API_KEY` secret, or set the federation inputs.
-- `Both the ANTHROPIC_API_KEY secret and anthropic_* federation inputs are set`: use one. Remove the secret line for federation, or the `anthropic_*` inputs for an API key.
+- `No Claude credentials`: pass the `ANTHROPIC_API_KEY` or `CLAUDE_CODE_OAUTH_TOKEN` secret, or set the federation inputs.
+- `Give Claude only one credential`: you passed two of `ANTHROPIC_API_KEY`, `CLAUDE_CODE_OAUTH_TOKEN` and the `anthropic_*` inputs. Keep one and remove the others from the caller.
+- `Give Codex only one credential`: you passed both `OPENAI_API_KEY` and `CODEX_ACCESS_TOKEN`. Keep one.
+- `Invalid claude_model`: the `claude_model` input may hold only letters, digits, `.`, `_`, `:`, `-`, and an optional `[1m]` suffix. Use a model ID like `claude-opus-5-5` or an alias like `sonnet`, or leave it empty.
 - `Federation needs anthropic_organization_id and anthropic_service_account_id`: federation needs all three IDs.
 - `Federation IDs are set but anthropic_federation_rule_id is empty`: set the rule ID too.
+
+**`Codex could not log in with CODEX_ACCESS_TOKEN`.** A warning, not a failure: the review runs without native Codex. Check that the token is current, that your workspace admin allows Codex access tokens, and that the secret holds the token itself (not an `auth.json` file).
 
 **Federation fails with `Authentication failed`.** A 401 always says just that. The reason is in the Anthropic Console, on the rule's authentication-history tab:
 
@@ -533,9 +600,11 @@ For a bot user, store its fine-grained token as a repo or org secret. For a GitH
 - `jti_reused`: a GitHub token was exchanged twice.
 - Also check: the caller grants `id-token: write`, the audience is `https://api.anthropic.com`, the `condition` names `deployhq/review-council/.github/workflows/review-council.yml@`, and `anthropic_workspace_id` is set if the rule covers more than one workspace.
 
-**A missing or wrong secret.** Claude needs `ANTHROPIC_API_KEY` (or federation); without it, the run fails. Any other missing key just drops that reviewer. A bad key shows up in the digest: the reviewer is listed in `degraded` and the status is `degraded`.
+**A missing or wrong secret.** Claude needs one credential (`ANTHROPIC_API_KEY`, `CLAUDE_CODE_OAUTH_TOKEN`, or federation); without one, the run fails. Any other missing key just drops that reviewer. A bad key shows up in the digest: the reviewer is listed in `degraded` and the status is `degraded`.
 
-**Codex shows as degraded.** Check `OPENAI_API_KEY` in your secrets. The workflow passes it to Codex as `CODEX_API_KEY`; Codex does not read `OPENAI_API_KEY` in non-interactive mode. A bad key fails in seconds, and the review carries on without Codex.
+**Codex shows as degraded.** Check `OPENAI_API_KEY` (or `CODEX_ACCESS_TOKEN`) in your secrets. The workflow passes the key to Codex as `CODEX_API_KEY`; Codex does not read `OPENAI_API_KEY` in non-interactive mode. A bad key fails in seconds, and the review carries on without Codex.
+
+**Codex shows as `not configured`.** No Codex credential reached the run: neither `OPENAI_API_KEY` nor a working `CODEX_ACCESS_TOKEN` login. That is not degraded. Pass one of the two secrets.
 
 **The report says `stopped at budget`.** The run used up `run_budget_seconds`. Some findings were not double-checked and are tagged `[unverified]`. Raise `run_budget_seconds` in the caller workflow.
 

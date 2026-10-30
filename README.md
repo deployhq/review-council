@@ -368,7 +368,7 @@ review-council/
 │   ├── plugin.json          # Plugin metadata
 │   └── marketplace.json     # Marketplace listing
 ├── .github/workflows/
-│   ├── review-council.yml   # Reusable workflow: run the council on PRs in GitHub Actions (API key or federation)
+│   ├── review-council.yml   # Reusable workflow: run the council on PRs in GitHub Actions (API key, subscription token or federation)
 │   └── unit-tests.yml       # bats unit tests
 ├── docs/
 │   └── github-action.md     # GitHub Actions guide
@@ -605,8 +605,9 @@ None met our go bar (full coverage in under ~10 min for under ~$2, with a verifi
 Run the council on your PRs with no human in the loop. You call a **reusable workflow** from your repo; it runs headless Claude Code with the plugin loaded and posts inline review comments plus one digest comment on the PR as `github-actions[bot]` (or your own bot).
 
 - **When:** someone with write access comments `/review-council` on a PR (and optionally, automatically, when a PR is marked ready for review). Drafts and PRs from forks are ignored.
-- **Claude auth:** one workflow, two modes. By default it takes the `ANTHROPIC_API_KEY` secret and the caller grants no `id-token` permission. Opt-in, set the `anthropic_*` federation inputs to use Anthropic Workload Identity Federation (no stored key, short-lived tokens); only then does the caller grant `id-token: write`, so check your cloud OIDC trust policies first (see the guide). The review job gets exactly the caller's grant.
-- **Secrets:** `ANTHROPIC_API_KEY` (API-key workflow only); `OPENAI_API_KEY` for Codex, `PERPLEXITY_API_KEY`, `OPENROUTER_API_KEY` for custom seats, `PR_BOT_TOKEN` to post as your own App or bot (optional).
+- **Claude auth:** one workflow, exactly one credential. By default it takes the `ANTHROPIC_API_KEY` secret (pay per token). Or pass `CLAUDE_CODE_OAUTH_TOKEN` (from `claude setup-token`) to run on a Claude subscription; usage counts against its creator's seat. Neither needs an `id-token` permission. Opt-in, set the `anthropic_*` federation inputs to use Anthropic Workload Identity Federation (no stored key, short-lived tokens); only then does the caller grant `id-token: write`, so check your cloud OIDC trust policies first (see the guide). The review job gets exactly the caller's grant.
+- **Model:** the optional `claude_model` input (e.g. `claude-opus-5-5` or `sonnet`) sets the model Claude Code runs; the reviewer subagents inherit it. Empty = Claude Code's default.
+- **Secrets:** one of `ANTHROPIC_API_KEY` or `CLAUDE_CODE_OAUTH_TOKEN` (unless you use federation); for Codex, `OPENAI_API_KEY` or `CODEX_ACCESS_TOKEN` (ChatGPT Enterprise plan usage, not both); `PERPLEXITY_API_KEY`, `OPENROUTER_API_KEY` for custom seats, `PR_BOT_TOKEN` to post as your own App or bot (optional).
 - **Config:** the committed `.review-council/config.yml` (and `learnings.md`) from the PR's branch, with workflow env on top. Custom seats run only when the workflow approves them by slot name (`approved_seats`); the PR's config still defines the seat.
 - **Trust:** the boundary is write access, but bot-opened PRs (Dependabot, Renovate, agents) can carry third-party text, treated as data; `skip_bot_prs: true` skips them. Fork PRs are skipped, and only comments and reviews from owners, members and collaborators are read. The orchestrator holds your keys, so use dedicated, spend-limited ones.
 - **Request changes:** a Critical or Important finding posts the review as "request changes" (whether that blocks a merge depends on your branch protection); the check itself never fails. A hidden state block (`clean` / `findings` / `degraded`) lets an agent or a gate read the result.

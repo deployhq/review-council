@@ -70,6 +70,10 @@ on:
         description: Run the static-analysis step (Step 2.5) and install its tools (RC_STATIC_ANALYSIS).
         type: boolean
         default: true
+      claude_model:
+        description: Optional. The model Claude Code runs (e.g. "claude-opus-5-5" or "sonnet"). Empty = Claude Code's default for the credential. Reviewer subagents inherit it.
+        type: string
+        default: ''
       skip_bot_prs:
         description: Skip PRs opened by a bot account (Dependabot, Renovate, a GitHub App). Their text can come from outside your org. Off by default, so agent-opened PRs are reviewed.
         type: boolean
@@ -98,10 +102,16 @@ on:
         default: ''
     secrets:
       ANTHROPIC_API_KEY:
-        description: Anthropic API key for Claude. Required unless anthropic_federation_rule_id is set.
+        description: Anthropic API key for Claude (pay per token). Give Claude exactly one of this, CLAUDE_CODE_OAUTH_TOKEN, or the anthropic_* federation inputs.
+        required: false
+      CLAUDE_CODE_OAUTH_TOKEN:
+        description: Claude subscription OAuth token from `claude setup-token` (Pro, Max, Team, Enterprise). Usage counts against the seat of the person who created it.
         required: false
       OPENAI_API_KEY:
-        description: Optional. Enables the Codex reviewer (exported to Codex as CODEX_API_KEY).
+        description: Optional. Enables the Codex reviewer (exported to Codex as CODEX_API_KEY). Use this or CODEX_ACCESS_TOKEN.
+        required: false
+      CODEX_ACCESS_TOKEN:
+        description: Optional. A ChatGPT Enterprise Codex access token (your admin must allow them). Enables the Codex reviewer on plan usage instead of API billing.
         required: false
       OPENROUTER_API_KEY:
         description: Optional. Key for custom seats on OpenRouter.
@@ -209,8 +219,11 @@ jobs:
           claude_code_version: ${{ inputs.claude_code_version }}
           codex_version: ${{ inputs.codex_version }}
           static_analysis: ${{ inputs.static_analysis }}
+          claude_model: ${{ inputs.claude_model }}
           anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
+          claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
           openai_api_key: ${{ secrets.OPENAI_API_KEY }}
+          codex_access_token: ${{ secrets.CODEX_ACCESS_TOKEN }}
           openrouter_api_key: ${{ secrets.OPENROUTER_API_KEY }}
           perplexity_api_key: ${{ secrets.PERPLEXITY_API_KEY }}
           pr_bot_token: ${{ secrets.PR_BOT_TOKEN }}

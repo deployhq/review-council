@@ -2,8 +2,9 @@
 # Run `/review-council:run` unattended (called by .github/actions/review/action.yml,
 # from the reviewed repo's checkout).
 # Inputs (env): RC_AUTH_MODE (api_key|federation), RC_TIMEOUT_MINUTES, PR_NUMBER,
-#   the RC_* run settings, GH_TOKEN, the provider keys, RC_PR_BOT_TOKEN(_ENV),
-#   and in federation mode the ANTHROPIC_* federation IDs plus the runner's
+#   RC_CLAUDE_MODEL, the RC_* run settings, GH_TOKEN, the provider keys,
+#   CLAUDE_CODE_OAUTH_TOKEN, CODEX_ACCESS_TOKEN, RC_PR_BOT_TOKEN(_ENV), and in
+#   federation mode the ANTHROPIC_* federation IDs plus the runner's
 #   ACTIONS_ID_TOKEN_REQUEST_URL / ACTIONS_ID_TOKEN_REQUEST_TOKEN.
 set -uo pipefail
 
@@ -11,7 +12,8 @@ plugin_dir="$(cd "$GITHUB_ACTION_PATH/../../.." && pwd -P)"
 
 # Unset empty optional values so they read as "not set", not "set to ''"
 # (an empty credential variable can still win its precedence slot).
-for v in ANTHROPIC_API_KEY CODEX_API_KEY OPENROUTER_API_KEY PERPLEXITY_API_KEY \
+for v in ANTHROPIC_API_KEY CLAUDE_CODE_OAUTH_TOKEN CODEX_API_KEY CODEX_ACCESS_TOKEN \
+         OPENROUTER_API_KEY PERPLEXITY_API_KEY RC_CLAUDE_MODEL \
          ANTHROPIC_FEDERATION_RULE_ID ANTHROPIC_ORGANIZATION_ID \
          ANTHROPIC_SERVICE_ACCOUNT_ID ANTHROPIC_WORKSPACE_ID; do
   [ -n "${!v:-}" ] || unset "$v"
@@ -25,22 +27,41 @@ oidc_url="${ACTIONS_ID_TOKEN_REQUEST_URL:-}"
 oidc_tok="${ACTIONS_ID_TOKEN_REQUEST_TOKEN:-}"
 unset ACTIONS_ID_TOKEN_REQUEST_URL ACTIONS_ID_TOKEN_REQUEST_TOKEN
 
-# Check the Claude auth setup. This is the one place it is validated. The
-# workflow picks the mode: federation when anthropic_federation_rule_id is
-# set, else api_key. The action also runs this script with --check-auth as its
-# first step, so a bad setup fails before the installs.
-if [ -n "${ANTHROPIC_API_KEY:-}" ] && [ -n "${ANTHROPIC_FEDERATION_RULE_ID:-}${ANTHROPIC_ORGANIZATION_ID:-}${ANTHROPIC_SERVICE_ACCOUNT_ID:-}${ANTHROPIC_WORKSPACE_ID:-}" ]; then
-  echo "::error::Both the ANTHROPIC_API_KEY secret and anthropic_* federation inputs are set. Use one: drop the secret for federation, or the anthropic_* inputs for an API key."
+# Check the credential setup. This is the one place it is validated. Claude
+# takes exactly one of: an API key (ANTHROPIC_API_KEY), a subscription OAuth
+# token (CLAUDE_CODE_OAUTH_TOKEN, from `claude setup-token`), or federation
+# (the workflow sets RC_AUTH_MODE=federation when anthropic_federation_rule_id
+# is set; api_key mode covers both secrets). Codex takes at most one of an API
+# key or an Enterprise access token. The action also runs this script with
+# --check-auth as its first step, so a bad setup fails before the installs.
+fed_ids="${ANTHROPIC_FEDERATION_RULE_ID:-}${ANTHROPIC_ORGANIZATION_ID:-}${ANTHROPIC_SERVICE_ACCOUNT_ID:-}${ANTHROPIC_WORKSPACE_ID:-}"
+n=0
+[ -z "${ANTHROPIC_API_KEY:-}" ] || n=$((n + 1))
+[ -z "${CLAUDE_CODE_OAUTH_TOKEN:-}" ] || n=$((n + 1))
+[ -z "$fed_ids" ] || n=$((n + 1))
+if [ "$n" -gt 1 ]; then
+  echo "::error::Give Claude only one credential: the ANTHROPIC_API_KEY secret, the CLAUDE_CODE_OAUTH_TOKEN secret, or the anthropic_* federation inputs."
+  exit 1
+fi
+if [ -n "${CODEX_API_KEY:-}" ] && [ -n "${CODEX_ACCESS_TOKEN:-}" ]; then
+  echo "::error::Give Codex only one credential: the OPENAI_API_KEY secret or the CODEX_ACCESS_TOKEN secret."
+  exit 1
+fi
+if [ -n "${RC_CLAUDE_MODEL:-}" ] && ! printf '%s' "$RC_CLAUDE_MODEL" | grep -Eqx '[A-Za-z0-9][A-Za-z0-9._:-]{0,79}(\[[A-Za-z0-9]{1,8}\])?'; then
+  echo "::error::Invalid claude_model '${RC_CLAUDE_MODEL}' (letters, digits, . _ : - and an optional [1m] suffix)."
   exit 1
 fi
 case "${RC_AUTH_MODE:-}" in
   api_key)
-    if [ -z "${ANTHROPIC_API_KEY:-}" ]; then
-      if [ -n "${ANTHROPIC_ORGANIZATION_ID:-}${ANTHROPIC_SERVICE_ACCOUNT_ID:-}${ANTHROPIC_WORKSPACE_ID:-}" ]; then
-        echo "::error::Federation IDs are set but anthropic_federation_rule_id is empty. Set it to use federation."
-      else
-        echo "::error::No Claude credentials. Pass the ANTHROPIC_API_KEY secret, or set the anthropic_* federation inputs (see docs/github-action.md)."
-      fi
+    if [ -n "${ANTHROPIC_API_KEY:-}" ]; then
+      auth_label="API key"
+    elif [ -n "${CLAUDE_CODE_OAUTH_TOKEN:-}" ]; then
+      auth_label="OAuth token (Claude subscription)"
+    elif [ -n "${ANTHROPIC_ORGANIZATION_ID:-}${ANTHROPIC_SERVICE_ACCOUNT_ID:-}${ANTHROPIC_WORKSPACE_ID:-}" ]; then
+      echo "::error::Federation IDs are set but anthropic_federation_rule_id is empty. Set it to use federation."
+      exit 1
+    else
+      echo "::error::No Claude credentials. Pass the ANTHROPIC_API_KEY or CLAUDE_CODE_OAUTH_TOKEN secret, or set the anthropic_* federation inputs (see docs/github-action.md)."
       exit 1
     fi
     if [ -n "$oidc_url" ] && [ "${1:-}" = "--check-auth" ]; then
@@ -48,6 +69,7 @@ case "${RC_AUTH_MODE:-}" in
     fi
     ;;
   federation)
+    auth_label="Workload Identity Federation"
     if [ -z "${ANTHROPIC_ORGANIZATION_ID:-}" ] || [ -z "${ANTHROPIC_SERVICE_ACCOUNT_ID:-}" ]; then
       echo "::error::Federation needs anthropic_organization_id and anthropic_service_account_id as well as anthropic_federation_rule_id."
       exit 1
@@ -63,12 +85,12 @@ case "${RC_AUTH_MODE:-}" in
     ;;
 esac
 if [ "${1:-}" = "--check-auth" ]; then
-  echo "Claude auth setup OK (${RC_AUTH_MODE})"
+  echo "Claude auth setup OK: ${auth_label}"
   exit 0
 fi
 
 if [ "$RC_AUTH_MODE" = api_key ]; then
-  echo "Claude auth: API key"
+  echo "Claude auth: ${auth_label}"
 else
   # Workload Identity Federation. Claude Code exchanges the JWT in
   # ANTHROPIC_IDENTITY_TOKEN_FILE itself and re-reads the file on each
@@ -96,6 +118,17 @@ else
 fi
 unset oidc_url oidc_tok
 
+# Codex with an Enterprise access token: log in once (into ~/.codex, where the
+# council's `codex exec` reads it), then drop the variable from the env.
+if [ -n "${CODEX_ACCESS_TOKEN:-}" ]; then
+  if printenv CODEX_ACCESS_TOKEN | codex login --with-access-token >/dev/null 2>&1; then
+    echo "Codex auth: access token (ChatGPT Enterprise)"
+  else
+    echo "::warning::Codex could not log in with CODEX_ACCESS_TOKEN; the run continues without native Codex."
+  fi
+  unset CODEX_ACCESS_TOKEN
+fi
+
 # A composite step cannot set timeout-minutes, so enforce the timeout here:
 # TERM to claude's process group, KILL 60s later if it is still alive. The
 # gate's limit is raised to fit the longest custom seat the run's config will
@@ -108,8 +141,11 @@ echo "Review time limit: ${timeout_min} minutes"
 rc=0
 # --setting-sources user: the reviewed PR's .claude/ settings and hooks never
 # load into a session that holds the API keys.
+model_args=()
+[ -z "${RC_CLAUDE_MODEL:-}" ] || model_args=(--model "$RC_CLAUDE_MODEL")
 timeout -k 60 "${timeout_min}m" \
   claude -p "/review-council:run ${PR_NUMBER}" \
+    "${model_args[@]}" \
     --plugin-dir "$plugin_dir" \
     --setting-sources user \
     --allowedTools "Bash Read Grep Glob Agent Skill Write" \

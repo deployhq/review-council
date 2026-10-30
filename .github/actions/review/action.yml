@@ -11,7 +11,7 @@ description: >
 # in as inputs, and each step exposes them only through its own `env:`.
 inputs:
   auth_mode:
-    description: "How Claude authenticates: 'api_key' or 'federation'."
+    description: "How Claude authenticates: 'api_key' (the API key or the OAuth token secret) or 'federation'."
     required: true
   pr_number:
     description: PR number to review (from the gate).
@@ -38,13 +38,25 @@ inputs:
     description: "'true' to install the static-analysis tools and run Step 2.5."
     required: false
     default: 'true'
+  claude_model:
+    description: Optional. The model Claude Code runs (RC_CLAUDE_MODEL); empty = Claude Code's default.
+    required: false
+    default: ''
   # Secret values (passed from the calling job's `secrets`).
   anthropic_api_key:
     description: Anthropic API key (auth_mode api_key).
     required: false
     default: ''
+  claude_code_oauth_token:
+    description: Claude subscription OAuth token from `claude setup-token` (auth_mode api_key).
+    required: false
+    default: ''
   openai_api_key:
     description: Optional. Enables the Codex reviewer.
+    required: false
+    default: ''
+  codex_access_token:
+    description: Optional. A ChatGPT Enterprise Codex access token; enables the Codex reviewer on plan usage.
     required: false
     default: ''
   openrouter_api_key:
@@ -91,7 +103,11 @@ runs:
       shell: bash
       env:
         RC_AUTH_MODE: ${{ inputs.auth_mode }}
+        RC_CLAUDE_MODEL: ${{ inputs.claude_model }}
         ANTHROPIC_API_KEY: ${{ inputs.anthropic_api_key }}
+        CLAUDE_CODE_OAUTH_TOKEN: ${{ inputs.claude_code_oauth_token }}
+        CODEX_API_KEY: ${{ inputs.openai_api_key }}
+        CODEX_ACCESS_TOKEN: ${{ inputs.codex_access_token }}
         ANTHROPIC_FEDERATION_RULE_ID: ${{ inputs.anthropic_federation_rule_id }}
         ANTHROPIC_ORGANIZATION_ID: ${{ inputs.anthropic_organization_id }}
         ANTHROPIC_SERVICE_ACCOUNT_ID: ${{ inputs.anthropic_service_account_id }}
@@ -126,7 +142,7 @@ runs:
         "$HOME/.local/bin/yq" --version
 
     - name: Install Codex CLI
-      if: inputs.openai_api_key != ''
+      if: inputs.openai_api_key != '' || inputs.codex_access_token != ''
       shell: bash
       env:
         CODEX_VERSION: ${{ inputs.codex_version }}
@@ -179,9 +195,13 @@ runs:
         RC_RUN_BUDGET: ${{ inputs.run_budget_seconds }}
         RC_STATIC_ANALYSIS: ${{ inputs.static_analysis }}
         GH_TOKEN: ${{ github.token }}
+        RC_CLAUDE_MODEL: ${{ inputs.claude_model }}
         ANTHROPIC_API_KEY: ${{ inputs.anthropic_api_key }}
+        CLAUDE_CODE_OAUTH_TOKEN: ${{ inputs.claude_code_oauth_token }}
         # codex ignores OPENAI_API_KEY on its own; CODEX_API_KEY is what it reads.
         CODEX_API_KEY: ${{ inputs.openai_api_key }}
+        # Logged in once by run-review.sh, then dropped from the env.
+        CODEX_ACCESS_TOKEN: ${{ inputs.codex_access_token }}
         OPENROUTER_API_KEY: ${{ inputs.openrouter_api_key }}
         PERPLEXITY_API_KEY: ${{ inputs.perplexity_api_key }}
         # Optional bot identity for the digest; unset when empty, so posting

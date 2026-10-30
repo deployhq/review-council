@@ -17,8 +17,8 @@
 
 # reviewers:                          # uncomment this line and the block you need
   # Built-in reviewers run when their key is present in the workflow secrets:
-  # Claude + Security (ANTHROPIC_API_KEY), Codex (OPENAI_API_KEY),
-  # Perplexity (PERPLEXITY_API_KEY). Turn one off here if you don't want it.
+  # Claude + Security (ANTHROPIC_API_KEY, CLAUDE_CODE_OAUTH_TOKEN or federation),
+  # Codex (OPENAI_API_KEY or CODEX_ACCESS_TOKEN), Perplexity (PERPLEXITY_API_KEY). Turn one off here if you don't want it.
   # perplexity:
   #   enabled: false
 

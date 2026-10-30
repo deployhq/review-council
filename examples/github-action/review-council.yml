@@ -3,13 +3,18 @@
 # Copy this file into your repo. Guide: https://github.com/deployhq/review-council/blob/main/docs/github-action.md
 #
 # Before the first run:
-#   1. Add the ANTHROPIC_API_KEY secret (Settings -> Secrets and variables ->
-#      Actions). The other secrets below are optional.
-#      To authenticate Claude with Anthropic federation instead (no stored
-#      key), uncomment the lines marked "federation only" below and drop the
-#      ANTHROPIC_API_KEY line. Use one or the other, never both. Before you do,
-#      check that no cloud trust policy (AWS, GCP, Azure, ...) matches this
-#      repo's PR runs broadly. See "Authenticate Claude" in the guide.
+#   1. Add one Claude credential as a secret (Settings -> Secrets and
+#      variables -> Actions). The default is ANTHROPIC_API_KEY (pay per token).
+#      Give Claude exactly one of:
+#        - ANTHROPIC_API_KEY (the default, below);
+#        - CLAUDE_CODE_OAUTH_TOKEN, a Claude subscription token from
+#          `claude setup-token` (usage counts against its creator's seat);
+#        - Anthropic federation (no stored key): uncomment the lines marked
+#          "federation only" below. Before you do, check that no cloud trust
+#          policy (AWS, GCP, Azure, ...) matches this repo's PR runs broadly.
+#      Swap the ANTHROPIC_API_KEY line out for the one you pick. Two at once
+#      fails the run. See "Authenticate Claude" in the guide. The other
+#      secrets below are optional.
 #   2. Merge this file to your default branch. GitHub runs issue_comment
 #      workflows only from the default branch, so `/review-council` comments
 #      do nothing until it is there.
@@ -61,6 +66,9 @@ jobs:
       # anthropic_organization_id: 00000000-0000-0000-0000-000000000000
       # anthropic_service_account_id: svac_...
       # anthropic_workspace_id: wrkspc_...   # only if the rule covers more than one workspace
+      # The model Claude Code runs, e.g. "claude-opus-5-5" or an alias like
+      # "sonnet". Empty = Claude Code's default for your credential.
+      # claude_model: ""
       # Custom seats from .review-council/config.yml that may run in CI,
       # comma-separated slot names (e.g. "qwen,kimi"). Empty = none approved.
       # Approving a seat approves its slot name only: the PR's config.yml still
@@ -77,8 +85,10 @@ jobs:
       # Keep it the same as the ref in `uses:` above.
       plugin_ref: main
     secrets:
-      ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}     # required with an API key; remove for federation
+      ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}     # one Claude credential is required; remove for the token or federation
+      # CLAUDE_CODE_OAUTH_TOKEN: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}   # instead of the API key: a Claude subscription (`claude setup-token`)
       OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}           # optional: enables Codex
+      # CODEX_ACCESS_TOKEN: ${{ secrets.CODEX_ACCESS_TOKEN }}   # instead of OPENAI_API_KEY: Codex on ChatGPT Enterprise plan usage
       OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}   # optional: an OpenRouter custom seat
       PERPLEXITY_API_KEY: ${{ secrets.PERPLEXITY_API_KEY }}   # optional: enables Perplexity
       # PR_BOT_TOKEN: ${{ secrets.PR_BOT_TOKEN }}             # optional: post as your own App or bot (default: github-actions[bot]); also set pr_bot_login
