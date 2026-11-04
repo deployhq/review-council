@@ -2,7 +2,7 @@
 # Run `/review-council:run` unattended (called by .github/actions/review/action.yml,
 # from the reviewed repo's checkout).
 # Inputs (env): RC_AUTH_MODE (api_key|federation), RC_TIMEOUT_MINUTES, PR_NUMBER,
-#   RC_CLAUDE_MODEL, RC_CODEX_MODEL, the RC_* run settings, GH_TOKEN, the provider keys,
+#   RC_CLAUDE_MODEL, RC_CODEX_MODEL, RC_CODEX_PROVIDER, the RC_* run settings, GH_TOKEN, the provider keys,
 #   CLAUDE_CODE_OAUTH_TOKEN, CODEX_ACCESS_TOKEN, RC_PR_BOT_TOKEN(_ENV), and in
 #   federation mode the ANTHROPIC_* federation IDs plus the runner's
 #   ACTIONS_ID_TOKEN_REQUEST_URL / ACTIONS_ID_TOKEN_REQUEST_TOKEN.
@@ -13,7 +13,7 @@ plugin_dir="$(cd "$GITHUB_ACTION_PATH/../../.." && pwd -P)"
 # Unset empty optional values so they read as "not set", not "set to ''"
 # (an empty credential variable can still win its precedence slot).
 for v in ANTHROPIC_API_KEY CLAUDE_CODE_OAUTH_TOKEN CODEX_API_KEY CODEX_ACCESS_TOKEN \
-         OPENROUTER_API_KEY PERPLEXITY_API_KEY RC_CLAUDE_MODEL RC_CODEX_MODEL \
+         OPENROUTER_API_KEY PERPLEXITY_API_KEY RC_CLAUDE_MODEL RC_CODEX_MODEL RC_CODEX_PROVIDER \
          ANTHROPIC_FEDERATION_RULE_ID ANTHROPIC_ORGANIZATION_ID \
          ANTHROPIC_SERVICE_ACCOUNT_ID ANTHROPIC_WORKSPACE_ID; do
   [ -n "${!v:-}" ] || unset "$v"
@@ -50,12 +50,19 @@ fi
 # check_model <input> <value> [allow-1m]: a model ID from a workflow input.
 # Whole-string match ([[ =~ ]], not grep -x, which passes a multi-line value).
 # The charset keeps it safe on a command line and inside a TOML string.
+# allow-slash is for OpenRouter IDs (vendor/model).
 check_model() {
   local re='^[A-Za-z0-9][A-Za-z0-9._:-]{0,79}' extra=""
-  if [ "${3:-}" = allow-1m ]; then
-    re+='(\[[A-Za-z0-9]{1,8}\])?'
-    extra=" and an optional [1m] suffix"
-  fi
+  case "${3:-}" in
+    allow-1m)
+      re+='(\[[A-Za-z0-9]{1,8}\])?'
+      extra=" and an optional [1m] suffix"
+      ;;
+    allow-slash)
+      re='^[A-Za-z0-9][A-Za-z0-9._:/-]{0,79}'
+      extra=" /"
+      ;;
+  esac
   re+='$'
   if [ -n "$2" ] && ! [[ "$2" =~ $re ]]; then
     echo "::error::Invalid $1 (allowed: letters, digits, . _ : -$extra)."
@@ -63,7 +70,43 @@ check_model() {
   fi
 }
 check_model claude_model "${RC_CLAUDE_MODEL:-}" allow-1m
-check_model codex_model "${RC_CODEX_MODEL:-}"
+# codex_provider: openai (default; OPENAI_API_KEY or CODEX_ACCESS_TOKEN) or
+# openrouter (OPENROUTER_API_KEY and an OpenRouter model ID). Native Codex also
+# refutes Claude's findings, so on OpenRouter its model must come from a known
+# family other than Claude: a Claude model, or a router that may pick one,
+# would have Claude checking its own work.
+case "${RC_CODEX_PROVIDER:-openai}" in
+  openai)
+    check_model codex_model "${RC_CODEX_MODEL:-}"
+    ;;
+  openrouter)
+    if [ -n "${CODEX_API_KEY:-}${CODEX_ACCESS_TOKEN:-}" ]; then
+      echo "::error::codex_provider openrouter uses the OPENROUTER_API_KEY secret. Remove the OPENAI_API_KEY / CODEX_ACCESS_TOKEN secret from the call."
+      exit 1
+    fi
+    if [ -z "${OPENROUTER_API_KEY:-}" ]; then
+      echo "::error::codex_provider openrouter needs the OPENROUTER_API_KEY secret."
+      exit 1
+    fi
+    if [ -z "${RC_CODEX_MODEL:-}" ]; then
+      echo "::error::codex_provider openrouter needs codex_model, as an OpenRouter model ID (e.g. openai/gpt-6-luna)."
+      exit 1
+    fi
+    check_model codex_model "$RC_CODEX_MODEL" allow-slash
+    # shellcheck source=SCRIPTDIR/../../../scripts/rc-lib-family.sh
+    . "$plugin_dir/scripts/rc-lib-family.sh"
+    case "$(rc_family "$RC_CODEX_MODEL")" in
+      Claude | unknown)
+        echo "::error::codex_model '$RC_CODEX_MODEL' is not allowed for the Codex reviewer on OpenRouter: it must be an OpenAI, Google, Qwen, Moonshot, Zhipu or DeepSeek model, not a Claude model or a router."
+        exit 1
+        ;;
+    esac
+    ;;
+  *)
+    echo "::error::Unknown codex_provider '${RC_CODEX_PROVIDER}' (expected openai or openrouter)."
+    exit 1
+    ;;
+esac
 case "${RC_AUTH_MODE:-}" in
   api_key)
     if [ -n "${ANTHROPIC_API_KEY:-}" ]; then
@@ -142,18 +185,34 @@ if [ -n "${CODEX_ACCESS_TOKEN:-}" ]; then
   unset CODEX_ACCESS_TOKEN
 fi
 
-# codex_model: Codex's default model for this run, set in its own config
-# (~/.codex, which the Codex reviewer and the refutation pass both use; custom
-# codex seats run with a throwaway CODEX_HOME and keep their own model).
-if [ -n "${RC_CODEX_MODEL:-}" ]; then
-  codex_cfg="${CODEX_HOME:-$HOME/.codex}/config.toml"
+# codex_model / codex_provider: set in Codex's own config (~/.codex, which the
+# Codex reviewer and the refutation pass both use; custom codex seats run with
+# a throwaway CODEX_HOME and keep their own settings). A value the config
+# already has (a self-hosted runner's own) is kept.
+codex_cfg="${CODEX_HOME:-$HOME/.codex}/config.toml"
+# codex_set_top <key> <value>: add a top-level key as the first line (a key
+# after a [table] header would belong to that table).
+codex_set_top() {
   mkdir -p "$(dirname "$codex_cfg")"
-  if ! grep -qE '^[[:space:]]*model[[:space:]]*=' "$codex_cfg" 2>/dev/null; then
-    # First line: a key after a [table] header would belong to that table.
-    { printf 'model = "%s"\n' "$RC_CODEX_MODEL"; cat "$codex_cfg" 2>/dev/null || :; } >"$codex_cfg.new" &&
-      mv -f "$codex_cfg.new" "$codex_cfg"
+  if grep -qE "^[[:space:]]*$1[[:space:]]*=" "$codex_cfg" 2>/dev/null; then
+    echo "::warning::Codex's config.toml already sets $1; keeping it."
+    return 0
   fi
+  { printf '%s = "%s"\n' "$1" "$2"; cat "$codex_cfg" 2>/dev/null || :; } >"$codex_cfg.new" &&
+    mv -f "$codex_cfg.new" "$codex_cfg"
+}
+if [ -n "${RC_CODEX_MODEL:-}" ]; then
+  codex_set_top model "$RC_CODEX_MODEL"
   echo "Codex model: $RC_CODEX_MODEL"
+fi
+if [ "${RC_CODEX_PROVIDER:-}" = openrouter ]; then
+  codex_set_top model_provider openrouter
+  # The same fixed provider as rc-seat.sh's codex seats; codex reads the key
+  # from OPENROUTER_API_KEY. Appended once: a repeated table stops codex.
+  if ! grep -qE '^[[:space:]]*\[model_providers\.openrouter\]' "$codex_cfg" 2>/dev/null; then
+    printf '\n[model_providers.openrouter]\nname = "OpenRouter"\nbase_url = "https://openrouter.ai/api/v1"\nwire_api = "responses"\nenv_key = "OPENROUTER_API_KEY"\n' >>"$codex_cfg"
+  fi
+  echo "Codex provider: OpenRouter"
 fi
 
 # A reviewer that fails (Codex, Google) appends its reason and its own error

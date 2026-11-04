@@ -80,6 +80,10 @@ on:
         description: Optional. The model the Codex reviewer runs (e.g. "gpt-6-luna" to keep API costs low). Empty = Codex's default. It also double-checks findings.
         type: string
         default: ''
+      codex_provider:
+        description: Optional. Where the Codex reviewer's model is served. "openai" (default, with OPENAI_API_KEY or CODEX_ACCESS_TOKEN) or "openrouter" (with OPENROUTER_API_KEY; then codex_model is required, as an OpenRouter ID such as "openai/gpt-6-luna").
+        type: string
+        default: ''
       skip_bot_prs:
         description: Skip PRs opened by a bot account (Dependabot, Renovate, a GitHub App). Their text can come from outside your org. Off by default, so agent-opened PRs are reviewed.
         type: boolean
@@ -120,7 +124,7 @@ on:
         description: Optional. A ChatGPT Enterprise Codex access token (your admin must allow them). Enables the Codex reviewer on plan usage instead of API billing.
         required: false
       OPENROUTER_API_KEY:
-        description: Optional. Key for custom seats on OpenRouter.
+        description: Optional. Key for custom seats on OpenRouter, and for the Codex reviewer when codex_provider is openrouter.
         required: false
       PERPLEXITY_API_KEY:
         description: Optional. Enables the Perplexity reviewer.
@@ -227,6 +231,7 @@ jobs:
           static_analysis: ${{ inputs.static_analysis }}
           claude_model: ${{ inputs.claude_model }}
           codex_model: ${{ inputs.codex_model }}
+          codex_provider: ${{ inputs.codex_provider }}
           anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
           claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
           openai_api_key: ${{ secrets.OPENAI_API_KEY }}

@@ -433,7 +433,9 @@ AUTH_PATTERN='no longer supported|not authenticated|please migrate to the antigr
 # `quota exceeded` is codex 0.163's wording for an API key on a $0 balance
 # ("ERROR: Quota exceeded. Check your plan and billing details."); without it
 # Codex was retried and reported as "empty output" (deployhq/ops-agents#147).
-QUOTA_PATTERN='exhausted your daily quota|terminalquotaerror|individual quota reached|upgrade your subscription|insufficient_quota|exceeded your current quota|quota exceeded'
+# `unexpected status 402` is codex's wording for HTTP 402, which OpenRouter
+# returns when the account is out of credits (codex_provider openrouter).
+QUOTA_PATTERN='exhausted your daily quota|terminalquotaerror|individual quota reached|upgrade your subscription|insufficient_quota|exceeded your current quota|quota exceeded|unexpected status 402'
 # RATE_LIMIT is TRANSIENT: a tokens-per-minute throttle that clears in seconds.
 # It used to live in QUOTA_PATTERN, which meant a 60-second blip permanently
 # removed a reviewer from the run and told the user their paid quota was gone.

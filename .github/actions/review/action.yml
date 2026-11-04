@@ -46,6 +46,10 @@ inputs:
     description: Optional. The Codex reviewer's model (RC_CODEX_MODEL); empty = Codex's default.
     required: false
     default: ''
+  codex_provider:
+    description: Optional. Where the Codex reviewer's model is served (RC_CODEX_PROVIDER: openai or openrouter); empty = openai.
+    required: false
+    default: ''
   # Secret values (passed from the calling job's `secrets`).
   anthropic_api_key:
     description: Anthropic API key (auth_mode api_key).
@@ -64,7 +68,7 @@ inputs:
     required: false
     default: ''
   openrouter_api_key:
-    description: Optional. Key for custom seats on OpenRouter.
+    description: Optional. Key for custom seats on OpenRouter, and for the Codex reviewer when codex_provider is openrouter.
     required: false
     default: ''
   perplexity_api_key:
@@ -109,10 +113,12 @@ runs:
         RC_AUTH_MODE: ${{ inputs.auth_mode }}
         RC_CLAUDE_MODEL: ${{ inputs.claude_model }}
         RC_CODEX_MODEL: ${{ inputs.codex_model }}
+        RC_CODEX_PROVIDER: ${{ inputs.codex_provider }}
         ANTHROPIC_API_KEY: ${{ inputs.anthropic_api_key }}
         CLAUDE_CODE_OAUTH_TOKEN: ${{ inputs.claude_code_oauth_token }}
         CODEX_API_KEY: ${{ inputs.openai_api_key }}
         CODEX_ACCESS_TOKEN: ${{ inputs.codex_access_token }}
+        OPENROUTER_API_KEY: ${{ inputs.openrouter_api_key }}
         ANTHROPIC_FEDERATION_RULE_ID: ${{ inputs.anthropic_federation_rule_id }}
         ANTHROPIC_ORGANIZATION_ID: ${{ inputs.anthropic_organization_id }}
         ANTHROPIC_SERVICE_ACCOUNT_ID: ${{ inputs.anthropic_service_account_id }}
@@ -147,7 +153,7 @@ runs:
         "$HOME/.local/bin/yq" --version
 
     - name: Install Codex CLI
-      if: inputs.openai_api_key != '' || inputs.codex_access_token != ''
+      if: inputs.openai_api_key != '' || inputs.codex_access_token != '' || inputs.codex_provider == 'openrouter'
       shell: bash
       env:
         CODEX_VERSION: ${{ inputs.codex_version }}
@@ -202,6 +208,7 @@ runs:
         GH_TOKEN: ${{ github.token }}
         RC_CLAUDE_MODEL: ${{ inputs.claude_model }}
         RC_CODEX_MODEL: ${{ inputs.codex_model }}
+        RC_CODEX_PROVIDER: ${{ inputs.codex_provider }}
         ANTHROPIC_API_KEY: ${{ inputs.anthropic_api_key }}
         CLAUDE_CODE_OAUTH_TOKEN: ${{ inputs.claude_code_oauth_token }}
         # codex ignores OPENAI_API_KEY on its own; CODEX_API_KEY is what it reads.

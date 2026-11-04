@@ -1402,6 +1402,17 @@ call_count() {
   [ "$(call_count "$CDX_CALLS")" -eq 1 ]
 }
 
+@test "codex-last-message: OpenRouter's 402 (out of credits) -> SKIPPED quota exhausted (no retry)" {
+  CDX_MODE=noisy-quota CDX_LAST=empty \
+    CDX_QUOTA_MSG='ERROR: unexpected status 402 Payment Required: Insufficient credits, url: https://openrouter.ai/api/v1/responses' \
+    run --separate-stderr "$SCRIPT" "$CODEX" "" "$PROMPT_FILE"
+  echo "status=$status"
+  echo "output=<<$output>>"
+  [ "$status" -eq 1 ]
+  [ "$output" = "SKIPPED: Codex unavailable — codex: quota exhausted" ]
+  [ "$(call_count "$CDX_CALLS")" -eq 1 ]
+}
+
 @test "fail-log: RC_FAIL_LOG gets one line with the note and the tool's own error line" {
   RC_FAIL_LOG="$BATS_TEST_TMPDIR/fail.log" CDX_MODE=noisy-quota CDX_LAST=empty \
     run --separate-stderr "$SCRIPT" "$CODEX" "" "$PROMPT_FILE"

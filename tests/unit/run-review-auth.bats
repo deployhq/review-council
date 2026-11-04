@@ -141,3 +141,77 @@ STUB
   [ "$(head -n 1 "$BATS_TEST_TMPDIR/.codex/config.toml")" = 'model = "gpt-6-luna"' ]
   grep -qx 'command = "y"' "$BATS_TEST_TMPDIR/.codex/config.toml"
 }
+
+# codex_provider ---------------------------------------------------------------
+
+@test "auth: an unknown codex_provider is refused" {
+  check ANTHROPIC_API_KEY=k RC_CODEX_PROVIDER=azure
+  fails_with 'codex_provider'
+}
+
+@test "auth: codex_provider openrouter with a key and an OpenRouter model ID is accepted" {
+  check ANTHROPIC_API_KEY=k RC_CODEX_PROVIDER=openrouter OPENROUTER_API_KEY=o RC_CODEX_MODEL=openai/gpt-6-luna
+  [ "$status" -eq 0 ]
+}
+
+@test "auth: codex_provider openrouter needs OPENROUTER_API_KEY" {
+  check ANTHROPIC_API_KEY=k RC_CODEX_PROVIDER=openrouter RC_CODEX_MODEL=openai/gpt-6-luna
+  fails_with 'OPENROUTER_API_KEY'
+}
+
+@test "auth: codex_provider openrouter needs codex_model" {
+  check ANTHROPIC_API_KEY=k RC_CODEX_PROVIDER=openrouter OPENROUTER_API_KEY=o
+  fails_with 'needs codex_model'
+}
+
+@test "auth: codex_provider openrouter refuses an OpenAI key or access token alongside" {
+  check ANTHROPIC_API_KEY=k RC_CODEX_PROVIDER=openrouter OPENROUTER_API_KEY=o RC_CODEX_MODEL=openai/gpt-6-luna CODEX_API_KEY=x
+  fails_with 'OPENROUTER_API_KEY'
+  check ANTHROPIC_API_KEY=k RC_CODEX_PROVIDER=openrouter OPENROUTER_API_KEY=o RC_CODEX_MODEL=openai/gpt-6-luna CODEX_ACCESS_TOKEN=x
+  fails_with 'OPENROUTER_API_KEY'
+}
+
+@test "auth: on OpenRouter a Claude model or a router is refused (Claude would check its own work)" {
+  check ANTHROPIC_API_KEY=k RC_CODEX_PROVIDER=openrouter OPENROUTER_API_KEY=o RC_CODEX_MODEL=anthropic/claude-sonnet-5-5
+  fails_with 'not allowed'
+  check ANTHROPIC_API_KEY=k RC_CODEX_PROVIDER=openrouter OPENROUTER_API_KEY=o RC_CODEX_MODEL=openrouter/auto
+  fails_with 'not allowed'
+}
+
+@test "auth: a slash in codex_model is allowed only on OpenRouter" {
+  check ANTHROPIC_API_KEY=k RC_CODEX_MODEL=openai/gpt-6-luna
+  fails_with 'codex_model'
+  check ANTHROPIC_API_KEY=k RC_CODEX_PROVIDER=openrouter OPENROUTER_API_KEY=o RC_CODEX_MODEL='openai/gpt"; id'
+  fails_with 'codex_model'
+}
+
+@test "run: codex_provider openrouter writes the model, the provider and its table once, as valid TOML" {
+  mkdir -p "$BATS_TEST_TMPDIR/.codex"
+  printf '[mcp_servers.x]\ncommand = "y"\n' >"$BATS_TEST_TMPDIR/.codex/config.toml"
+  run_stub RC_CODEX_PROVIDER=openrouter OPENROUTER_API_KEY=o RC_CODEX_MODEL=openai/gpt-6-luna
+  [ "$status" -eq 0 ]
+  cfg="$BATS_TEST_TMPDIR/.codex/config.toml"
+  cat "$cfg"
+  printf '%s' "$output" | grep -qF 'Codex provider: OpenRouter'
+  # A second run (same runner) must not repeat the table.
+  run_stub RC_CODEX_PROVIDER=openrouter OPENROUTER_API_KEY=o RC_CODEX_MODEL=openai/gpt-6-luna
+  [ "$status" -eq 0 ]
+  [ "$(grep -c '^\[model_providers\.openrouter\]' "$cfg")" -eq 1 ]
+  if python3 -c 'import tomllib' 2>/dev/null; then
+    python3 - "$cfg" <<'PY'
+import sys, tomllib
+c = tomllib.load(open(sys.argv[1], "rb"))
+assert c["model"] == "openai/gpt-6-luna", c
+assert c["model_provider"] == "openrouter", c
+p = c["model_providers"]["openrouter"]
+assert p["base_url"] == "https://openrouter.ai/api/v1" and p["wire_api"] == "responses" and p["env_key"] == "OPENROUTER_API_KEY", p
+assert c["mcp_servers"]["x"]["command"] == "y", c
+PY
+  fi
+}
+
+@test "run: without codex_provider no provider is written" {
+  run_stub RC_CODEX_MODEL=gpt-6-luna
+  [ "$status" -eq 0 ]
+  ! grep -q 'model_provider' "$BATS_TEST_TMPDIR/.codex/config.toml" || return 1
+}

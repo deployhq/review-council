@@ -77,7 +77,7 @@ Claude takes exactly one credential, and Codex at most one. The run fails early 
 | `CLAUDE_CODE_OAUTH_TOKEN` | one Claude credential is required | Same, but on a Claude subscription instead of the API. See [Subscription token](#subscription-token). |
 | `OPENAI_API_KEY` | no (recommended) | Enables the Codex reviewer. The workflow passes it to Codex as `CODEX_API_KEY`, which is the variable Codex reads in non-interactive mode. Without a Codex credential, the Codex reviewer does not run, even if a `harness: codex` seat installs the Codex CLI. |
 | `CODEX_ACCESS_TOKEN` | no | Enables the Codex reviewer on ChatGPT Enterprise plan usage instead of API billing. Use it or `OPENAI_API_KEY`, not both. See [Codex on Enterprise seats](#codex-on-enterprise-seats). |
-| `OPENROUTER_API_KEY` | no | Key for a custom seat on OpenRouter. |
+| `OPENROUTER_API_KEY` | no | Key for a custom seat on OpenRouter, and for the Codex reviewer with `codex_provider: openrouter`. See [Codex on OpenRouter](#codex-on-openrouter). |
 | `PERPLEXITY_API_KEY` | no | Enables the Perplexity reviewer. |
 | `PR_BOT_TOKEN` | no | A GitHub token to post as your own App or bot instead of `github-actions[bot]`. See [Who posts](#who-posts). |
 
@@ -142,6 +142,7 @@ Comment `/review-council` on an open, non-draft PR. Watch the run in the **Actio
 | `codex_version` | string | `0.163.0` | Version of the Codex CLI to install. |
 | `claude_model` | string | `""` | The model Claude Code runs, e.g. `claude-opus-5-5` or an alias like `sonnet`. Empty = Claude Code's default for your credential. The reviewer subagents inherit it. See [Pick the models](#pick-the-models). |
 | `codex_model` | string | `""` | The model the Codex reviewer runs, e.g. `gpt-6-luna` to keep API costs low. Empty = Codex's default. See [Pick the models](#pick-the-models). |
+| `codex_provider` | string | `""` | Where the Codex reviewer's model is served: `openai` (the default) or `openrouter`. See [Codex on OpenRouter](#codex-on-openrouter). |
 | `static_analysis` | boolean | `true` | Run the static-analysis scan (secrets, CVEs, lint) before the review. Missing tools are skipped and noted; the run never stops to ask. |
 | `skip_bot_prs` | boolean | `false` | Skip PRs opened by a bot account (Dependabot, Renovate, a GitHub App). Their text can come from outside your org. Off by default, so agent-opened PRs are reviewed. |
 | `pr_bot_login` | string | `""` | With `PR_BOT_TOKEN`: the login it posts as, e.g. `my-app[bot]`. See [Who posts](#who-posts). |
@@ -278,6 +279,7 @@ The `codex_model` input sets the Codex reviewer's model. With an OpenAI API key 
 - Custom `harness: codex` seats keep their own `model`.
 - Empty uses Codex's default (`gpt-6.1-sol` with Codex 0.163, a large model). The same charset rule applies (no `[1m]` suffix).
 - To see which models your key can use: `curl -s https://api.openai.com/v1/models -H "Authorization: Bearer $KEY" | jq -r '.data[].id'`.
+- To run Codex on a model served by OpenRouter, see [Codex on OpenRouter](#codex-on-openrouter).
 
 ## Configure it
 
@@ -327,6 +329,26 @@ Know before you use it:
 - **The login file stays on the runner** for the rest of the job. The same prompt-injection risk as any other key applies (see [Residual risk](#secrets-data-egress-and-residual-risk)).
 - **Don't copy a personal `~/.codex/auth.json`** into a secret. Use an access token made for this.
 
+### Codex on OpenRouter
+
+The Codex reviewer can run on a model served by OpenRouter instead of OpenAI. You pay from your OpenRouter credits, and you can pick a model from another vendor.
+
+```yaml
+    with:
+      codex_provider: openrouter
+      codex_model: openai/gpt-6-luna   # an OpenRouter model ID
+    secrets:
+      OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
+```
+
+- `codex_model` is required, as an OpenRouter ID (`vendor/model`).
+- Codex also double-checks Claude's findings, so the model must come from another family: OpenAI, Google, Qwen, Moonshot (Kimi), Zhipu (GLM) or DeepSeek. A Claude model, or a router such as `openrouter/auto` that may pick one, fails the run early.
+- Don't also pass `OPENAI_API_KEY` or `CODEX_ACCESS_TOKEN`; the run fails early if you do.
+- **Set OpenRouter's privacy settings.** Codex cannot send OpenRouter's per-request `data_collection: deny` (custom seats on `claude` or `opencode` do). In your OpenRouter account's privacy settings, allow only providers that don't train on or store prompts.
+- The key sits in the run's environment, as `OPENAI_API_KEY` does. The same key also serves approved custom seats, so give it a spend limit.
+- Codex is built for OpenAI's models. A model from another vendor may use Codex's tools less well; try it on a few PRs first.
+- Out of credits (OpenRouter's HTTP 402) shows as `quota exhausted`.
+
 ### Custom seats in CI
 
 A custom seat is an extra reviewer: a model you choose, run through a harness CLI. Locally, a seat that sends code to OpenRouter and comes only from the committed `config.yml` asks you once before it runs. In CI there is nobody to ask, so the **workflow** gives that approval instead.
@@ -359,7 +381,7 @@ A seat that needs approval and is not in `approved_seats` is skipped. The report
 Limits in CI:
 
 - **Approved seats are not capped.** Every seat in `approved_seats` runs, so `approved_seats: "qwen,kimi"` runs both. Unapproved committed seats keep the local rules: at most one runs per review, and a seat that needs approval is skipped because nobody can confirm it.
-- **Use `harness: claude` (or `opencode`) for OpenRouter.** Don't use `codex` with OpenRouter: it cannot send `data_collection: deny`, and its sandbox does not stop it reading files (including its own key).
+- **Use `harness: claude` (or `opencode`) for an OpenRouter seat.** Don't use a `codex` seat with OpenRouter: it cannot send `data_collection: deny`, and its sandbox does not stop it reading files (including its own key).
 - **No local models.** `provider: ollama` needs a model on the machine; the runner has none.
 - **The key is `OPENROUTER_API_KEY`.** `api_key_env`, `harness_options.flags` and `harness_options.env` are ignored from committed config. Typed options (`effort`, `timeout_minutes`, `max_turns`, …) still work.
 - **Run time limit.** The run normally gets the run budget plus 30 minutes (45 by default). When an approved seat may run longer, the limit grows to that seat's deadline plus 20 minutes. A seat's deadline is its `timeout_minutes`, or by default 30 minutes for a local (Ollama) seat and the 10-minute reviewer timeout for an OpenRouter seat. For an `ocr` seat it is multiplied by its effort rounds (1, 2 or 3). The job's cap is 120 minutes: above that the run is capped at 110 and the log shows a warning, so lower the seat's `timeout_minutes` or effort.
@@ -574,7 +596,7 @@ That is not an escalation: anyone who can push a branch can already edit any wor
 - **Anthropic** — always (Claude Code, the Claude and Security reviewers), whichever Claude credential you use. With federation, the GitHub OIDC token is also sent to Anthropic's token endpoint.
 - **OpenAI** — if `OPENAI_API_KEY` or `CODEX_ACCESS_TOKEN` is set (Codex).
 - **Perplexity** — if `PERPLEXITY_API_KEY` is set.
-- **OpenRouter and the model's host** — for an approved OpenRouter seat (with `data_collection: deny`).
+- **OpenRouter and the model's host** — for an approved OpenRouter seat (with `data_collection: deny`), or for Codex with `codex_provider: openrouter` (without it; see [Codex on OpenRouter](#codex-on-openrouter)).
 - **GitHub** — the review (summary and inline comments) and the job summary.
 
 Static-analysis tools run on the runner. `trufflehog` checks found credentials against their provider; drop it from `static_analysis.tools` to stop that.
@@ -607,7 +629,9 @@ For a bot user, store its fine-grained token as a repo or org secret. For a GitH
 - `Give Claude only one credential`: you passed two of `ANTHROPIC_API_KEY`, `CLAUDE_CODE_OAUTH_TOKEN` and the `anthropic_*` inputs. Keep one and remove the others from the caller.
 - `Give Codex only one credential`: you passed both `OPENAI_API_KEY` and `CODEX_ACCESS_TOKEN`. Keep one.
 - `Invalid claude_model`: the `claude_model` input may hold only letters, digits, `.`, `_`, `:`, `-`, and an optional `[1m]` suffix. Use a model ID like `claude-opus-5-5` or an alias like `sonnet`, or leave it empty.
-- `Invalid codex_model`: the same rule, without the suffix. Use a model ID like `gpt-6-luna`, or leave it empty.
+- `Invalid codex_model`: the same rule, without the suffix (with `codex_provider: openrouter`, `/` is allowed too). Use a model ID like `gpt-6-luna`, or leave it empty.
+- `codex_provider openrouter needs …`: pass the `OPENROUTER_API_KEY` secret and set `codex_model` to an OpenRouter ID. `uses the OPENROUTER_API_KEY secret`: remove `OPENAI_API_KEY` / `CODEX_ACCESS_TOKEN` from the call.
+- `codex_model '…' is not allowed for the Codex reviewer on OpenRouter`: pick a model from OpenAI, Google, Qwen, Moonshot, Zhipu or DeepSeek.
 - `Federation needs anthropic_organization_id and anthropic_service_account_id`: federation needs all three IDs.
 - `Federation IDs are set but anthropic_federation_rule_id is empty`: set the rule ID too.
 
@@ -623,7 +647,7 @@ For a bot user, store its fine-grained token as a repo or org secret. For a GitH
 
 **Codex shows as degraded.** The step log has a `Review Council reviewer failed` warning with the reason and, when Codex printed one, its own error line. `quota exhausted` with an API key means the OpenAI balance is $0: add credits (it does not reset on its own). Otherwise check `OPENAI_API_KEY` (or `CODEX_ACCESS_TOKEN`) in your secrets. The workflow passes the key to Codex as `CODEX_API_KEY`; Codex does not read `OPENAI_API_KEY` in non-interactive mode. A bad key fails in seconds, and the review carries on without Codex.
 
-**Codex shows as `not configured`.** No Codex credential reached the run: neither `OPENAI_API_KEY` nor a working `CODEX_ACCESS_TOKEN` login. That is not degraded. Pass one of the two secrets.
+**Codex shows as `not configured`.** No Codex credential reached the run: no `OPENAI_API_KEY`, no working `CODEX_ACCESS_TOKEN` login, and no `codex_provider: openrouter`. That is not degraded. Pass one of them.
 
 **The report says `stopped at budget`.** The run used up `run_budget_seconds`. Some findings were not double-checked and are tagged `[unverified]`. Raise `run_budget_seconds` in the caller workflow.
 
