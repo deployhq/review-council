@@ -21,12 +21,14 @@ if [ -s "$log" ]; then
   [ -z "$err" ] || echo "::error::Review Council: $(printf '%s' "$err" | tr '\n' ' ' | cut -c1-500)"
 fi
 
-# A reviewer that failed (Codex, Google) leaves its reason and its own error
-# line in rc-failures.log (rc-invoke-provider.sh, RC_FAIL_LOG).
+# Each failed reviewer call (Codex, Google) leaves its reason and its own error
+# line in rc-failures.log (rc-invoke-provider.sh, RC_FAIL_LOG). It is one call,
+# not the reviewer: the orchestrator may retry and recover, so the wording says
+# so (the review's summary says who took part).
 fails="$RUNNER_TEMP/rc-failures.log"
 if [ -s "$fails" ]; then
   head -n 20 "$fails" | redact 2>/dev/null | while IFS= read -r line; do
-    [ -z "$line" ] || echo "::warning::Review Council reviewer failed: ${line:0:300}"
+    [ -z "$line" ] || echo "::warning::Review Council: a reviewer call failed (a later call may have recovered; the review says who took part): ${line:0:300}"
   done
 fi
 

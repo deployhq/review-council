@@ -57,7 +57,7 @@ tool() { printf '{"type":"assistant","message":{"content":[{"type":"tool_use","n
     >"$RUNNER_TEMP/rc-failures.log"
   run bash "$ACTION/summary.sh"
   [ "$status" -eq 0 ]
-  [[ "$output" == *"::warning::Review Council reviewer failed: Codex: codex: quota exhausted — ERROR: Quota exceeded."* ]] || false
-  [[ "$output" == *"::warning::Review Council reviewer failed: Google (Antigravity): agy: auth failure"* ]] || false
+  [[ "$output" == *"::warning::Review Council: a reviewer call failed (a later call may have recovered; the review says who took part): Codex: codex: quota exhausted — ERROR: Quota exceeded."* ]] || false
+  [[ "$output" == *"::warning::Review Council: a reviewer call failed (a later call may have recovered; the review says who took part): Google (Antigravity): agy: auth failure"* ]] || false
   [[ "$output" != *"ABCDEFGHIJKLMNOPQRSTUVWXYZ012345"* ]] || false
 }
