@@ -47,7 +47,7 @@ inputs:
     required: false
     default: ''
   codex_provider:
-    description: Optional. Where the Codex reviewer's model is served (RC_CODEX_PROVIDER: openai or openrouter); empty = openai.
+    description: Optional. Where the Codex reviewer's model is served, openai or openrouter (RC_CODEX_PROVIDER). Empty = openai.
     required: false
     default: ''
   # Secret values (passed from the calling job's `secrets`).
