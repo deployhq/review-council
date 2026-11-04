@@ -144,9 +144,10 @@ STUB
 
 # codex_provider ---------------------------------------------------------------
 
-@test "auth: an unknown codex_provider is refused" {
-  check ANTHROPIC_API_KEY=k RC_CODEX_PROVIDER=azure
-  fails_with 'codex_provider'
+@test "auth: an unknown codex_provider is refused, and the value isn't echoed" {
+  check ANTHROPIC_API_KEY=k RC_CODEX_PROVIDER="$(printf 'azure\nevil')"
+  fails_with 'Unknown codex_provider'
+  ! printf '%s' "$output" | grep -qF 'evil' || return 1
 }
 
 @test "auth: codex_provider openrouter with a key and an OpenRouter model ID is accepted" {

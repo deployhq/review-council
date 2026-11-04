@@ -93,7 +93,7 @@ case "${RC_CODEX_PROVIDER:-openai}" in
       exit 1
     fi
     check_model codex_model "$RC_CODEX_MODEL" allow-slash
-    # shellcheck source=SCRIPTDIR/../../../scripts/rc-lib-family.sh
+    # shellcheck source=/dev/null
     . "$plugin_dir/scripts/rc-lib-family.sh"
     case "$(rc_family "$RC_CODEX_MODEL")" in
       Claude | unknown)
@@ -103,7 +103,8 @@ case "${RC_CODEX_PROVIDER:-openai}" in
     esac
     ;;
   *)
-    echo "::error::Unknown codex_provider '${RC_CODEX_PROVIDER}' (expected openai or openrouter)."
+    # The value is not echoed: a multi-line one could forge log commands.
+    echo "::error::Unknown codex_provider (expected openai or openrouter)."
     exit 1
     ;;
 esac
