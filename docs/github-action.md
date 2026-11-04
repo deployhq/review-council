@@ -140,7 +140,8 @@ Comment `/review-council` on an open, non-draft PR. Watch the run in the **Actio
 | `plugin_ref` | string | `main` | Git ref of `deployhq/review-council` to load the plugin from (and the shared steps). Set it to the same tag or SHA as the `uses:` ref. |
 | `claude_code_version` | string | a pinned version | Version of `@anthropic-ai/claude-code` to install. |
 | `codex_version` | string | `0.163.0` | Version of the Codex CLI to install. |
-| `claude_model` | string | `""` | The model Claude Code runs, e.g. `claude-opus-5-5` or an alias like `sonnet`. Empty = Claude Code's default for your credential. The reviewer subagents inherit it. See [Pick the Claude model](#pick-the-claude-model). |
+| `claude_model` | string | `""` | The model Claude Code runs, e.g. `claude-opus-5-5` or an alias like `sonnet`. Empty = Claude Code's default for your credential. The reviewer subagents inherit it. See [Pick the models](#pick-the-models). |
+| `codex_model` | string | `""` | The model the Codex reviewer runs, e.g. `gpt-6-luna` to keep API costs low. Empty = Codex's default. See [Pick the models](#pick-the-models). |
 | `static_analysis` | boolean | `true` | Run the static-analysis scan (secrets, CVEs, lint) before the review. Missing tools are skipped and noted; the run never stops to ask. |
 | `skip_bot_prs` | boolean | `false` | Skip PRs opened by a bot account (Dependabot, Renovate, a GitHub App). Their text can come from outside your org. Off by default, so agent-opened PRs are reviewed. |
 | `pr_bot_login` | string | `""` | With `PR_BOT_TOKEN`: the login it posts as, e.g. `my-app[bot]`. See [Who posts](#who-posts). |
@@ -255,7 +256,7 @@ The first three IDs are required for federation. The other inputs and optional s
 
 **Not yet proven:** whether Claude Code refreshes its token in the middle of a long review. A live run longer than 10 minutes will check this. Until then, if long reviews fail with `Authentication failed` partway through, use an API key.
 
-### Pick the Claude model
+### Pick the models
 
 The `claude_model` input sets the model Claude Code runs, e.g. `claude-opus-5-5` or an alias like `sonnet`. Leave it empty for Claude Code's default for your credential. The Claude and Security reviewer subagents inherit it.
 
@@ -265,6 +266,18 @@ The `claude_model` input sets the model Claude Code runs, e.g. `claude-opus-5-5`
 ```
 
 It works with all three credentials. A value with characters other than letters, digits, `.`, `_`, `:`, `-` (and an optional `[1m]` suffix) fails the run early. Separately, `reviewers.claude.model` in `config.yml` pins only the Claude reviewer subagent (see [`rules/config.md`](../rules/config.md#reviewers-block)).
+
+The `codex_model` input sets the Codex reviewer's model. With an OpenAI API key every call is billed, so a small model keeps the cost down:
+
+```yaml
+    with:
+      codex_model: gpt-6-luna
+```
+
+- It is written to Codex's config on the runner, so it also applies when Codex double-checks Claude's findings. A finding Codex refutes (with counter-evidence) is dropped, so a small model may drop a real one. If that matters more than cost, use the next size up (e.g. `gpt-6.1-terra`) or leave it empty.
+- Custom `harness: codex` seats keep their own `model`.
+- Empty uses Codex's default (`gpt-6.1-sol` with Codex 0.163, a large model). The same charset rule applies (no `[1m]` suffix).
+- To see which models your key can use: `curl -s https://api.openai.com/v1/models -H "Authorization: Bearer $KEY" | jq -r '.data[].id'`.
 
 ## Configure it
 
@@ -594,6 +607,7 @@ For a bot user, store its fine-grained token as a repo or org secret. For a GitH
 - `Give Claude only one credential`: you passed two of `ANTHROPIC_API_KEY`, `CLAUDE_CODE_OAUTH_TOKEN` and the `anthropic_*` inputs. Keep one and remove the others from the caller.
 - `Give Codex only one credential`: you passed both `OPENAI_API_KEY` and `CODEX_ACCESS_TOKEN`. Keep one.
 - `Invalid claude_model`: the `claude_model` input may hold only letters, digits, `.`, `_`, `:`, `-`, and an optional `[1m]` suffix. Use a model ID like `claude-opus-5-5` or an alias like `sonnet`, or leave it empty.
+- `Invalid codex_model`: the same rule, without the suffix. Use a model ID like `gpt-6-luna`, or leave it empty.
 - `Federation needs anthropic_organization_id and anthropic_service_account_id`: federation needs all three IDs.
 - `Federation IDs are set but anthropic_federation_rule_id is empty`: set the rule ID too.
 
@@ -607,7 +621,7 @@ For a bot user, store its fine-grained token as a repo or org secret. For a GitH
 
 **A missing or wrong secret.** Claude needs one credential (`ANTHROPIC_API_KEY`, `CLAUDE_CODE_OAUTH_TOKEN`, or federation); without one, the run fails. Any other missing key just drops that reviewer. A bad key shows up in the summary: the reviewer is listed in `degraded` and the status is `degraded`.
 
-**Codex shows as degraded.** Check `OPENAI_API_KEY` (or `CODEX_ACCESS_TOKEN`) in your secrets. The workflow passes the key to Codex as `CODEX_API_KEY`; Codex does not read `OPENAI_API_KEY` in non-interactive mode. A bad key fails in seconds, and the review carries on without Codex.
+**Codex shows as degraded.** The step log has a `Review Council reviewer failed` warning with the reason and, when Codex printed one, its own error line. `quota exhausted` with an API key means the OpenAI balance is $0: add credits (it does not reset on its own). Otherwise check `OPENAI_API_KEY` (or `CODEX_ACCESS_TOKEN`) in your secrets. The workflow passes the key to Codex as `CODEX_API_KEY`; Codex does not read `OPENAI_API_KEY` in non-interactive mode. A bad key fails in seconds, and the review carries on without Codex.
 
 **Codex shows as `not configured`.** No Codex credential reached the run: neither `OPENAI_API_KEY` nor a working `CODEX_ACCESS_TOKEN` login. That is not degraded. Pass one of the two secrets.
 

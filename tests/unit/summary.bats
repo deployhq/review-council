@@ -49,3 +49,15 @@ tool() { printf '{"type":"assistant","message":{"content":[{"type":"tool_use","n
   grep -qF '_success · 61s · $1.5_' "$GITHUB_STEP_SUMMARY"
   grep -qxF 'done' "$GITHUB_STEP_SUMMARY"
 }
+
+@test "summary: a reviewer's failure reason shows as a warning, redacted" {
+  tool Bash "Run the Codex reviewer" >"$LOG"
+  printf '%s\n' 'Codex: codex: quota exhausted — ERROR: Quota exceeded. Check your plan and billing details.' \
+    'Google (Antigravity): agy: auth failure — Error: bad key sk-ant-api03-ABCDEFGHIJKLMNOPQRSTUVWXYZ012345' \
+    >"$RUNNER_TEMP/rc-failures.log"
+  run bash "$ACTION/summary.sh"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"::warning::Review Council reviewer failed: Codex: codex: quota exhausted — ERROR: Quota exceeded."* ]] || false
+  [[ "$output" == *"::warning::Review Council reviewer failed: Google (Antigravity): agy: auth failure"* ]] || false
+  [[ "$output" != *"ABCDEFGHIJKLMNOPQRSTUVWXYZ012345"* ]] || false
+}

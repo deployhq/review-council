@@ -2,7 +2,7 @@
 # Run `/review-council:run` unattended (called by .github/actions/review/action.yml,
 # from the reviewed repo's checkout).
 # Inputs (env): RC_AUTH_MODE (api_key|federation), RC_TIMEOUT_MINUTES, PR_NUMBER,
-#   RC_CLAUDE_MODEL, the RC_* run settings, GH_TOKEN, the provider keys,
+#   RC_CLAUDE_MODEL, RC_CODEX_MODEL, the RC_* run settings, GH_TOKEN, the provider keys,
 #   CLAUDE_CODE_OAUTH_TOKEN, CODEX_ACCESS_TOKEN, RC_PR_BOT_TOKEN(_ENV), and in
 #   federation mode the ANTHROPIC_* federation IDs plus the runner's
 #   ACTIONS_ID_TOKEN_REQUEST_URL / ACTIONS_ID_TOKEN_REQUEST_TOKEN.
@@ -13,7 +13,7 @@ plugin_dir="$(cd "$GITHUB_ACTION_PATH/../../.." && pwd -P)"
 # Unset empty optional values so they read as "not set", not "set to ''"
 # (an empty credential variable can still win its precedence slot).
 for v in ANTHROPIC_API_KEY CLAUDE_CODE_OAUTH_TOKEN CODEX_API_KEY CODEX_ACCESS_TOKEN \
-         OPENROUTER_API_KEY PERPLEXITY_API_KEY RC_CLAUDE_MODEL \
+         OPENROUTER_API_KEY PERPLEXITY_API_KEY RC_CLAUDE_MODEL RC_CODEX_MODEL \
          ANTHROPIC_FEDERATION_RULE_ID ANTHROPIC_ORGANIZATION_ID \
          ANTHROPIC_SERVICE_ACCOUNT_ID ANTHROPIC_WORKSPACE_ID; do
   [ -n "${!v:-}" ] || unset "$v"
@@ -47,12 +47,23 @@ if [ -n "${CODEX_API_KEY:-}" ] && [ -n "${CODEX_ACCESS_TOKEN:-}" ]; then
   echo "::error::Give Codex only one credential: the OPENAI_API_KEY secret or the CODEX_ACCESS_TOKEN secret."
   exit 1
 fi
+# check_model <input> <value> [allow-1m]: a model ID from a workflow input.
 # Whole-string match ([[ =~ ]], not grep -x, which passes a multi-line value).
-model_re='^[A-Za-z0-9][A-Za-z0-9._:-]{0,79}(\[[A-Za-z0-9]{1,8}\])?$'
-if [ -n "${RC_CLAUDE_MODEL:-}" ] && ! [[ "$RC_CLAUDE_MODEL" =~ $model_re ]]; then
-  echo "::error::Invalid claude_model (allowed: letters, digits, . _ : - and an optional [1m] suffix)."
-  exit 1
-fi
+# The charset keeps it safe on a command line and inside a TOML string.
+check_model() {
+  local re='^[A-Za-z0-9][A-Za-z0-9._:-]{0,79}' extra=""
+  if [ "${3:-}" = allow-1m ]; then
+    re+='(\[[A-Za-z0-9]{1,8}\])?'
+    extra=" and an optional [1m] suffix"
+  fi
+  re+='$'
+  if [ -n "$2" ] && ! [[ "$2" =~ $re ]]; then
+    echo "::error::Invalid $1 (allowed: letters, digits, . _ : -$extra)."
+    exit 1
+  fi
+}
+check_model claude_model "${RC_CLAUDE_MODEL:-}" allow-1m
+check_model codex_model "${RC_CODEX_MODEL:-}"
 case "${RC_AUTH_MODE:-}" in
   api_key)
     if [ -n "${ANTHROPIC_API_KEY:-}" ]; then
@@ -131,6 +142,22 @@ if [ -n "${CODEX_ACCESS_TOKEN:-}" ]; then
   unset CODEX_ACCESS_TOKEN
 fi
 
+# codex_model: Codex's default model for this run, set in its own config
+# (~/.codex, which the Codex reviewer and the refutation pass both use; custom
+# codex seats run with a throwaway CODEX_HOME and keep their own model).
+if [ -n "${RC_CODEX_MODEL:-}" ]; then
+  codex_cfg="${CODEX_HOME:-$HOME/.codex}/config.toml"
+  mkdir -p "$(dirname "$codex_cfg")"
+  if ! grep -qE '^[[:space:]]*model[[:space:]]*=' "$codex_cfg" 2>/dev/null; then
+    printf 'model = "%s"\n' "$RC_CODEX_MODEL" >>"$codex_cfg"
+  fi
+  echo "Codex model: $RC_CODEX_MODEL"
+fi
+
+# A reviewer that fails (Codex, Google) appends its reason and its own error
+# line here; summary.sh prints them in the step log. Never shown to the model.
+export RC_FAIL_LOG="$RUNNER_TEMP/rc-failures.log"
+
 # A composite step cannot set timeout-minutes, so enforce the timeout here:
 # TERM to claude's process group, KILL 60s later if it is still alive. The
 # gate's limit is raised to fit the longest custom seat the run's config will
@@ -147,7 +174,7 @@ model_args=()
 [ -z "${RC_CLAUDE_MODEL:-}" ] || model_args=(--model "$RC_CLAUDE_MODEL")
 timeout -k 60 "${timeout_min}m" \
   claude -p "/review-council:run ${PR_NUMBER}" \
-    "${model_args[@]}" \
+    ${model_args[@]+"${model_args[@]}"} \
     --plugin-dir "$plugin_dir" \
     --setting-sources user \
     --allowedTools "Bash Read Grep Glob Agent Skill Write" \

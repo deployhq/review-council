@@ -76,3 +76,59 @@ fails_with() { [ "$status" -ne 0 ] && printf '%s' "$output" | grep -qF "$1"; }
   fails_with 'claude_model'
   ! printf '%s' "$output" | grep -qF 'evil' || return 1
 }
+
+@test "auth: a valid codex_model is accepted" {
+  check ANTHROPIC_API_KEY=k RC_CODEX_MODEL=gpt-6-luna
+  [ "$status" -eq 0 ]
+}
+
+@test "auth: a codex_model with shell or TOML characters is refused" {
+  check ANTHROPIC_API_KEY=k RC_CODEX_MODEL='luna"; id'
+  fails_with 'codex_model'
+}
+
+@test "auth: a multi-line codex_model is refused, and the value isn't echoed" {
+  check ANTHROPIC_API_KEY=k RC_CODEX_MODEL="$(printf 'gpt-6-luna\nevil')"
+  fails_with 'codex_model'
+  ! printf '%s' "$output" | grep -qF 'evil' || return 1
+}
+
+# run_stub [VAR=value ...]: a full (non --check-auth) run with a stub `claude`
+# that records Codex's config and RC_FAIL_LOG instead of reviewing.
+run_stub() {
+  local bin="$BATS_TEST_TMPDIR/bin" work="$BATS_TEST_TMPDIR/work"
+  mkdir -p "$bin" "$work" "$BATS_TEST_TMPDIR/runner"
+  cat >"$bin/claude" <<'STUB'
+#!/bin/sh
+cat "${CODEX_HOME:-$HOME/.codex}/config.toml" 2>/dev/null
+echo "fail_log=${RC_FAIL_LOG:-}"
+STUB
+  chmod +x "$bin/claude"
+  # macOS has no `timeout`; the stub drops its options and runs the command.
+  command -v timeout >/dev/null || printf '#!/bin/sh\nwhile [ "${1#-}" != "$1" ]; do shift 2; done; shift; exec "$@"\n' >"$bin/timeout"
+  chmod +x "$bin/timeout" 2>/dev/null || :
+  run --separate-stderr env -i PATH="$bin:$PATH" HOME="$BATS_TEST_TMPDIR" GITHUB_ACTION_PATH="$ACTION" \
+    RUNNER_TEMP="$BATS_TEST_TMPDIR/runner" RC_AUTH_MODE=api_key ANTHROPIC_API_KEY=k PR_NUMBER=1 "$@" \
+    bash -c 'cd "$1" && bash "$2/run-review.sh"' _ "$work" "$ACTION"
+}
+
+@test "run: codex_model becomes Codex's default model, and the failure log is exported" {
+  run_stub RC_CODEX_MODEL=gpt-6-luna
+  [ "$status" -eq 0 ]
+  grep -qx 'model = "gpt-6-luna"' "$BATS_TEST_TMPDIR/.codex/config.toml"
+  grep -qxF "fail_log=$BATS_TEST_TMPDIR/runner/rc-failures.log" "$BATS_TEST_TMPDIR/runner/rc-run.jsonl"
+}
+
+@test "run: codex_model never overrides a model already in Codex's config" {
+  mkdir -p "$BATS_TEST_TMPDIR/.codex"
+  printf 'model = "kept"\n' >"$BATS_TEST_TMPDIR/.codex/config.toml"
+  run_stub RC_CODEX_MODEL=gpt-6-luna
+  [ "$status" -eq 0 ]
+  [ "$(cat "$BATS_TEST_TMPDIR/.codex/config.toml")" = 'model = "kept"' ]
+}
+
+@test "run: no codex_model leaves Codex's config alone" {
+  run_stub
+  [ "$status" -eq 0 ]
+  [ ! -e "$BATS_TEST_TMPDIR/.codex/config.toml" ]
+}

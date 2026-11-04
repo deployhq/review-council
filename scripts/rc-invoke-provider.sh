@@ -430,7 +430,10 @@ AUTH_PATTERN='no longer supported|not authenticated|please migrate to the antigr
 # phrasing (Antigravity), distinct from the generic TerminalQuotaError — without
 # them a quota-dead agy classifies EMPTY, wastes a fast-empty retry, and reports
 # a misleading "empty output after retry" (seen live on deployhq#1043).
-QUOTA_PATTERN='exhausted your daily quota|terminalquotaerror|individual quota reached|upgrade your subscription|insufficient_quota|exceeded your current quota'
+# `quota exceeded` is codex 0.163's wording for an API key on a $0 balance
+# ("ERROR: Quota exceeded. Check your plan and billing details."); without it
+# Codex was retried and reported as "empty output" (deployhq/ops-agents#147).
+QUOTA_PATTERN='exhausted your daily quota|terminalquotaerror|individual quota reached|upgrade your subscription|insufficient_quota|exceeded your current quota|quota exceeded'
 # RATE_LIMIT is TRANSIENT: a tokens-per-minute throttle that clears in seconds.
 # It used to live in QUOTA_PATTERN, which meant a 60-second blip permanently
 # removed a reviewer from the run and told the user their paid quota was gone.
@@ -693,6 +696,24 @@ succeed() {
   exit 0
 }
 
+# fail_log <summary>: when RC_FAIL_LOG names a file (CI sets it), append one
+# line: the summary plus the first error line the tool itself printed in the
+# last attempt (ERROR:/Error:/error: — codex's own lines, not the prompt echo),
+# control characters stripped and capped at 200 characters. It goes to a file
+# the CI job summary reads, never to stdout: the model never sees it, so it
+# cannot end up in a posted review.
+fail_log() {
+  [ -n "${RC_FAIL_LOG:-}" ] || return 0
+  _fl_err=""
+  for _fl_f in "${INVOKE_OUT:-}" "${primary_out:-}"; do
+    [ -n "$_fl_f" ] && [ -f "$_fl_f" ] || continue
+    _fl_err="$(grep -E '^(ERROR|Error|error)[: ]' "$_fl_f" 2>/dev/null | head -n 1 |
+      tr -d '\000-\037\177' | cut -c1-200)" || _fl_err=""
+    [ -z "$_fl_err" ] || break
+  done
+  printf '%s%s\n' "$1" "${_fl_err:+ — $_fl_err}" >>"$RC_FAIL_LOG" 2>/dev/null || :
+}
+
 # fail <primary-note> <fallback-note-or-empty>
 fail() {
   _f_pnote="$1"
@@ -711,10 +732,12 @@ fail() {
 
   if [ -n "$_f_fnote" ]; then
     _f_fallback_bn="$(basename "$fallback_bin")"
-    echo "SKIPPED: $_f_lead unavailable — $_f_primary_bn: $_f_pnote; $_f_fallback_bn fallback: $_f_fnote"
+    _f_line="$_f_lead unavailable — $_f_primary_bn: $_f_pnote; $_f_fallback_bn fallback: $_f_fnote"
   else
-    echo "SKIPPED: $_f_lead unavailable — $_f_primary_bn: $_f_pnote"
+    _f_line="$_f_lead unavailable — $_f_primary_bn: $_f_pnote"
   fi
+  echo "SKIPPED: $_f_line"
+  fail_log "$_f_lead: $_f_primary_bn: $_f_pnote${_f_fnote:+; fallback: $_f_fnote}"
   echo "ELAPSED: $spent" >&2
   exit 1
 }

@@ -82,7 +82,8 @@ reviewers:
 An empty model means "let the reviewer use its own default model" — nothing is passed. In
 GitHub Actions, the workflow's `claude_model` input is separate: it sets the model Claude Code
 itself runs, which the Claude and Security reviewer subagents inherit; `reviewer.claude.model`
-still pins only the Claude reviewer subagent (see `docs/github-action.md`). The
+still pins only the Claude reviewer subagent (see `docs/github-action.md`). Likewise the
+`codex_model` input sets the Codex reviewer's model in CI. The
 council still needs `settings.min_reviewers` participants after disabling; if too few remain
 (also after availability detection), the existing min-reviewers handling applies (single-
 reviewer mode or a prompt).

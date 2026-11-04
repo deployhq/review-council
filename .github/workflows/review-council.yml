@@ -76,6 +76,10 @@ on:
         description: Optional. The model Claude Code runs (e.g. "claude-opus-5-5" or "sonnet"). Empty = Claude Code's default for the credential. Reviewer subagents inherit it.
         type: string
         default: ''
+      codex_model:
+        description: Optional. The model the Codex reviewer runs (e.g. "gpt-6-luna" to keep API costs low). Empty = Codex's default. It also double-checks findings.
+        type: string
+        default: ''
       skip_bot_prs:
         description: Skip PRs opened by a bot account (Dependabot, Renovate, a GitHub App). Their text can come from outside your org. Off by default, so agent-opened PRs are reviewed.
         type: boolean
@@ -222,6 +226,7 @@ jobs:
           codex_version: ${{ inputs.codex_version }}
           static_analysis: ${{ inputs.static_analysis }}
           claude_model: ${{ inputs.claude_model }}
+          codex_model: ${{ inputs.codex_model }}
           anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
           claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
           openai_api_key: ${{ secrets.OPENAI_API_KEY }}

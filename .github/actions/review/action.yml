@@ -42,6 +42,10 @@ inputs:
     description: Optional. The model Claude Code runs (RC_CLAUDE_MODEL); empty = Claude Code's default.
     required: false
     default: ''
+  codex_model:
+    description: Optional. The Codex reviewer's model (RC_CODEX_MODEL); empty = Codex's default.
+    required: false
+    default: ''
   # Secret values (passed from the calling job's `secrets`).
   anthropic_api_key:
     description: Anthropic API key (auth_mode api_key).
@@ -104,6 +108,7 @@ runs:
       env:
         RC_AUTH_MODE: ${{ inputs.auth_mode }}
         RC_CLAUDE_MODEL: ${{ inputs.claude_model }}
+        RC_CODEX_MODEL: ${{ inputs.codex_model }}
         ANTHROPIC_API_KEY: ${{ inputs.anthropic_api_key }}
         CLAUDE_CODE_OAUTH_TOKEN: ${{ inputs.claude_code_oauth_token }}
         CODEX_API_KEY: ${{ inputs.openai_api_key }}
@@ -196,6 +201,7 @@ runs:
         RC_STATIC_ANALYSIS: ${{ inputs.static_analysis }}
         GH_TOKEN: ${{ github.token }}
         RC_CLAUDE_MODEL: ${{ inputs.claude_model }}
+        RC_CODEX_MODEL: ${{ inputs.codex_model }}
         ANTHROPIC_API_KEY: ${{ inputs.anthropic_api_key }}
         CLAUDE_CODE_OAUTH_TOKEN: ${{ inputs.claude_code_oauth_token }}
         # codex ignores OPENAI_API_KEY on its own; CODEX_API_KEY is what it reads.

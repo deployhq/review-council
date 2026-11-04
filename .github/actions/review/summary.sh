@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # Write the redacted job summary (called by .github/actions/review/action.yml,
 # also after a timeout or a cancel). The step log gets the run's tool trace
-# (which tools ran, never their output) and, on failure, Claude's error.
+# (which tools ran, never their output), on failure Claude's error, and each
+# failed reviewer's reason.
 set -uo pipefail
 
 plugin_dir="$(cd "$GITHUB_ACTION_PATH/../../.." && pwd -P)"
@@ -18,6 +19,15 @@ if [ -s "$log" ]; then
   echo "::endgroup::"
   err="$(jq -r 'select(.type == "result" and .is_error == true) | .result // .subtype // "error"' "$log" 2>/dev/null | tail -n 1 | redact 2>/dev/null)" || err=""
   [ -z "$err" ] || echo "::error::Review Council: $(printf '%s' "$err" | tr '\n' ' ' | cut -c1-500)"
+fi
+
+# A reviewer that failed (Codex, Google) leaves its reason and its own error
+# line in rc-failures.log (rc-invoke-provider.sh, RC_FAIL_LOG).
+fails="$RUNNER_TEMP/rc-failures.log"
+if [ -s "$fails" ]; then
+  head -n 20 "$fails" | redact 2>/dev/null | while IFS= read -r line; do
+    [ -z "$line" ] || echo "::warning::Review Council reviewer failed: ${line:0:300}"
+  done
 fi
 
 {
