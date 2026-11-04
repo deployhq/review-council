@@ -365,12 +365,17 @@ upsert_digest() {
 # `review-council/ledger` v1 shape, of which this script reads
 #   .findings[] | {fingerprint, outcome, section, severity, badge, title, issue,
 #                  why_it_matters, recommendation, how_to_verify, origins[].reviewer,
-#                  location: {path, line, line_end}}
+#                  location: {path, line, line_end, code}}
 # Everything in it is model-composed, so it is DATA: this script decides where a
 # finding goes, renders it, and builds every request with jq. A reported
 # finding goes inline only when its path is a file in the PR's diff (GitHub's
 # own list) and its line is a right-side line of one of that file's hunks;
-# everything else goes to the review's "Outside the diff" section (at the
+# before that, a finding with `location.code` (the exact text of its first
+# line) is moved to where that text is in the file at the reviewed commit:
+# the line it names if the text is there, else the nearest line holding it
+# (an exact match, whitespace collapsed, before a substring one), else no line
+# at all. Model-reported line numbers can be off; the text is checked here.
+# Everything else goes to the review's "Outside the diff" section (at the
 # digest's placeholder line `<!-- rc:inline -->`, else at the end). The review
 # body is the digest: a review per run, no separate summary comment (that is
 # only the fallback when GitHub accepts no review).
@@ -459,6 +464,28 @@ LEDGER_DEFS='
 # The plan: what to post, list outside the diff, and resolve.
 # shellcheck disable=SC2016  # jq program, not shell
 PLAN_JQ='
+  def norm: gsub("\\s+"; " ") | ltrimstr(" ") | rtrimstr(" ");
+  def dist($a; $b): ($a - $b) | if . < 0 then -. else . end;
+  # Re-anchor on location.code against $src[0] ({path: [lines]} at the
+  # reviewed commit); see the header above.
+  def relocate:
+    (if (.path | str) then $src[0][.path] else null end) as $ls
+    | if ($ls | type) != "array" or (.location.code | str | not) then .
+      else (.location.code | split("\n")[0] | norm) as $c
+      | if $c == "" then .
+        else ([range(0; $ls | length) | select(($ls[.] | norm) == $c) | . + 1]) as $eq
+        | (if ($eq | length) > 0 then $eq
+           elif ($c | length) >= 8 then [range(0; $ls | length) | select($ls[.] | norm | contains($c)) | . + 1]
+           else [] end) as $m
+        | (if (.start_line | posint) then .start_line elif (.line | posint) then .line else null end) as $s
+        | if ($m | length) == 0 then . + {start_line: null, line: null}
+          elif $s != null and ($m | index($s)) != null then .
+          elif $s == null then . + {start_line: $m[0], line: $m[0]}
+          else ($m | min_by(dist(.; $s))) as $t
+          | . + {start_line: $t, line: (if (.line | posint) then .line + $t - $s else $t end)}
+          end
+        end
+      end;
   def sevlabel: {critical: "🔴 Critical", important: "🟠 Important", suggestion: "🟡 Suggestion"}[.] // "Finding";
   def fence($t): ([$t | match("`+"; "g") | .length] | max // 0) as $m | "`" * ([$m + 1, 3] | max);
   def lines: if (.start_line | posint) and (.line | posint) and .start_line < .line
@@ -495,6 +522,7 @@ PLAN_JQ='
       end;
 
   reported
+  | map(relocate)
   # One comment per fingerprint: a repeated fingerprint is listed, not tracked.
   | reduce .[] as $x ({seen: {}, out: []};
       if $x.tracked and .seen[$x.fingerprint] then .out += [$x + {tracked: false}]
@@ -641,7 +669,20 @@ do_review() {
   # Run status from the digest's rc:state line (script-produced, line 2).
   _status="$(sed -n '2s/^<!-- rc:state \(.*\) -->$/\1/p' "$_body" | jq -r '.status // empty' 2>/dev/null)" || _status=""
 
+  # The files that findings with location.code point at, as lines at the
+  # reviewed commit (= local HEAD, checked by load_pr_state), for relocate.
+  # Only files in the PR's diff; paths are git arguments, never shell code.
+  printf '{}\n' >"$_tmp/src.json"
+  if [ "$_inline" = true ]; then
+    jq -r --slurpfile d "$_tmp/diff.json" '[.findings[]? | objects | select((.location.code | type) == "string")
+        | .location.path | strings | select(. as $p | $d[0] | has($p))] | unique[]' "$_ledger" 2>/dev/null | head -n 50 |
+      while IFS= read -r _p; do
+        git show "HEAD:$_p" 2>/dev/null | head -c 2000000 | jq -Rs --arg p "$_p" '{($p): split("\n")}' 2>/dev/null
+      done | jq -s 'add // {}' >"$_tmp/src.json" 2>/dev/null || printf '{}\n' >"$_tmp/src.json"
+  fi
+
   if ! jq -n --slurpfile f "$_ledger" --slurpfile d "$_tmp/diff.json" --slurpfile ex "$_tmp/ours.json" \
+    --slurpfile src "$_tmp/src.json" \
     --argjson inline "$_inline" --argjson maxn "$MAX_INLINE" --argjson cov "$_covered" --argjson res "$_fixed" \
     --arg re "$SECRET_RE" --arg footer "$_footer" \
     "$LEDGER_DEFS"' $f[0] | '"$PLAN_JQ" >"$_tmp/plan.json" 2>/dev/null; then

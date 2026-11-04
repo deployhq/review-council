@@ -773,13 +773,14 @@ RC_LEDGER="$(mktemp "${TMPDIR:-/tmp}/rc-ledger.XXXXXX")" && cat >"$RC_LEDGER" <<
    "section": "main|extra-signals", "severity": "critical|important|suggestion", "badge": "<badge exactly as the report shows it, e.g. [cross-reviewed]>",
    "title": "<one line>", "issue": "…", "why_it_matters": "…", "recommendation": "…", "how_to_verify": "…",
    "origins": [{"reviewer": "<canonical id>"}],
-   "location": {"path": "<relpath>", "line": <first line or null>, "line_end": <last line or null>}}
+   "location": {"path": "<relpath>", "line": <first line or null>, "line_end": <last line or null>, "code": "<exact text of the first line, or null>"}}
  ]}
 RC_LEDGER_<random>
 echo "$RC_LEDGER"
 ```
 - One object per §5.5 ledger row, in report order. `section` and `severity` are `null` unless `outcome` is `reported`; `severity` and `badge` are the final ones from the report.
 - `location` is the finding's §3.1 `location` split into path and lines (`a.sh:12-14` → `"line": 12, "line_end": 14`; one line → `"line_end": null`; a section or file-level reference → `"line": null`). Never invent or move a line — Step 6.6 checks it against the PR's diff and lists anything that doesn't fit in the digest instead.
+- `code` is the exact text of the line the finding is about (its first line), copied from the file — `Read` it at the reviewed commit, don't copy a diff line (no leading `+`). One line, no surrounding quotes or backticks. It is what anchors an inline comment: `rc-post.sh` moves the comment to where that text is in the file (reported line numbers can be a few lines off), and lists the finding in the digest when the text isn't there. `null` for a file-level finding or when there is no line.
 - `issue` / `why_it_matters` / `recommendation` / `how_to_verify` carry the merged finding's own fields; `origins` are the ledger's origin reviewers (canonical ids, or a seat's `<slot>`).
 - Same no-secret rule as 6.6.3: a Tier A secret finding gives only its rule and `path:line`, never the value.
 

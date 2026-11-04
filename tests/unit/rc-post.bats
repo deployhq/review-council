@@ -119,6 +119,8 @@ case "$*" in
   "rev-parse HEAD")                     printf '%s\n' "${GIT_HEAD:-1111111111111111111111111111111111111111}" ;;
   "rev-parse --abbrev-ref @{upstream}") [ "${GIT_HAS_UPSTREAM:-1}" = 1 ] && exit 0 || exit 1 ;;
   push*)                                exit 0 ;;
+  "show HEAD:"*)                        f="${GIT_SHOW_DIR:-/nonexistent}/${2#HEAD:}"
+                                        [ -f "$f" ] && cat "$f" || exit 128 ;;
   *)                                    exit 0 ;;
 esac
 EOF
@@ -529,6 +531,69 @@ digest_sent() { if [ -f "$POSTBODY" ]; then jq -r '.body' "$POSTBODY"; else jq -
   digest_sent | grep -qF '`b.sh:100`'
   ! digest_sent | grep -qF '<!-- rc:inline -->' || return 1
   ! digest_sent | grep -qF 'Refuted' || return 1
+}
+
+# with_code <index> <line> <line_end|null> <code>: give ledger finding <index> a
+# location with the exact text of its line; a.sh at HEAD is line1..line4.
+with_code() {
+  export GIT_SHOW_DIR="$BATS_TEST_TMPDIR/src"
+  mkdir -p "$GIT_SHOW_DIR"
+  printf 'line1\n  line2 = x\nline3\nline4\n' >"$GIT_SHOW_DIR/a.sh"
+  jq --argjson i "$1" --argjson l "$2" --argjson e "$3" --arg c "$4" \
+    '.findings[$i].location = {path: "a.sh", line: $l, line_end: $e, code: $c}' "$LEDGER" >"$LEDGER.t" && mv "$LEDGER.t" "$LEDGER"
+}
+
+@test "review: a finding whose code is on another line is moved there" {
+  review_fixtures
+  with_code 0 2 null 'line3'
+  PATH="$SANDBOX" run "$SCRIPT" review 5 "$BODY" "$LEDGER"
+  [ "$status" -eq 0 ]
+  run jq -c '[.comments[] | select(.body | contains("rc:finding a.sh::f::bug")) | {line, start_line}]' "$REVIEWBODY"
+  [ "$output" = '[{"line":3,"start_line":null}]' ]
+  jq -r '.comments[0].body' "$REVIEWBODY" | grep -qF '`a.sh:3`'
+}
+
+@test "review: a range moves with its first line's code, whitespace ignored" {
+  review_fixtures
+  with_code 1 1 2 'line2   =  x'
+  PATH="$SANDBOX" run "$SCRIPT" review 5 "$BODY" "$LEDGER"
+  [ "$status" -eq 0 ]
+  run jq -c '[.comments[] | select(.body | contains("rc:finding a.sh::f::range")) | {line, start_line}]' "$REVIEWBODY"
+  [ "$output" = '[{"line":3,"start_line":2}]' ]
+}
+
+@test "review: a finding whose code is already on its line stays put" {
+  review_fixtures
+  with_code 0 3 null 'line3'
+  PATH="$SANDBOX" run "$SCRIPT" review 5 "$BODY" "$LEDGER"
+  [ "$status" -eq 0 ]
+  run jq -c '[.comments[] | select(.body | contains("rc:finding a.sh::f::bug")) | .line]' "$REVIEWBODY"
+  [ "$output" = '[3]' ]
+}
+
+@test "review: a finding whose code is not in the file goes to the digest, without a line" {
+  review_fixtures
+  with_code 0 3 null 'nowhere(in, the, file)'
+  PATH="$SANDBOX" run "$SCRIPT" review 5 "$BODY" "$LEDGER"
+  [ "$status" -eq 0 ]
+  has "inline_new=1"
+  has "outside=2"
+  ! jq -r '.comments[].body' "$REVIEWBODY" | grep -qF 'rc:finding a.sh::f::bug' || return 1
+  digest_sent | grep -qF 'Crash on empty input'
+  ! digest_sent | grep -qF '`a.sh:3`' || return 1
+}
+
+@test "review: when the code matches several lines, the nearest one wins" {
+  review_fixtures
+  with_code 0 4 null 'line'
+  printf 'line\nline1\nline2\nline3\nline\n' >"$GIT_SHOW_DIR/a.sh"
+  PATH="$SANDBOX" run "$SCRIPT" review 5 "$BODY" "$LEDGER"
+  [ "$status" -eq 0 ]
+  # "line" matches lines 1 and 5 exactly (an exact match beats the substring
+  # matches on 2-4); 5 is nearer to 4. Line 5 is outside the hunk (1-4), so
+  # the finding is listed in the digest at a.sh:5.
+  ! jq -r '.comments[].body' "$REVIEWBODY" | grep -qF 'rc:finding a.sh::f::bug' || return 1
+  digest_sent | grep -qF '`a.sh:5`'
 }
 
 @test "review: a critical or important finding requests changes" {
