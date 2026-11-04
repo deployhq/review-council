@@ -132,3 +132,12 @@ STUB
   [ "$status" -eq 0 ]
   [ ! -e "$BATS_TEST_TMPDIR/.codex/config.toml" ]
 }
+
+@test "run: codex_model goes before any table already in Codex's config (a top-level key)" {
+  mkdir -p "$BATS_TEST_TMPDIR/.codex"
+  printf '[mcp_servers.x]\ncommand = "y"\n' >"$BATS_TEST_TMPDIR/.codex/config.toml"
+  run_stub RC_CODEX_MODEL=gpt-6-luna
+  [ "$status" -eq 0 ]
+  [ "$(head -n 1 "$BATS_TEST_TMPDIR/.codex/config.toml")" = 'model = "gpt-6-luna"' ]
+  grep -qx 'command = "y"' "$BATS_TEST_TMPDIR/.codex/config.toml"
+}

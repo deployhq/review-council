@@ -149,7 +149,9 @@ if [ -n "${RC_CODEX_MODEL:-}" ]; then
   codex_cfg="${CODEX_HOME:-$HOME/.codex}/config.toml"
   mkdir -p "$(dirname "$codex_cfg")"
   if ! grep -qE '^[[:space:]]*model[[:space:]]*=' "$codex_cfg" 2>/dev/null; then
-    printf 'model = "%s"\n' "$RC_CODEX_MODEL" >>"$codex_cfg"
+    # First line: a key after a [table] header would belong to that table.
+    { printf 'model = "%s"\n' "$RC_CODEX_MODEL"; cat "$codex_cfg" 2>/dev/null || :; } >"$codex_cfg.new" &&
+      mv -f "$codex_cfg.new" "$codex_cfg"
   fi
   echo "Codex model: $RC_CODEX_MODEL"
 fi
