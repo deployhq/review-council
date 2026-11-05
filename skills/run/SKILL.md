@@ -785,6 +785,9 @@ echo "$RC_LEDGER"
 - `code` is the exact text of the line the finding is about (its first line), copied from the file — `Read` it at the reviewed commit, don't copy a diff line (no leading `+`). One line, no surrounding quotes or backticks. It is what anchors an inline comment: `rc-post.sh` moves the comment to where that text is in the file (reported line numbers can be a few lines off), and lists the finding in the digest when the text isn't there. `null` for a file-level finding or when there is no line.
 - `issue` / `why_it_matters` / `recommendation` / `how_to_verify` carry the merged finding's own fields; `origins` are the ledger's origin reviewers (canonical ids, or a seat's `<slot>`).
 - Same no-secret rule as 6.6.3: a Tier A secret finding gives only its rule and `path:line`, never the value.
+- Every string value must be valid JSON: escape `"` as `\"` and `\` as `\\`, and put no raw newlines inside a string (use `\n`). The quoted heredoc escapes nothing for you.
+
+Right after writing, validate it (same `Bash` call, or with the literal path): `jq -e 'type == "object" and (.findings | type == "array")' "$RC_LEDGER" >/dev/null`. If that fails, rewrite the file with the escaping fixed and validate again, before Step 6.6. An invalid ledger is read as having no findings, so the review would lose its inline comments and its "request changes".
 
 Remember the literal path (shell variables do not survive between `Bash` calls). If the call fails, note it and go on — Step 6.6 then posts the digest without inline comments.
 
