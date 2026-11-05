@@ -167,7 +167,7 @@ jobs:
       timeout_minutes: ${{ steps.gate.outputs.timeout_minutes }}
     steps:
       - name: Check out the gate action
-        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           repository: deployhq/review-council
           ref: ${{ inputs.plugin_ref }}
@@ -200,7 +200,7 @@ jobs:
       cancel-in-progress: true
     steps:
       - name: Check out the pull request
-        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ needs.gate.outputs.head_ref }}
           path: repo
@@ -209,7 +209,7 @@ jobs:
 
       # Kept outside the reviewed tree so static scanners never see it as new files.
       - name: Check out Review Council
-        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           repository: deployhq/review-council
           ref: ${{ inputs.plugin_ref }}
