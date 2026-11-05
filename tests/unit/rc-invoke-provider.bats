@@ -314,6 +314,8 @@ GEM_EOF
   #                  line, exit 1 (a dead codex that echoes the OK headings)
   #   noisy-429   -> same, ending "ERROR: exceeded retry limit, last status:
   #                  429 Too Many Requests", exit 1
+  #   noisy-quota -> same, ending codex 0.163's "ERROR: Quota exceeded. Check
+  #                  your plan and billing details." (a $0 API balance), exit 1
   #   rubric-echo -> transcript echoing the refutation rubric ("Allowed: UPHELD |
   #                  REFUTED | INCONCLUSIVE") + chatter, NO real verdict line, exit 0
   # `-o <file>` (--output-last-message) is honoured: the fake writes the final
@@ -441,7 +443,7 @@ CHATTER-TOOLOUT: def parse(h) h[:x].strip end
 NOISY_EOF
     exit 0
     ;;
-  noisy-401 | noisy-429)
+  noisy-401 | noisy-429 | noisy-quota)
     # A DEAD codex whose transcript still echoes the heading-bearing prompt
     # (so the transcript alone classifies OK), then codex's own hard-fail line.
     cat <<'NOISY_EOF'
@@ -456,11 +458,11 @@ Review this diff. Respond with:
 ### Overall Assessment
 
 NOISY_EOF
-    if [ "$mode" = noisy-401 ]; then
-      echo "ERROR: unexpected status 401 Unauthorized: Missing bearer or basic authentication in header" >&2
-    else
-      echo "ERROR: exceeded retry limit, last status: 429 Too Many Requests" >&2
-    fi
+    case "$mode" in
+    noisy-401) echo "ERROR: unexpected status 401 Unauthorized: Missing bearer or basic authentication in header" >&2 ;;
+    noisy-429) echo "ERROR: exceeded retry limit, last status: 429 Too Many Requests" >&2 ;;
+    *) echo "${CDX_QUOTA_MSG:-ERROR: Quota exceeded. Check your plan and billing details.}" >&2 ;;
+    esac
     exit 1
     ;;
   rubric-echo)
@@ -1386,6 +1388,59 @@ call_count() {
   [ "$output" = "SKIPPED: Codex unavailable — codex: auth failure" ]
   # hard = terminal: exactly ONE call
   [ "$(call_count "$CDX_CALLS")" -eq 1 ]
+}
+
+@test "codex-last-message: echoed headings + 'Quota exceeded' + empty -o -> SKIPPED quota exhausted (no retry)" {
+  # codex 0.163 with an API key on a $0 balance (seen live on ops-agents#147,
+  # where it was reported as "empty output" and retried).
+  CDX_MODE=noisy-quota CDX_LAST=empty \
+    run --separate-stderr "$SCRIPT" "$CODEX" "" "$PROMPT_FILE"
+  echo "status=$status"
+  echo "output=<<$output>>"
+  [ "$status" -eq 1 ]
+  [ "$output" = "SKIPPED: Codex unavailable — codex: quota exhausted" ]
+  [ "$(call_count "$CDX_CALLS")" -eq 1 ]
+}
+
+@test "codex-last-message: OpenRouter's 402 (out of credits) -> SKIPPED quota exhausted (no retry)" {
+  CDX_MODE=noisy-quota CDX_LAST=empty \
+    CDX_QUOTA_MSG='ERROR: unexpected status 402 Payment Required: Insufficient credits, url: https://openrouter.ai/api/v1/responses' \
+    run --separate-stderr "$SCRIPT" "$CODEX" "" "$PROMPT_FILE"
+  echo "status=$status"
+  echo "output=<<$output>>"
+  [ "$status" -eq 1 ]
+  [ "$output" = "SKIPPED: Codex unavailable — codex: quota exhausted" ]
+  [ "$(call_count "$CDX_CALLS")" -eq 1 ]
+}
+
+@test "fail-log: RC_FAIL_LOG gets one line with the note and the tool's own error line" {
+  RC_FAIL_LOG="$BATS_TEST_TMPDIR/fail.log" CDX_MODE=noisy-quota CDX_LAST=empty \
+    run --separate-stderr "$SCRIPT" "$CODEX" "" "$PROMPT_FILE"
+  [ "$status" -eq 1 ]
+  cat "$BATS_TEST_TMPDIR/fail.log"
+  [ "$(wc -l <"$BATS_TEST_TMPDIR/fail.log" | tr -d ' ')" -eq 1 ]
+  grep -qF 'Codex: codex: quota exhausted — ERROR: Quota exceeded. Check your plan and billing details.' "$BATS_TEST_TMPDIR/fail.log"
+  # stdout keeps its single-line contract
+  [ "$output" = "SKIPPED: Codex unavailable — codex: quota exhausted" ]
+}
+
+@test "fail-log: without RC_FAIL_LOG nothing is written; with it, a success writes nothing" {
+  CDX_MODE=noisy-quota CDX_LAST=empty run --separate-stderr "$SCRIPT" "$CODEX" "" "$PROMPT_FILE"
+  [ "$status" -eq 1 ]
+  RC_FAIL_LOG="$BATS_TEST_TMPDIR/ok.log" CDX_MODE=ok \
+    run --separate-stderr "$SCRIPT" "$CODEX" "" "$PROMPT_FILE"
+  [ "$status" -eq 0 ]
+  [ ! -e "$BATS_TEST_TMPDIR/ok.log" ]
+}
+
+@test "fail-log: the error excerpt is one line, capped at 200 characters" {
+  long="$(printf 'x%.0s' $(seq 1 400))"
+  RC_FAIL_LOG="$BATS_TEST_TMPDIR/fail.log" CDX_MODE=noisy-quota CDX_LAST=empty \
+    CDX_QUOTA_MSG="ERROR: Quota exceeded. $long" run --separate-stderr "$SCRIPT" "$CODEX" "" "$PROMPT_FILE"
+  [ "$status" -eq 1 ]
+  [ "$(wc -l <"$BATS_TEST_TMPDIR/fail.log" | tr -d ' ')" -eq 1 ]
+  _excerpt="$(sed 's/^.* — //' "$BATS_TEST_TMPDIR/fail.log")"
+  [ "${#_excerpt}" -le 200 ]
 }
 
 @test "codex-last-message: echoed headings + ERROR 429 + empty -o -> soft 'rate limited' (one retry)" {

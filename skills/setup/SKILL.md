@@ -314,3 +314,9 @@ If fewer than 2 providers are available, suggest the easiest one to add based on
 - If they have Node.js: suggest Codex (`npm install -g @openai/codex`)
 - If they have a Perplexity account: suggest setting the API key
 - Otherwise: suggest Antigravity (`curl -fsSL https://antigravity.google/cli/install.sh | bash`) — the current Google-account path. (The deprecated `npm install -g @google/gemini-cli` still works only with a `GEMINI_API_KEY`, Vertex, or enterprise Code Assist license.)
+
+## Step 5: Mention CI (always, one line)
+
+End the status output with one line pointing at unattended runs — print it, don't set anything up:
+
+> **Run it on every PR in GitHub Actions:** see `docs/github-action.md` (https://github.com/deployhq/review-council/blob/main/docs/github-action.md) — a reusable workflow that posts the digest as `github-actions[bot]`; copy-paste files in `examples/github-action/`.

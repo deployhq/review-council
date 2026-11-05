@@ -83,7 +83,7 @@ For each finding (never cap critical/important; cap suggestions at ~5, prioritiz
 
 - **severity**: `critical` | `important` | `suggestion`
 - **confidence**: `high` | `medium` | `low`
-- **location**: `<relpath>:<line>`
+- **location**: `<relpath>:<line>[-<end_line>]`
 - **symbol**: enclosing function/class/section, if any
 - **concern**: free-form kebab slug (e.g. `missing-authz-check`) — a hint only, not a fingerprint
 - **issue**: one sentence — what's wrong

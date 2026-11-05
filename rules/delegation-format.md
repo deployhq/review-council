@@ -53,7 +53,7 @@ Structured markdown with: Findings, What's Good, Overall Assessment.
 Each finding must use these exact field names:
 - `severity`:       critical | important | suggestion
 - `confidence`:     high | medium | low (your own, pre-synthesis judgment)
-- `location`:       <relpath>:<line>
+- `location`:       <relpath>:<line>[-<end_line>] — the exact line(s) the finding is about (a range when it spans lines); prefer a changed line when the problem is in the change
 - `symbol`:         <enclosing function/class/section, if any — write "N/A" if none applies>
 - `concern`:        <short free-form kebab-case slug hinting at the issue, e.g. missing-null-check> — a HINT only, not a canonical fingerprint
 - `issue`:          one sentence — what's wrong

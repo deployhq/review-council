@@ -62,7 +62,7 @@ For each finding, report these fields exactly:
 
 - **severity**: `critical` | `important` | `suggestion`
 - **confidence**: `high` | `medium` | `low`
-- **location**: `<relpath>:<line>`
+- **location**: `<relpath>:<line>[-<end_line>]`
 - **symbol**: enclosing function/class/section, if any
 - **concern**: free-form kebab slug (e.g. `missing-null-check`) — a hint only, not a canonical fingerprint
 - **issue**: one sentence — what's wrong
