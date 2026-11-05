@@ -79,7 +79,7 @@ case "$1" in
       *dismissals*)  cat >/dev/null; printf '{}\n' ;;
       *"api graphql"*mutation*) [ -n "${RESOLVE_FAIL:-}" ] && exit 1; printf '{}\n' ;;
       *replies*)     cat >>"$GHLOG.replies"; printf '\n' >>"$GHLOG.replies"; printf '{}\n' ;;
-      *"api graphql"*) cat "$THREADS" ;;
+      *"api graphql"*) [ -n "${THREADS_FAIL:-}" ] && exit 1; cat "$THREADS" ;;
       *"pulls/5/reviews"*) [ -n "${REVIEWS_FAIL:-}" ] && exit 1; cat "$REVIEWS" ;;
       *"issues/5/timeline"*) [ -n "${TIMELINE_FAIL:-}" ] && exit 1; cat "${TIMELINE:-/dev/null}" 2>/dev/null || printf '[]\n' ;;
       *"pulls/5/files"*)   cat "$FILES" ;;
@@ -771,6 +771,30 @@ stale_fixtures() {
   [ "$status" -eq 0 ]
   has "dismissed=0"
   ! grep -qF dismissals "$GHLOG" || return 1
+}
+
+@test "review: a clean run keeps our request-changes when the review threads can't be listed" {
+  stale_fixtures clean
+  only_suggestions
+  # Comment 70 was an important finding; the thread listing fails, so its
+  # thread state is unknown and the re-check never ran on it: the block stays.
+  jq '.[0].body = "**🟠 Important** · found by claude\n\n**Bug**\n\n<!-- rc:finding a.sh::old::gone -->"' "$RCOMMENTS" >"$RCOMMENTS.t" && mv "$RCOMMENTS.t" "$RCOMMENTS"
+  printf '[{"id":300,"state":"CHANGES_REQUESTED","user":{"login":"rc-bot"},"body":"x <!-- rc:review -->"}]\n' >"$REVIEWS"
+  THREADS_FAIL=1 PATH="$SANDBOX" run "$SCRIPT" review 5 "$BODY" "$LEDGER"
+  [ "$status" -eq 0 ]
+  has "dismissed=0"
+  ! grep -qF dismissals "$GHLOG" || return 1
+}
+
+@test "review: a blocking comment whose thread is resolved does not hold the block" {
+  stale_fixtures clean
+  only_suggestions
+  # Comment 71's thread is resolved: an Important body there must not hold.
+  jq '.[1].body = "**🟠 Important** · found by claude\n\n**Bug**\n\n<!-- rc:finding a.sh::old::done -->"' "$RCOMMENTS" >"$RCOMMENTS.t" && mv "$RCOMMENTS.t" "$RCOMMENTS"
+  printf '[{"id":300,"state":"CHANGES_REQUESTED","user":{"login":"rc-bot"},"body":"x <!-- rc:review -->"}]\n' >"$REVIEWS"
+  PATH="$SANDBOX" run "$SCRIPT" review 5 "$BODY" "$LEDGER"
+  [ "$status" -eq 0 ]
+  has "dismissed=1"
 }
 
 @test "review: a clean run dismisses once the re-check marks the blocking comment fixed" {

@@ -551,7 +551,12 @@ PLAN_JQ='
                  | {id, thread: .thread.id} ]
   # Our critical/important comments the re-check did not find fixed (still
   # present, or not re-checked): they keep our "request changes" in place.
-  | .held = [ .stale[] | select(.id as $i | $res | index($i) | not)
+  # Built from all our comments, not .stale: when the threads cannot be listed
+  # every .thread is null (unknown), and an unknown thread holds; only one
+  # known to be resolved does not.
+  | .held = [ $ex[0][] | select((.fp as $fp | $fps | index($fp)) == null and (.fixed | not)
+                                and (.thread == null or .thread.resolved == false))
+              | select(.id as $i | $res | index($i) | not)
               | select((.body | type) == "string"
                   and ((.body | startswith("**🔴 Critical**")) or (.body | startswith("**🟠 Important**"))))
               | .id ]'
