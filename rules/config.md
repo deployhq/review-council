@@ -53,7 +53,8 @@ env  >  config.local.yml  >  config.yml  >  built-in default
 - **Env-only switches.** `RC_CI` (→ `settings.ci`) and `RC_APPROVED_SEATS` (seat
   pre-approval) are read **only** from the environment — no config file can set them, so a
   reviewed repo cannot switch off a human gate by committing a value. See
-  [CI mode](#ci-mode-rc_ci-and-rc_approved_seats).
+  [CI mode](#ci-mode-rc_ci-and-rc_approved_seats). So is `RC_PR_REQUEST_CHANGES` (see
+  [`pr_comments:`](#pr_comments-block)), read by `rc-post.sh` itself.
 
 ## `reviewers:` block
 
@@ -445,6 +446,12 @@ pr_comments:
   off the diff (human-confirmed in a local run; posted
   without the confirmation only in [CI mode](#ci-mode-rc_ci-and-rc_approved_seats)).
   `RC_PR_COMMENTS` overrides it (env wins), so CI can force it on.
+- **`RC_PR_REQUEST_CHANGES=true|false`** (env only, default `true`; no config key) — `false`
+  posts every review as a plain comment, never "request changes", even with a
+  critical/important finding; nothing else changes. Read by `rc-post.sh` from the environment
+  only (an invalid value counts as `true`), so a reviewed repo cannot switch off the block
+  through its committed config. CI sets it from the workflow's `request_changes` input; see
+  `docs/github-action.md`.
 - `bot_token_env` (string, default `RC_PR_BOT_TOKEN`) — the **name** of an environment
   variable that (optionally) holds a GitHub token. When that variable is set and non-empty
   at post time, the comment is posted as the identity that token authenticates (a bot user

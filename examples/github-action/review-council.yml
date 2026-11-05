@@ -81,6 +81,9 @@ jobs:
       # Skip PRs opened by a bot account (Dependabot, Renovate, a GitHub App).
       # Their text can come from outside your org. Off: agent PRs get reviewed.
       skip_bot_prs: false
+      # true: a review with a Critical or Important finding requests changes.
+      # false: every review is a plain comment, so the bot never holds a merge.
+      request_changes: true
       # Git ref of deployhq/review-council to load the plugin from.
       # Keep it the same as the ref in `uses:` above.
       plugin_ref: main

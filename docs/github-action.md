@@ -61,7 +61,7 @@ The Google slot (`agy` / `gemini`) is not set up in CI.
 
 **Reviewing your caller workflow.** On the PR that adds or changes your caller workflow, the reviewers are given Review Council's own workflow as reference, so they don't flag permissions or concurrency it already handles. Nothing is downloaded: the plugin uses the copy it ships with. Other reusable workflows your workflows call are not shown to reviewers.
 
-**It can request changes, but never fails the check.** When the review has a Critical or Important finding, it is posted as **request changes**; otherwise as a plain comment. Whether a "request changes" review blocks the merge depends on your branch protection rules. The workflow itself never fails the check on findings. For a gate of your own, read the [state block](#the-hidden-state-block).
+**It can request changes, but never fails the check.** By default, when the review has a Critical or Important finding, it is posted as **request changes**; otherwise as a plain comment. Whether a "request changes" review blocks the merge depends on your branch protection rules. Set the `request_changes` input to `false` to post every review as a plain comment instead. See [Request changes or comment only](#request-changes-or-comment-only). The workflow itself never fails the check on findings. For a gate of your own, read the [state block](#the-hidden-state-block).
 
 ## Set it up
 
@@ -147,6 +147,7 @@ Comment `/review-council` on an open, non-draft PR. Watch the run in the **Actio
 | `codex_provider` | string | `""` | Where the Codex reviewer's model is served: `openai` (the default) or `openrouter`. See [Codex on OpenRouter](#codex-on-openrouter). |
 | `static_analysis` | boolean | `true` | Run the static-analysis scan (secrets, CVEs, lint) before the review. Missing tools are skipped and noted; the run never stops to ask. |
 | `skip_bot_prs` | boolean | `false` | Skip PRs opened by a bot account (Dependabot, Renovate, a GitHub App). Their text can come from outside your org. Off by default, so agent-opened PRs are reviewed. |
+| `request_changes` | boolean | `true` | `true`: a review with a Critical or Important finding is posted as "request changes". `false`: every review is posted as a plain comment, so the bot never holds a merge. See [Request changes or comment only](#request-changes-or-comment-only). |
 | `pr_bot_login` | string | `""` | With `PR_BOT_TOKEN`: the login it posts as, e.g. `my-app[bot]`. See [Who posts](#who-posts). |
 | `anthropic_federation_rule_id` | string | `""` | Federation only. Rule ID (`fdrl_...`). Setting it switches Claude auth to federation. See [Federation (opt-in)](#federation-opt-in). |
 | `anthropic_organization_id` | string | `""` | Federation only (required with it). Anthropic organization ID (a UUID). |
@@ -298,6 +299,7 @@ Precedence is per key: **workflow env > `config.yml` > built-in default.**
   | `RC_PR_COMMENTS` | `true` | Posting is always on in CI. You don't need `pr_comments.enabled` in `config.yml`. |
   | `RC_RUN_BUDGET` | `run_budget_seconds` input | Overrides `settings.run_budget_seconds` from the file. |
   | `RC_STATIC_ANALYSIS` | `static_analysis` input | Overrides `static_analysis.enabled` from the file. |
+  | `RC_PR_REQUEST_CHANGES` | `request_changes` input | Whether a blocking review is posted as "request changes". Env only: no config file can set it. |
   | `RC_APPROVED_SEATS` | `approved_seats` input | Pre-approves the named seats. |
 
   `RC_CI=true` also forces `settings.auto_retry=true` (a failed reviewer is retried once without asking) and turns off learnings capture: CI never **writes** `.review-council/learnings.md`. Reading it (recall) follows your config through `settings.recall`: by default CI reads the file and applies its Conventions and Suppressions; set `settings.learn: false` in `config.yml` and CI does not read it either. The file is read from the PR's branch, so see [Learnings in CI](#learnings-in-ci).
@@ -484,14 +486,41 @@ Kimi is a distinct model family (Moonshot), so with `role: reviewer` its finding
 Each reported finding that sits on a line of the PR's diff becomes an inline comment on that line (or range), like a human reviewer's. All of a run's comments go in **one** review, whose text is the summary (see [The summary](#the-summary)). Each comment shows the severity, the confidence badge, who found it, the problem, why it matters and the fix, plus a collapsed **Prompt for AI agents** you can paste into a coding agent. It ends with the same footer as the summary.
 
 - **Where it goes.** Each finding carries its `file:line` (or `file:start-end`) and the exact text of that line. Model line numbers can be a few lines off, so a script looks for that text in the file at the reviewed commit and uses the line it is on (the nearest one if it appears more than once). If the text isn't in the file, the finding goes in the summary. The script then checks the line against the PR's diff as GitHub reports it. If it fits, the comment goes there; if not (a file the PR didn't change, a line outside the changed hunks), the finding goes in the summary under **Outside the diff**.
-- **Request changes.** A run with any Critical or Important finding posts its review as **request changes**, once: not again while that request is still active. A later run with none dismisses it, unless an earlier Critical or Important comment is still open and the re-check didn't find it fixed. If GitHub refuses (for example, on a PR opened by `github-actions[bot]` itself), the review is posted as a plain comment.
+- **Request changes.** By default (`request_changes: true`), a run with any Critical or Important finding posts its review as **request changes**, once: not again while that request is still active. A later run with none dismisses it, unless an earlier Critical or Important comment is still open and the re-check didn't find it fixed. If GitHub refuses (for example, on a PR opened by `github-actions[bot]` itself), the review is posted as a plain comment.
 - **A person's dismissal sticks.** If someone dismisses the bot's "request changes" review, the findings it listed never request changes again on that PR. Only a new Critical or Important finding does.
 - **Dismissing may be refused.** On a protected branch that limits who can dismiss reviews, GitHub may refuse the bot's dismissal. Then its "request changes" stays until a person dismisses it (and that dismissal sticks, as above).
+- **Comment only.** With `request_changes: false`, no review requests changes. See below.
 - **Tags.** Each comment shows the finding's confidence tag, the same as in the report: `[verified]`, `[cross-reviewed]`, `[1 reviewer · unverified]`, `[unverified]` or `[tool-only:<rule>]`. The summary explains them under **What the tags mean**.
 - **If GitHub rejects the review** (one bad line fails the whole review), it is posted again without inline comments, with every finding in the summary. If GitHub accepts no review at all, the summary is posted as a PR comment instead. Nothing is lost.
 - **At most 50 inline comments** per run; the rest go in the summary.
 - **If the PR head moved during the run** (a push landed), nothing goes inline, nothing requests changes and nothing is dismissed. Every finding goes in the summary.
 - **No pings.** `@mentions` in finding text are neutralised, so the bot never notifies anyone.
+
+### Request changes or comment only
+
+The `request_changes` input picks how a review with a Critical or Important finding is posted.
+
+| `request_changes` | A review with a Critical or Important finding | Any other review |
+|---|---|---|
+| `true` (default) | **Request changes**, once, and dismissed later by a clean run (see the bullets above) | Plain comment |
+| `false` | Plain comment | Plain comment |
+
+With `false`, nothing requests changes, so the bot never holds a merge on a branch that requires approvals. Everything else is the same: the findings, the inline comments, the summary and the hidden state block. A gate of your own can still read `status` from the [state block](#the-hidden-state-block).
+
+Set it in your caller workflow:
+
+```yaml
+jobs:
+  review:
+    uses: deployhq/review-council/.github/workflows/review-council.yml@main
+    with:
+      plugin_ref: main
+      request_changes: false   # post every review as a plain comment
+```
+
+The workflow passes it to the run as the env var `RC_PR_REQUEST_CHANGES` (`true` or `false`; any other value counts as `true`). It is **env only**: `rc-post.sh` never reads it from a config file. The committed config comes from the PR's branch and is untrusted, so a PR can't switch off the block for itself through config.
+
+Local runs that post (Step 6.6) honour the same env var. To post comment-only from your machine, set it in the shell that starts Claude Code: `RC_PR_REQUEST_CHANGES=false claude`.
 
 ### Re-runs
 
