@@ -1533,6 +1533,62 @@ pr_comments:
   [[ "$stderr" == *"rc-config: seat 'q' approved via RC_APPROVED_SEATS"* ]] || false
 }
 
+@test "ci_only: outside CI the seat is disabled, listed, and asks nothing" {
+  printf 'reviewers:\n  custom:\n    q:\n      harness: codex\n      model: moonshotai/kimi-x\n      ci_only: true\n' >"$CFG/config.yml"
+  run --separate-stderr "$SCRIPT" "$CFG"
+  [ "$status" -eq 0 ]
+  has_line "reviewer.custom_slots=q"
+  has_line "reviewer.custom.q.enabled=false"
+  has_line "reviewer.custom.q.ci_only=true"
+  has_line "reviewer.custom.q.needs_confirm=false"
+  no_line_matching '^confirm\.'
+  [[ "$stderr" == *"rc-config: seat 'q' is ci_only; disabled outside CI"* ]] || false
+}
+
+@test "ci_only: in CI it enables nothing by itself (unapproved committed seat still needs approval)" {
+  printf 'reviewers:\n  custom:\n    q:\n      harness: codex\n      model: moonshotai/kimi-x\n      ci_only: true\n' >"$CFG/config.yml"
+  RC_CI=true run --separate-stderr "$SCRIPT" "$CFG"
+  [ "$status" -eq 0 ]
+  has_line "reviewer.custom.q.enabled=true"
+  has_line "reviewer.custom.q.needs_confirm=true"
+  printf '%s\n' "$output" | grep -q '^confirm\.1=Seat '"'q'"
+  [[ "$stderr" != *"is ci_only"* ]] || false
+}
+
+@test "ci_only: in CI with approval the seat runs" {
+  printf 'reviewers:\n  custom:\n    q:\n      harness: codex\n      model: moonshotai/kimi-x\n      ci_only: true\n' >"$CFG/config.yml"
+  RC_CI=true RC_APPROVED_SEATS=q run --separate-stderr "$SCRIPT" "$CFG"
+  [ "$status" -eq 0 ]
+  has_line "reviewer.custom.q.enabled=true"
+  has_line "reviewer.custom.q.ci_only=true"
+  has_line "reviewer.custom.q.needs_confirm=false"
+  no_line_matching '^confirm\.'
+}
+
+@test "ci_only: enabled: false stays off in CI" {
+  printf 'reviewers:\n  custom:\n    q:\n      harness: codex\n      model: moonshotai/kimi-x\n      ci_only: true\n      enabled: false\n' >"$CFG/config.yml"
+  RC_CI=true RC_APPROVED_SEATS=q run --separate-stderr "$SCRIPT" "$CFG"
+  [ "$status" -eq 0 ]
+  has_line "reviewer.custom.q.enabled=false"
+}
+
+@test "ci_only: an invalid value falls back to false with a note" {
+  printf 'reviewers:\n  custom:\n    q:\n      harness: codex\n      model: moonshotai/kimi-x\n      ci_only: maybe\n' >"$CFG/config.yml"
+  run --separate-stderr "$SCRIPT" "$CFG"
+  [ "$status" -eq 0 ]
+  has_line "reviewer.custom.q.enabled=true"
+  has_line "reviewer.custom.q.ci_only=false"
+  [[ "$stderr" == *"reviewer.custom.q.ci_only"* ]] || false
+}
+
+@test "ci_only: a seat switched off locally does not use up the one committed-seat slot" {
+  printf 'reviewers:\n  custom:\n    a:\n      harness: codex\n      model: moonshotai/kimi-x\n      ci_only: true\n    b:\n      harness: ocr\n      model: qwen/x\n' >"$CFG/config.yml"
+  run --separate-stderr "$SCRIPT" "$CFG"
+  [ "$status" -eq 0 ]
+  has_line "reviewer.custom.a.enabled=false"
+  has_line "reviewer.custom.b.enabled=true"
+}
+
 @test "approved: works without RC_CI too, and with RC_CI=true" {
   printf 'reviewers:\n  custom:\n    q:\n      harness: ocr\n      model: qwen/x\n' >"$CFG/config.yml"
   RC_CI=true RC_APPROVED_SEATS=q run --separate-stderr "$SCRIPT" "$CFG"

@@ -363,7 +363,10 @@ A custom seat is an extra reviewer: a model you choose, run through a harness CL
          provider: openrouter
          model: moonshotai/kimi-k2.7-code
          role: reviewer                   # or signal (the default)
+         ci_only: true                    # run it only in CI
    ```
+
+   `ci_only: true` keeps the seat out of local runs, where devs may not have the key: the seat is switched off there, with no question. Leave it out if devs should run the seat locally too.
 
 2. Approve it in the caller workflow, using the same slot name, and pass the key:
 
@@ -437,6 +440,7 @@ reviewers:
       provider: openrouter
       model: moonshotai/kimi-k2.7-code
       role: reviewer
+      ci_only: true      # local runs leave it out
 ```
 
 `.github/workflows/review-council.yml`:

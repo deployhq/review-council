@@ -47,6 +47,7 @@
   #     provider: openrouter
   #     model: moonshotai/kimi-k2.7-code
   #     role: reviewer                   # signal (default) = separate "Extra signals" section
+  #     ci_only: true                    # local runs leave it out (devs may not have the key)
   #     harness_options:
   #       max_turns: 40
   #       timeout_minutes: 15

@@ -145,6 +145,7 @@ command line, or in the `ocr` config file the council writes.
 |---|---|---|
 | *(slot name)* | — | `^[A-Za-z0-9_-]{1,32}$`, checked **before** it is ever used in a query; an invalid name drops the seat with a note. |
 | `enabled` | `true` | bool |
+| `ci_only` | `false` | bool. `true` runs the seat only in CI (`RC_CI=true`); a local run reads it as disabled, with no confirm question. For a seat whose key only the CI secrets hold. It can only switch a seat off, so it is honoured from every layer; in CI the seat still needs `approved_seats` when it comes from committed config. |
 | `harness` | *(none — required)* | enum: `ocr` \| `codex` \| `claude` \| `opencode`. Missing/invalid → seat dropped with a note. See [Which harness](#which-harness). |
 | `provider` | `openrouter` | `openrouter` \| `ollama`, for every harness. Invalid → seat dropped. |
 | `model` | *(empty → seat off)* | required; the `modelslug` charset (`^[A-Za-z0-9~@][A-Za-z0-9._:~@/-]{0,127}$`, no leading `-`). Decides the family. |
@@ -304,7 +305,7 @@ To give only this seat more time, set its `timeout_minutes`; there is no need to
 Details and the evidence behind each boundary: `rules/providers.md` → Custom seats.
 
 Reader output (the `# custom reviewers` section): `reviewer.custom_slots=<a,b>`, then per
-seat `reviewer.custom.<s>.enabled|source|needs_confirm|harness|provider|model|role|api_key_env|family|distinct`,
+seat `reviewer.custom.<s>.enabled|ci_only|source|needs_confirm|harness|provider|model|role|api_key_env|family|distinct`,
 `reviewer.custom.<s>.opt.<option>`, and — `ocr` seats only — `reviewer.custom.<s>.flag.<n>`,
 `reviewer.custom.<s>.env.<NAME>`; plus any `confirm.<n>=` lines.
 

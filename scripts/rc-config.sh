@@ -892,6 +892,14 @@ for _cs in $CS_ALL; do
     continue
   fi
   _enabled="$(cs_resolve "$_cs" .enabled true bool 0)"
+  # ci_only: the seat runs only under RC_CI=true (e.g. one whose key only the
+  # CI secrets hold). It can only switch a seat off, so any layer may set it;
+  # in CI it changes nothing (approval rules still apply).
+  _ci_only="$(cs_resolve "$_cs" .ci_only false bool 0)"
+  if [ "$_ci_only" = true ] && [ "$RC_CI_EFF" != true ] && [ "$_enabled" = true ]; then
+    _enabled=false
+    echo "rc-config: seat '$_cs' is ci_only; disabled outside CI" >&2
+  fi
   _provider="$(cs_resolve "$_cs" .provider openrouter enum:openrouter,ollama 0)"
   _role="$(cs_resolve "$_cs" .role signal enum:signal,reviewer 0)"
   _family="$(rc_family "$_model")"
@@ -958,6 +966,7 @@ for _cs in $CS_ALL; do
   _slot_line() { _slot_lines="$_slot_lines$1
 "; }
   _slot_line "reviewer.custom.$_cs.enabled=$_enabled"
+  _slot_line "reviewer.custom.$_cs.ci_only=$_ci_only"
   _slot_line "reviewer.custom.$_cs.source=$_source"
   _slot_line "reviewer.custom.$_cs.needs_confirm=$_needs_confirm"
   _slot_line "reviewer.custom.$_cs.harness=$_harness"
