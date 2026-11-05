@@ -559,7 +559,7 @@ The summary starts with two hidden HTML comments. They don't render on GitHub. T
 4. Parse the JSON on its second line, between `<!-- rc:state ` and ` -->`.
 5. Treat the PR as reviewed and clean only if `sha` equals the PR's current head SHA **and** `status` is `clean`.
 
-If `sha` is older than the head, the review is stale. Comment `/review-council` (with a token that has write access) to run it again.
+If `sha` is older than the head, the review is stale. Comment `/review-council` to run it again. Post it with a personal access token or a GitHub App token of an account with write access. A comment posted with the Actions `GITHUB_TOKEN` won't start a run: GitHub doesn't start workflows from events that token creates.
 
 ## Security model
 
