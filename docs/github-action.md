@@ -302,7 +302,7 @@ Precedence is per key: **workflow env > `config.yml` > built-in default.**
 
   `RC_CI=true` also forces `settings.auto_retry=true` (a failed reviewer is retried once without asking) and turns off learnings capture: CI never **writes** `.review-council/learnings.md`. Reading it (recall) follows your config through `settings.recall`: by default CI reads the file and applies its Conventions and Suppressions; set `settings.learn: false` in `config.yml` and CI does not read it either. The file is read from the PR's branch, so see [Learnings in CI](#learnings-in-ci).
 
-- **`config.local.yml` is not used in CI.** It is gitignored, so it is not in the checkout.
+- **`config.local.yml` is normally absent in CI.** It is gitignored, so it is not in the checkout. If a repo commits one, it is read, but treated as untrusted like `config.yml`: its ordinary keys apply (over `config.yml`, as locally), and its trusted-only keys (such as `pr_comments.bot_token_env` and a seat's `api_key_env`) are ignored with a note.
 
 Start from [`examples/github-action/config.yml`](../examples/github-action/config.yml). The full schema is in [`rules/config.md`](../rules/config.md).
 
