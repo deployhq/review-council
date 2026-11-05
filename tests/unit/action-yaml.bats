@@ -15,3 +15,14 @@ ROOT="$(cd "$(dirname "$BATS_TEST_FILENAME")/../.." && pwd)"
     [ "$status" -eq 0 ] || { echo "$f: $output"; return 1; }
   done
 }
+
+@test "request_changes is wired from the reusable workflow to RC_PR_REQUEST_CHANGES" {
+  command -v yq >/dev/null || skip "yq not installed"
+  wf="$ROOT/.github/workflows/review-council.yml"
+  act="$ROOT/.github/actions/review/action.yml"
+  [ "$(yq '.on.workflow_call.inputs.request_changes.type' "$wf")" = boolean ]
+  [ "$(yq '.on.workflow_call.inputs.request_changes.default' "$wf")" = true ]
+  [ "$(yq '.jobs[].steps[] | select(.uses == "./rc-plugin/.github/actions/review") | .with.request_changes' "$wf")" = '${{ inputs.request_changes }}' ]
+  [ "$(yq '.inputs.request_changes.default' "$act")" = true ]
+  [ "$(yq '.runs.steps[] | select(.name == "Run Review Council") | .env.RC_PR_REQUEST_CHANGES' "$act")" = '${{ inputs.request_changes }}' ]
+}

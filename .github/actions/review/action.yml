@@ -83,6 +83,10 @@ inputs:
     description: Optional. The login pr_bot_token posts as (RC_PR_BOT_LOGIN).
     required: false
     default: ''
+  request_changes:
+    description: "'false' = post plain comments only; Critical/Important findings never request changes (RC_PR_REQUEST_CHANGES)."
+    required: false
+    default: 'true'
   # Workload Identity Federation (auth_mode federation). Not secrets.
   anthropic_federation_rule_id:
     description: Federation rule ID (fdrl_...).
@@ -222,6 +226,7 @@ runs:
         RC_PR_BOT_TOKEN: ${{ inputs.pr_bot_token }}
         RC_PR_BOT_TOKEN_ENV: RC_PR_BOT_TOKEN
         RC_PR_BOT_LOGIN: ${{ inputs.pr_bot_login }}
+        RC_PR_REQUEST_CHANGES: ${{ inputs.request_changes }}
         PR_NUMBER: ${{ inputs.pr_number }}
         ANTHROPIC_FEDERATION_RULE_ID: ${{ inputs.anthropic_federation_rule_id }}
         ANTHROPIC_ORGANIZATION_ID: ${{ inputs.anthropic_organization_id }}

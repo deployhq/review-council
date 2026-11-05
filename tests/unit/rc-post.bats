@@ -50,6 +50,8 @@ setup() {
   # Nor GITHUB_ACTIONS (set when this suite itself runs in Actions): it narrows
   # the bot-fallback match, so tests opt in to it explicitly.
   unset GITHUB_ACTIONS
+  # Nor the request-changes switch: each test sets it when it needs it.
+  unset RC_PR_REQUEST_CHANGES
 
   install_fake_gh
 }
@@ -602,6 +604,40 @@ with_code() {
   [ "$status" -eq 0 ]
   has "review_event=REQUEST_CHANGES"
   [ "$(jq -r .event "$REVIEWBODY")" = REQUEST_CHANGES ]
+}
+
+@test "review: RC_PR_REQUEST_CHANGES=false posts a critical finding as a plain COMMENT" {
+  review_fixtures
+  RC_PR_REQUEST_CHANGES=false PATH="$SANDBOX" run "$SCRIPT" review 5 "$BODY" "$LEDGER"
+  [ "$status" -eq 0 ]
+  has "review_event=COMMENT"
+  [ "$(jq -r .event "$REVIEWBODY")" = COMMENT ]
+  [ ! -f "$REVIEWBODY.REQUEST_CHANGES" ]
+  ! jq -r .body "$REVIEWBODY" | grep -qF 'rc:blocking' || return 1
+}
+
+@test "review: RC_PR_REQUEST_CHANGES=true still requests changes" {
+  review_fixtures
+  RC_PR_REQUEST_CHANGES=true PATH="$SANDBOX" run "$SCRIPT" review 5 "$BODY" "$LEDGER"
+  [ "$status" -eq 0 ]
+  has "review_event=REQUEST_CHANGES"
+}
+
+@test "review: an invalid RC_PR_REQUEST_CHANGES is noted and treated as true" {
+  review_fixtures
+  RC_PR_REQUEST_CHANGES=nope PATH="$SANDBOX" run "$SCRIPT" review 5 "$BODY" "$LEDGER"
+  [ "$status" -eq 0 ]
+  has "RC_PR_REQUEST_CHANGES"
+  has "review_event=REQUEST_CHANGES"
+}
+
+@test "review: with RC_PR_REQUEST_CHANGES=false a clean run still dismisses our earlier request-changes" {
+  review_fixtures clean
+  only_suggestions
+  printf '[{"id":300,"state":"CHANGES_REQUESTED","user":{"login":"rc-bot"},"body":"x <!-- rc:review -->"}]\n' >"$REVIEWS"
+  RC_PR_REQUEST_CHANGES=false PATH="$SANDBOX" run "$SCRIPT" review 5 "$BODY" "$LEDGER"
+  [ "$status" -eq 0 ]
+  has "dismissed=1"
 }
 
 @test "review: suggestions only -> a plain COMMENT review" {

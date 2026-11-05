@@ -88,6 +88,10 @@ on:
         description: Skip PRs opened by a bot account (Dependabot, Renovate, a GitHub App). Their text can come from outside your org. Off by default, so agent-opened PRs are reviewed.
         type: boolean
         default: false
+      request_changes:
+        description: "false = post plain comments only; Critical/Important findings never request changes. Default true: a Critical or Important finding posts the review as \"request changes\"."
+        type: boolean
+        default: true
       pr_bot_login:
         description: With PR_BOT_TOKEN, the login it posts as (e.g. "my-app[bot]"). An App token can't read its own login, and without it the run never resolves threads or dismisses reviews, since it can't tell its own from another bot's.
         type: string
@@ -240,6 +244,7 @@ jobs:
           perplexity_api_key: ${{ secrets.PERPLEXITY_API_KEY }}
           pr_bot_token: ${{ secrets.PR_BOT_TOKEN }}
           pr_bot_login: ${{ inputs.pr_bot_login }}
+          request_changes: ${{ inputs.request_changes }}
           anthropic_federation_rule_id: ${{ inputs.anthropic_federation_rule_id }}
           anthropic_organization_id: ${{ inputs.anthropic_organization_id }}
           anthropic_service_account_id: ${{ inputs.anthropic_service_account_id }}

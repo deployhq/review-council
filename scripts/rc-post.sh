@@ -48,6 +48,13 @@
 # Fail-soft: every failure returns non-zero with a one-line stderr note and posts
 # nothing further; the caller surfaces it. Posting never mutates the review.
 #
+# Env: RC_PR_REQUEST_CHANGES (`review`) — `true` (default; unset/empty too):
+# a critical/important finding posts the review as "request changes".
+# `false`: always a plain comment (an earlier "request changes" of ours can
+# still be dismissed by a clean run). Any other value: a stderr note, then
+# `true`. Read from the environment only, never from config (committed config
+# is untrusted, so a reviewed PR must not be able to turn the block off).
+#
 # Requires: gh (authenticated), jq, git.
 
 set -eu
@@ -389,7 +396,8 @@ upsert_digest() {
 # run (rc:state line): a reviewer that failed reports nothing, not "fixed".
 #
 # Blocking: when any reported finding is critical or important, the review is
-# posted as "request changes" (once — not again while ours is still active);
+# posted as "request changes" (once — not again while ours is still active;
+# never with RC_PR_REQUEST_CHANGES=false);
 # when none is, our earlier "request changes" reviews are dismissed, unless
 # one of our critical/important comments is still open and the re-check
 # didn't mark it fixed. If a person dismisses ours, the findings it listed
@@ -750,9 +758,21 @@ do_review() {
   _raise="$(jq -r --argjson ack "$_ack" '[.blocking[] | select(. == "" or (. as $f | $ack | index($f)) == null)] | length > 0' "$_tmp/plan.json")"
   _n_new="$(jq '.new | length' "$_tmp/plan.json")"
   _event=COMMENT
+  # RC_PR_REQUEST_CHANGES=false: comments only, never "request changes".
+  # Env-only (never config): a reviewed PR must not switch the block off.
+  _rc_req="${RC_PR_REQUEST_CHANGES:-true}"
+  case "$_rc_req" in
+    true | false) ;;
+    *)
+      echo "rc-post: RC_PR_REQUEST_CHANGES must be true or false; treating it as true" >&2
+      _rc_req=true
+      ;;
+  esac
   # Only on the reviewed head (_inline): never block or dismiss a commit we
   # didn't review.
-  if [ "$_inline" = true ] && [ "$_raise" = true ] && [ "$_active" = '[]' ]; then _event=REQUEST_CHANGES; fi
+  if [ "$_rc_req" = true ] && [ "$_inline" = true ] && [ "$_raise" = true ] && [ "$_active" = '[]' ]; then
+    _event=REQUEST_CHANGES
+  fi
 
   # 1. Resolve the stale comments the re-check found fixed; 2. dismiss our
   #    "request changes" when the run is clean. Neither on a degraded run.
