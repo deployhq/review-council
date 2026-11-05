@@ -395,6 +395,7 @@ review-council/
 │   ├── rc-post.sh             # PR review-digest posting engine — Step 6.6 (v0.10.0)
 │   ├── rc-ocr.sh              # Custom reviewer seat dispatch: isolated ocr run + JSON → §3.1 mapper
 │   ├── rc-lib-family.sh       # Model slug → family map (shared by rc-config.sh and rc-ocr.sh)
+│   ├── rc-called-workflow.sh  # Adds the plugin's own reusable workflow as reference when a PR changes a caller workflow
 │   ├── rc-lib-timeout.sh      # Shared timeout/watchdog helper
 │   └── sync-metadata.sh       # Propagates plugin.json's description to README/CLAUDE.md/marketplace.json
 ├── tests/

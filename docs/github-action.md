@@ -59,6 +59,8 @@ The Google slot (`agy` / `gemini`) is not set up in CI.
 
 **Concurrency.** One review per PR. The `review` job has a per-PR concurrency group with `cancel-in-progress`. If an authorised trigger starts a new review for the same PR (a second `/review-council`, or another `pull_request` event), the older review is cancelled. A comment that fails the gate never reaches `review`, so it cannot cancel a running review.
 
+**Reviewing your caller workflow.** On the PR that adds or changes your caller workflow, the reviewers are given Review Council's own workflow as reference, so they don't flag permissions or concurrency it already handles. Nothing is downloaded: the plugin uses the copy it ships with. Other reusable workflows your workflows call are not shown to reviewers.
+
 **It can request changes, but never fails the check.** When the review has a Critical or Important finding, it is posted as **request changes**; otherwise as a plain comment. Whether a "request changes" review blocks the merge depends on your branch protection rules. The workflow itself never fails the check on findings. For a gate of your own, read the [state block](#the-hidden-state-block).
 
 ## Set it up
