@@ -140,9 +140,17 @@ called() { run --separate-stderr "$SCRIPT"; }
   [ "${lines[${#lines[@]}-1]}" = '``````' ]
 }
 
-@test "only the first 50 input lines are considered" {
+@test "a caller listed after 60 non-workflow paths is still found" {
   caller .github/workflows/rc.yml "    uses: $USES@v1"
-  input="$(for _ in $(seq 1 50); do echo src/nothing; done; echo .github/workflows/rc.yml)"
+  input="$(for i in $(seq 1 60); do echo "src/file$i.rb"; done; echo .github/workflows/rc.yml)"
+  called <<< "$input"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"- .github/workflows/rc.yml pins @v1"* ]]
+}
+
+@test "only the first 50 workflow paths are considered" {
+  caller .github/workflows/rc.yml "    uses: $USES@v1"
+  input="$(for i in $(seq 1 50); do echo ".github/workflows/w$i.yml"; done; echo .github/workflows/rc.yml)"
   called <<< "$input"
   [ "$status" -eq 0 ]
   [ -z "$output" ]

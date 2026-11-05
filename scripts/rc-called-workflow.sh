@@ -67,13 +67,15 @@ fi
 callers=""
 seen=" "
 n=0
+# Every changed path is scanned; the cap counts only distinct workflow paths,
+# so a caller listed after many other changed files is still found.
 while IFS= read -r p || [ -n "$p" ]; do
-  n=$((n + 1))
-  [ "$n" -le "$MAX_LINES" ] || break
   p="${p%$'\r'}"
   [ "$dirs_ok" -eq 1 ] || continue
   [[ "$p" =~ $PATH_RE ]] || continue
   case "$seen" in *" $p "*) continue ;; esac
+  n=$((n + 1))
+  [ "$n" -le "$MAX_LINES" ] || break
   seen="$seen$p "
   [ -f "$p" ] && [ ! -L "$p" ] || continue
   ref="$(caller_ref "$p")" || continue
