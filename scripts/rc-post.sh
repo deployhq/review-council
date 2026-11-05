@@ -390,8 +390,10 @@ upsert_digest() {
 #
 # Blocking: when any reported finding is critical or important, the review is
 # posted as "request changes" (once — not again while ours is still active);
-# when none is, our earlier "request changes" reviews are dismissed. If a
-# person dismisses ours, the findings it listed never request changes again.
+# when none is, our earlier "request changes" reviews are dismissed, unless
+# one of our critical/important comments is still open and the re-check
+# didn't mark it fixed. If a person dismisses ours, the findings it listed
+# never request changes again.
 # ---------------------------------------------------------------------------
 INLINE_MARK='<!-- rc:inline -->'
 MAX_INLINE=50
@@ -546,7 +548,13 @@ PLAN_JQ='
                                  and .thread != null and .thread.resolved == false) ],
     }
   | .resolve = [ .stale[] | select(.id as $i | $res | index($i)) | select(.thread.id | test("^[A-Za-z0-9_=-]+$"))
-                 | {id, thread: .thread.id} ]'
+                 | {id, thread: .thread.id} ]
+  # Our critical/important comments the re-check did not find fixed (still
+  # present, or not re-checked): they keep our "request changes" in place.
+  | .held = [ .stale[] | select(.id as $i | $res | index($i) | not)
+              | select((.body | type) == "string"
+                  and ((.body | startswith("**🔴 Critical**")) or (.body | startswith("**🟠 Important**"))))
+              | .id ]'
 
 # load_pr_state <pr> <dir>: write <dir>/diff.json and <dir>/ours.json. Sets
 # _inline=false (and empty files) when the reviewed commit is not the PR head
@@ -687,7 +695,7 @@ do_review() {
     --arg re "$SECRET_RE" --arg footer "$_footer" \
     "$LEDGER_DEFS"' $f[0] | '"$PLAN_JQ" >"$_tmp/plan.json" 2>/dev/null; then
     echo "rc-post: could not place the findings; posting the digest only" >&2
-    printf '{"block":false,"blocking":[],"kept":0,"new":[],"outside":[],"stale":[],"resolve":[]}\n' >"$_tmp/plan.json"
+    printf '{"block":false,"blocking":[],"kept":0,"new":[],"outside":[],"stale":[],"resolve":[],"held":[]}\n' >"$_tmp/plan.json"
   fi
 
   # Our reviews: `active` = ours still requesting changes; `ack` = blocking
@@ -768,9 +776,12 @@ do_review() {
         || echo "rc-post: could not reply on inline comment $_cid" >&2
     done <"$_tmp/resolve.txt"
     # Dismiss only on a run the rc:state line calls clean (no critical or
-    # important finding), so an empty or unreadable ledger never lifts a block.
+    # important finding), so an empty or unreadable ledger never lifts a block,
+    # and never while one of our critical/important comments is still open
+    # without the re-check finding it fixed.
+    _held="$(jq '.held // [] | length' "$_tmp/plan.json" 2>/dev/null)" || _held=1
     if [ "$_inline" = true ] && [ "$_block" = false ] && [ "$_status" = clean ] \
-      && [ -n "$_active" ] && [ "$_active" != '[]' ]; then
+      && [ "$_held" = 0 ] && [ -n "$_active" ] && [ "$_active" != '[]' ]; then
       printf '%s' "$_active" | jq -r '.[]' >"$_tmp/dismiss.txt"
       while read -r _rid; do
         jq -n --arg s "$_short" '{event: "DISMISS", message: "No critical or important findings in the Review Council review of \($s)."}' >"$_tmp/dismiss.json"

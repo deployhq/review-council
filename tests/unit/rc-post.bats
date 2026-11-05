@@ -759,6 +759,44 @@ stale_fixtures() {
   ! grep -qF "999" "$GHLOG" || return 1
 }
 
+@test "review: a clean run keeps our request-changes while a blocking comment is still present" {
+  stale_fixtures clean
+  only_suggestions
+  # Comment 70 was an important finding; this run doesn't report it and the
+  # re-check left it open (STILL_PRESENT): the block stays.
+  jq '.[0].body = "**🟠 Important** · found by claude\n\n**Bug**\n\n<!-- rc:finding a.sh::old::gone -->"' "$RCOMMENTS" >"$RCOMMENTS.t" && mv "$RCOMMENTS.t" "$RCOMMENTS"
+  printf '[{"id":300,"state":"CHANGES_REQUESTED","user":{"login":"rc-bot"},"body":"x <!-- rc:review -->"}]\n' >"$REVIEWS"
+  printf '{"fixed":[],"covered":[]}\n' >"$BATS_TEST_TMPDIR/recheck.json"
+  PATH="$SANDBOX" run "$SCRIPT" review 5 "$BODY" "$LEDGER" "" "$BATS_TEST_TMPDIR/recheck.json"
+  [ "$status" -eq 0 ]
+  has "dismissed=0"
+  ! grep -qF dismissals "$GHLOG" || return 1
+}
+
+@test "review: a clean run dismisses once the re-check marks the blocking comment fixed" {
+  stale_fixtures clean
+  only_suggestions
+  jq '.[0].body = "**🔴 Critical** · found by claude\n\n**Bug**\n\n<!-- rc:finding a.sh::old::gone -->"' "$RCOMMENTS" >"$RCOMMENTS.t" && mv "$RCOMMENTS.t" "$RCOMMENTS"
+  printf '[{"id":300,"state":"CHANGES_REQUESTED","user":{"login":"rc-bot"},"body":"x <!-- rc:review -->"}]\n' >"$REVIEWS"
+  printf '{"fixed":[70],"covered":[]}\n' >"$BATS_TEST_TMPDIR/recheck.json"
+  PATH="$SANDBOX" run "$SCRIPT" review 5 "$BODY" "$LEDGER" "" "$BATS_TEST_TMPDIR/recheck.json"
+  [ "$status" -eq 0 ]
+  has "resolved=1"
+  has "dismissed=1"
+  logged "reviews/300/dismissals"
+}
+
+@test "review: a still-present suggestion does not hold the block" {
+  stale_fixtures clean
+  only_suggestions
+  jq '.[0].body = "**🟡 Suggestion**\n\n**Nit**\n\n<!-- rc:finding a.sh::old::gone -->"' "$RCOMMENTS" >"$RCOMMENTS.t" && mv "$RCOMMENTS.t" "$RCOMMENTS"
+  printf '[{"id":300,"state":"CHANGES_REQUESTED","user":{"login":"rc-bot"},"body":"x <!-- rc:review -->"}]\n' >"$REVIEWS"
+  printf '{"fixed":[],"covered":[]}\n' >"$BATS_TEST_TMPDIR/recheck.json"
+  PATH="$SANDBOX" run "$SCRIPT" review 5 "$BODY" "$LEDGER" "" "$BATS_TEST_TMPDIR/recheck.json"
+  [ "$status" -eq 0 ]
+  has "dismissed=1"
+}
+
 @test "review: without a re-check nothing is resolved" {
   stale_fixtures
   PATH="$SANDBOX" run "$SCRIPT" review 5 "$BODY" "$LEDGER"
