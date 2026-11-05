@@ -344,7 +344,7 @@ The Codex reviewer can run on a model served by OpenRouter instead of OpenAI. Yo
 ```
 
 - `codex_model` is required, as an OpenRouter ID (`vendor/model`).
-- Codex also double-checks Claude's findings, so the model must come from another family: OpenAI, Google, Qwen, Moonshot (Kimi), Zhipu (GLM) or DeepSeek. A Claude model, or a router such as `openrouter/auto` that may pick one, fails the run early.
+- The model must be an OpenAI one (`openai/gpt-…`): the council counts the Codex reviewer as the OpenAI family when it double-checks Claude's findings and weighs agreement. Any other model, or a router such as `openrouter/auto`, fails the run early. To add Qwen, Kimi, GLM or DeepSeek, use a [custom seat](#custom-seats-in-ci), which takes its model's family.
 - Don't also pass `OPENAI_API_KEY` or `CODEX_ACCESS_TOKEN`; the run fails early if you do.
 - **Set OpenRouter's privacy settings.** Codex cannot send OpenRouter's per-request `data_collection: deny` (custom seats on `claude` or `opencode` do). In your OpenRouter account's privacy settings, allow only providers that don't train on or store prompts.
 - The key sits in the run's environment, as `OPENAI_API_KEY` does. The same key also serves approved custom seats, so give it a spend limit.
@@ -637,7 +637,7 @@ For a bot user, store its fine-grained token as a repo or org secret. For a GitH
 - `Invalid claude_model`: the `claude_model` input may hold only letters, digits, `.`, `_`, `:`, `-`, and an optional `[1m]` suffix. Use a model ID like `claude-opus-5-5` or an alias like `sonnet`, or leave it empty.
 - `Invalid codex_model`: the same rule, without the suffix (with `codex_provider: openrouter`, `/` is allowed too). Use a model ID like `gpt-6-luna`, or leave it empty.
 - `codex_provider openrouter needs …`: pass the `OPENROUTER_API_KEY` secret and set `codex_model` to an OpenRouter ID. `uses the OPENROUTER_API_KEY secret`: remove `OPENAI_API_KEY` / `CODEX_ACCESS_TOKEN` from the call.
-- `codex_model '…' is not allowed for the Codex reviewer on OpenRouter`: pick a model from OpenAI, Google, Qwen, Moonshot, Zhipu or DeepSeek.
+- `codex_model '…' is not allowed for the Codex reviewer on OpenRouter`: pick an OpenAI model (`openai/gpt-…`); add other models as a custom seat.
 - `Federation needs anthropic_organization_id and anthropic_service_account_id`: federation needs all three IDs.
 - `Federation IDs are set but anthropic_federation_rule_id is empty`: set the rule ID too.
 

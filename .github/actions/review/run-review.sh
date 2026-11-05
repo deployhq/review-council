@@ -95,9 +95,13 @@ case "${RC_CODEX_PROVIDER:-openai}" in
     check_model codex_model "$RC_CODEX_MODEL" allow-slash
     # shellcheck source=/dev/null
     . "$plugin_dir/scripts/rc-lib-family.sh"
+    # The council counts the Codex reviewer as the OpenAI family (it routes,
+    # refutes and corroborates on that), so only an OpenAI model may run it.
+    # Other families join as custom seats, which take their model's family.
     case "$(rc_family "$RC_CODEX_MODEL")" in
-      Claude | unknown)
-        echo "::error::codex_model '$RC_CODEX_MODEL' is not allowed for the Codex reviewer on OpenRouter: it must be an OpenAI, Google, Qwen, Moonshot, Zhipu or DeepSeek model, not a Claude model or a router."
+      OpenAI) ;;
+      *)
+        echo "::error::codex_model '$RC_CODEX_MODEL' is not allowed for the Codex reviewer on OpenRouter: it must be an OpenAI model (openai/gpt-…). Add other models as a custom seat."
         exit 1
         ;;
     esac

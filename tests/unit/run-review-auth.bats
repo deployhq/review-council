@@ -179,6 +179,13 @@ STUB
   fails_with 'not allowed'
 }
 
+@test "auth: on OpenRouter only an OpenAI model is allowed (the Codex reviewer counts as OpenAI)" {
+  for m in qwen/qwen3-coder moonshotai/kimi-k2.7-code google/gemini-3-pro deepseek/deepseek-v4 z-ai/glm-5; do
+    check ANTHROPIC_API_KEY=k RC_CODEX_PROVIDER=openrouter OPENROUTER_API_KEY=o RC_CODEX_MODEL="$m"
+    fails_with 'not allowed'
+  done
+}
+
 @test "auth: a slash in codex_model is allowed only on OpenRouter" {
   check ANTHROPIC_API_KEY=k RC_CODEX_MODEL=openai/gpt-6-luna
   fails_with 'codex_model'
