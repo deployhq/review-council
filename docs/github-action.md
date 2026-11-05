@@ -518,7 +518,7 @@ jobs:
       request_changes: false   # post every review as a plain comment
 ```
 
-The workflow passes it to the run as the env var `RC_PR_REQUEST_CHANGES` (`true` or `false`; any other value counts as `true`). It is **env only**: `rc-post.sh` never reads it from a config file. The committed config comes from the PR's branch and is untrusted, so a PR can't switch off the block for itself through config.
+The workflow passes it to the run as the env var `RC_PR_REQUEST_CHANGES` (`true` or `false`; any other value counts as `true`). It is **env only**: `rc-post.sh` never reads it from a config file. The committed config comes from the PR's branch and is untrusted, so a PR can't switch off the block for itself through config. (It can through the caller workflow on a `pull_request` run; see [Which workflow file runs](#trust-boundary).)
 
 Local runs that post (Step 6.6) honour the same env var. To post comment-only from your machine, set it in the shell that starts Claude Code: `RC_PR_REQUEST_CHANGES=false claude`.
 
@@ -613,7 +613,7 @@ The boundary is **write access to the repo**. Everything below follows from it.
 **Which workflow file runs.** The caller workflow sets the switches (`RC_CI`, `RC_APPROVED_SEATS`, `plugin_ref`, the `uses:` ref, …). Which copy of it runs depends on the trigger:
 
 - `issue_comment` (`/review-council`): GitHub runs the copy on your **default branch**.
-- `pull_request`: GitHub runs the copy on the **PR's branch**. A same-repo PR can change `approved_seats`, `plugin_ref` or the `uses:` ref for its own run.
+- `pull_request`: GitHub runs the copy on the **PR's branch**. A same-repo PR can change `approved_seats`, `request_changes`, `plugin_ref` or the `uses:` ref for its own run. If you rely on "request changes" as a gate, protect `.github/workflows/` with CODEOWNERS.
 
 That is not an escalation: anyone who can push a branch can already edit any workflow file. But it means the default-branch workflow is not a hard limit on what a PR's own run does. If you need the default-branch settings to hold, use only the `/review-council` trigger.
 
