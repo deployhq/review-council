@@ -27,8 +27,8 @@ Pass exactly one. Everything else (inputs, optional secrets, behaviour) is the s
 
 **When it runs.**
 
-- **By default, only on request:** someone **comments `/review-council`** on a PR. The commenter must have write access (admin, maintain or write). The workflow reacts with 👀 so you know it started. Each run costs a full review, so nothing runs on its own. Comment again after pushing fixes: that re-review is also when fixed findings get resolved.
-- **Optionally, automatically:** uncomment the `pull_request` trigger in the example to also review a draft PR when it's **marked ready for review**.
+- **Automatically:** when a PR is **opened** (not as a draft), and when a draft is **marked ready for review**. Pushes don't start a review, so a PR is normally reviewed once on its own. Each run costs a full review.
+- **On request:** someone **comments `/review-council`** on a PR. The commenter must have write access (admin, maintain or write). The workflow reacts with 👀 so you know it started. Comment again after pushing fixes: that re-review is also when fixed findings get resolved.
 
 Either way, the PR must be open and not a draft. It never runs on PRs from forks. See [Fork PRs](#fork-prs).
 
@@ -95,8 +95,8 @@ name: Review Council
 on:
   issue_comment:                     # `/review-council` comments (manual)
     types: [created]
-  # pull_request:                    # optional: auto-review when a draft is marked ready
-  #   types: [ready_for_review]
+  pull_request:                      # automatic: a PR opened (not as a draft), or a draft marked ready
+    types: [opened, ready_for_review]  # not on pushes: comment `/review-council` to re-run
 
 permissions:
   contents: read
@@ -127,7 +127,7 @@ Things to know:
 - **Merge it to your default branch first.** GitHub runs `issue_comment` workflows only from the default branch. Until the file is on `main` (or whatever your default is), `/review-council` does nothing.
 - **Don't add `concurrency:` with `cancel-in-progress` to the caller.** Every PR comment triggers the caller, so any comment would cancel a running review. The reusable workflow already allows one review per PR, and only an authorised trigger can cancel it.
 - **Pinning (optional).** With `main`, every upstream change reaches your runs. If you'd rather control when changes arrive, pin the ref in `uses:` (the *workflow*) and the `plugin_ref` input (the *plugin*) to the same commit SHA.
-- **Want automatic reviews?** Uncomment the `pull_request` trigger. `ready_for_review` fires when a draft becomes ready; add `opened` for PRs opened as non-draft, and `synchronize` to review every push. Each adds a full review's cost per event (the newer run cancels the older). Drafts are skipped on every trigger, including `/review-council` comments.
+- **Automatic reviews.** The `pull_request` trigger reviews a PR when it is ready: `opened` fires for a PR opened as non-draft, `ready_for_review` when a draft becomes ready. Pushes don't re-trigger it; comment `/review-council` to re-run. Want only manual runs? Remove the `pull_request` trigger. Want every push reviewed? Add `synchronize` to `types:` (a full review's cost per push; the newer run cancels the older). Drafts are skipped on every trigger, including `/review-council` comments.
 
 ### 3. Try it
 
@@ -410,8 +410,8 @@ name: Review Council
 on:
   issue_comment:                     # `/review-council` comments (manual)
     types: [created]
-  # pull_request:                    # optional: auto-review when a draft is marked ready
-  #   types: [ready_for_review]
+  pull_request:                      # automatic: a PR opened (not as a draft), or a draft marked ready
+    types: [opened, ready_for_review]  # not on pushes: comment `/review-council` to re-run
 
 permissions:
   contents: read
@@ -453,8 +453,8 @@ name: Review Council
 on:
   issue_comment:                     # `/review-council` comments (manual)
     types: [created]
-  # pull_request:                    # optional: auto-review when a draft is marked ready
-  #   types: [ready_for_review]
+  pull_request:                      # automatic: a PR opened (not as a draft), or a draft marked ready
+    types: [opened, ready_for_review]  # not on pushes: comment `/review-council` to re-run
 
 permissions:
   contents: read
