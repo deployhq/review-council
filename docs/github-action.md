@@ -554,9 +554,10 @@ The summary starts with two hidden HTML comments. They don't render on GitHub. T
 **Reading it from an agent** (for example, an agent that opens PRs and waits for a clean review):
 
 1. List the PR's reviews (`GET /repos/{owner}/{repo}/pulls/{number}/reviews`).
-2. Take the newest one whose body starts with `<!-- rc:report -->` (by `submitted_at`). If there is none, look for a PR comment that starts with it (the fallback when GitHub accepted no review).
-3. Parse the JSON on its second line, between `<!-- rc:state ` and ` -->`.
-4. Treat the PR as reviewed and clean only if `sha` equals the PR's current head SHA **and** `status` is `clean`.
+2. Also list the PR's comments (`GET /repos/{owner}/{repo}/issues/{number}/comments`). A run posts a PR comment instead of a review when GitHub accepts no review.
+3. From both lists, keep the ones whose body starts with `<!-- rc:report -->` and has an `rc:state` line on its second line; ignore the rest (a comment that only links to the latest review has none). Take the newest by time: `submitted_at` for a review, `updated_at` (or `created_at`) for a comment. Don't prefer reviews: a newer fallback comment beats an older review.
+4. Parse the JSON on its second line, between `<!-- rc:state ` and ` -->`.
+5. Treat the PR as reviewed and clean only if `sha` equals the PR's current head SHA **and** `status` is `clean`.
 
 If `sha` is older than the head, the review is stale. Comment `/review-council` (with a token that has write access) to run it again.
 
