@@ -1,0 +1,27 @@
+name: resolve-probe
+on:
+  pull_request:
+    types: [opened, synchronize]
+permissions: {}
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: write
+      issues: write
+    steps:
+      - env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          PR: ${{ github.event.pull_request.number }}
+          SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          set -u
+          jq -n --arg sha "$SHA" '{event:"REQUEST_CHANGES",body:"probe review (temporary)",commit_id:$sha,comments:[{path:"probe.txt",line:1,side:"RIGHT",body:"probe inline (temporary)"}]}' > r.json
+          rid=$(gh api -X POST repos/$REPO/pulls/$PR/reviews --input r.json --jq .id); echo "1 review posted: $rid"
+          q='query($o:String!,$n:String!,$p:Int!){repository(owner:$o,name:$n){pullRequest(number:$p){reviewThreads(first:10){nodes{id isResolved resolvedBy{__typename login}}}}}}'
+          tid=$(gh api graphql -f query="$q" -F o="${REPO%/*}" -F n="${REPO#*/}" -F p=$PR --jq '.data.repository.pullRequest.reviewThreads.nodes[0].id'); echo "thread: $tid"
+          gh api graphql -f id="$tid" -f query='mutation($id:ID!){resolveReviewThread(input:{threadId:$id}){thread{isResolved}}}' && echo "2 RESOLVE OK" || echo "2 RESOLVE FAILED"
+          gh api graphql -f query="$q" -F o="${REPO%/*}" -F n="${REPO#*/}" -F p=$PR --jq '"3 after resolve: " + (.data.repository.pullRequest.reviewThreads.nodes[0]|tojson)'
+          gh api -X PUT repos/$REPO/pulls/$PR/reviews/$rid/dismissals -f event=DISMISS -f message="probe dismiss (temporary)" --jq '"4 DISMISS OK state=" + .state' || echo "4 DISMISS FAILED"
