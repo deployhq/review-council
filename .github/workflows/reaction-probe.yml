@@ -6,19 +6,28 @@ permissions: {}
 jobs:
   issues-write-only:
     runs-on: ubuntu-latest
-    permissions: {issues: write, pull-requests: read}
+    permissions:
+      issues: write
+      pull-requests: read
     steps:
-      - env: {GH_TOKEN: ${{ github.token }}}
+      - env:
+          GH_TOKEN: ${{ github.token }}
         run: gh api -X POST repos/${{ github.repository }}/issues/comments/7013260926/reactions -f content=eyes
   issues-and-prs-write:
     runs-on: ubuntu-latest
-    permissions: {issues: write, pull-requests: write}
+    permissions:
+      issues: write
+      pull-requests: write
     steps:
-      - env: {GH_TOKEN: ${{ github.token }}}
+      - env:
+          GH_TOKEN: ${{ github.token }}
         run: gh api -X POST repos/${{ github.repository }}/issues/comments/7013260926/reactions -f content=rocket
   prs-write-only:
     runs-on: ubuntu-latest
-    permissions: {issues: read, pull-requests: write}
+    permissions:
+      issues: read
+      pull-requests: write
     steps:
-      - env: {GH_TOKEN: ${{ github.token }}}
+      - env:
+          GH_TOKEN: ${{ github.token }}
         run: gh api -X POST repos/${{ github.repository }}/issues/comments/7013260926/reactions -f content=heart
