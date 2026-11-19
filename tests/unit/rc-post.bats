@@ -1266,10 +1266,11 @@ FOOTER_LOCAL='<sub>Review done with [Review Council](https://github.com/deployhq
 #   72 reopened: we resolved, alice unresolved   73 reopened: alice replied after us
 #   74 resolved_by_person (important)            75 legacy `rc:fixed` reply (a bot
 #      replied after: still fixed)
-#   76 we resolved, alice replied, alice resolved: still reopened (resolvedBy is
-#      never trusted on a thread we resolved)    77 resolved by us, no reply
+#   76 we resolved, alice replied, thread resolved: fixed (on a thread we resolved
+#      only the thread state counts)             77 resolved by us, no reply
 #   78 we resolved; resolvedBy names another login (bot token): fixed, no ack
 #   79 plain `rc:fixed`, alice replied, then resolved: resolved_by_person
+#   80 we resolved, alice replied, thread unresolved: reopened
 open_fixtures() {
   install_fake_git
   printf '[]\n' >"$FILES"
@@ -1280,7 +1281,9 @@ open_fixtures() {
     [ root(70; "🟠 Important"; "fp70"), root(71; "🟠 Important"; "fp71"), root(72; "🔴 Critical"; "fp72"),
       root(73; "🟠 Important"; "fp73"), root(74; "🟠 Important"; "fp74"), root(75; "🟡 Suggestion"; "fp75"),
       root(76; "🟠 Important"; "fp76"), root(77; "🟠 Important"; "fp77"),
-      root(78; "🟠 Important"; "fp78"), root(79; "🟠 Important"; "fp79"),
+      root(78; "🟠 Important"; "fp78"), root(79; "🟠 Important"; "fp79"), root(80; "🟠 Important"; "fp80"),
+      reply(90; 80; "rc-bot"; "User"; "Looks fixed\n\n<!-- rc:fixed resolved -->"),
+      reply(100; 80; "alice"; "User"; "thanks"),
       reply(88; 78; "rc-bot"; "User"; "Looks fixed\n\n<!-- rc:fixed resolved -->"),
       reply(89; 79; "rc-bot"; "User"; "Looks fixed\n\n<!-- rc:fixed -->"),
       reply(99; 79; "alice"; "User"; "not fixed"),
@@ -1298,7 +1301,7 @@ open_fixtures() {
     {data: {repository: {pullRequest: {reviewThreads: {nodes: [
       th(70; false; null), th(71; true; "rc-bot"), th(72; false; null), th(73; false; null),
       th(74; true; "alice"), th(75; false; null), th(76; true; "alice"), th(77; true; null),
-      th(78; true; "other-app[bot]"), th(79; true; "alice") ]}}}}}' >"$THREADS"
+      th(78; true; "other-app[bot]"), th(79; true; "alice"), th(80; false; null) ]}}}}}' >"$THREADS"
   printf '[]\n' >"$REVIEWS"
   VERD="$BATS_TEST_TMPDIR/verdicts.json"
 }
@@ -1321,7 +1324,7 @@ verdicts() {
   PATH="$SANDBOX" run --separate-stderr "$SCRIPT" open 5
   [ "$status" -eq 0 ]
   [ "$(printf '%s' "$output" | jq -c '[.inline[] | {(.id | tostring): .status}] | add')" = \
-    '{"70":"open","71":"fixed","72":"reopened","73":"reopened","74":"resolved_by_person","75":"fixed","76":"reopened","77":"resolved","78":"fixed","79":"resolved_by_person"}' ]
+    '{"70":"open","71":"fixed","72":"reopened","73":"reopened","74":"resolved_by_person","75":"fixed","76":"fixed","77":"resolved","78":"fixed","79":"resolved_by_person","80":"reopened"}' ]
   [ "$(printf '%s' "$output" | jq -c '.ack')" = '["fp74","fp79"]' ]
   [ "$(printf '%s' "$output" | jq -c '[.inline_ok, .known, .head]')" = '[true,true,"1111111111111111111111111111111111111111"]' ]
   [ "$(printf '%s' "$output" | jq -c '.inline[0] | {fingerprint, severity, path, line, url}')" = \
@@ -1548,7 +1551,7 @@ outside_round_trip() {
   # fp70 fixed now, fp74 resolved by a person (ack), fp71 fixed earlier, rep reported again (not blocking)
   active "fp70 fp71 fp74 rep"
   # the two reopened important/critical comments are acknowledged elsewhere? no: drop them for this case
-  jq '[.[] | select(.id != 72 and .id != 73 and .id != 76 and .in_reply_to_id != 72 and .in_reply_to_id != 73 and .in_reply_to_id != 76)]' "$RCOMMENTS" >"$RCOMMENTS.t" && mv "$RCOMMENTS.t" "$RCOMMENTS"
+  jq '[.[] | select(.id != 72 and .id != 73 and .id != 80 and .in_reply_to_id != 72 and .in_reply_to_id != 73 and .in_reply_to_id != 80)]' "$RCOMMENTS" >"$RCOMMENTS.t" && mv "$RCOMMENTS.t" "$RCOMMENTS"
   verdicts '{reported: ["rep"], fixed: [{kind: "inline", id: 70, summary: "ok"}]}'
   PATH="$SANDBOX" run --separate-stderr "$SCRIPT" recheck 5 "$VERD"
   [ "$status" -eq 0 ]

@@ -445,15 +445,13 @@ DIFFMAP_JQ='
 # unknown), each with a status:
 #   fixed    — we replied "looks fixed" (`rc:fixed`, either variant) and nobody
 #              reopened it;
-#   reopened — we replied "looks fixed", then a person unresolved the thread we
-#              had resolved (`rc:fixed resolved`), or replied after us;
+#   reopened — after our `rc:fixed resolved` reply the thread is unresolved
+#              (replies don't count), or after our plain `rc:fixed` reply (we
+#              could not resolve) a person replied;
 #   resolved_by_person — the thread is resolved by a person (resolvedBy is not
-#              us, null = not a person) and was not answered "looks fixed", or
-#              a person resolved it after replying to our unresolved "looks
-#              fixed". A thread we resolved (`rc:fixed resolved`) that is
-#              resolved now is fixed whoever resolvedBy names (or reopened if a
-#              person replied after us): our own resolve must never read as a
-#              person's acknowledgement;
+#              us, null = not a person) and either has no "looks fixed" reply,
+#              or a person replied to our plain `rc:fixed` and it was then
+#              resolved;
 #   resolved — the thread is resolved otherwise (by us);
 #   open     — anything else, including an unknown thread state.
 # `fixed` (bool) = status fixed: a finding that comes back gets a new comment.
@@ -478,18 +476,20 @@ OURS_JQ='
                              and .user.type == "User" and (ours | not))) as $replied
       | ($fx != null and ($fx.body | contains("<!-- rc:fixed resolved -->"))) as $weresolved
       | ($thr != null and ($thr.by | type) == "string" and $thr.by != "" and $thr.by != $me and $thr.by != $fb) as $byperson
-      | (if $thr != null and $thr.resolved == true then
-           (if $fx == null then (if $byperson then "resolved_by_person" else "resolved" end)
-            # We resolved it (`rc:fixed resolved`): resolvedBy is never trusted
-            # (a bot token may resolve under another login), so it stays fixed
-            # unless a person replied after us.
-            elif $weresolved then (if $replied then "reopened" else "fixed" end)
-            elif $byperson and $replied then "resolved_by_person"
-            elif $replied then "reopened"
-            else "fixed" end)
-         elif $fx != null then
-           (if $replied or ($weresolved and $thr != null and $thr.resolved == false) then "reopened" else "fixed" end)
-         else "open" end) as $st
+      # The disagreement signal matches the footer each reply showed:
+      # "Unresolve this conversation" (we resolved it) -> only the thread state
+      # counts (a "thanks" reply never reopens; resolvedBy is ignored, so our
+      # own resolve can never read as a person resolving); "Reply here" (our resolve
+      # failed) -> a person reply reopens, and a person then resolving it
+      # hands it to them.
+      | (if $fx == null then
+           (if $thr != null and $thr.resolved == true
+            then (if $byperson then "resolved_by_person" else "resolved" end) else "open" end)
+         elif $weresolved then
+           (if $thr != null and $thr.resolved == false then "reopened" else "fixed" end)
+         elif $replied then
+           (if $thr != null and $thr.resolved == true and $byperson then "resolved_by_person" else "reopened" end)
+         else "fixed" end) as $st
       | {id, fp: $fp, path, line: (.line // .original_line), body, url: (.html_url // null), thread: $thr,
          status: $st, fixed: ($st == "fixed"),
          severity: (.body | if startswith("**🔴 Critical**") then "critical"
