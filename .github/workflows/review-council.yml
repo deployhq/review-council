@@ -36,8 +36,9 @@ name: Review Council
 # grants. Callers must therefore grant the minimum above and nothing more.
 # (A job that declared `id-token: write` here would force every caller to
 # grant it, even API-key callers, since GitHub validates skipped jobs too.)
-# The `gate` job keeps its own narrow grant (it needs pull-requests: write for
-# the eyes reaction, so the caller's grant must include it, as it already does).
+# The `gate` job keeps its own narrow grant: contents: read and
+# pull-requests: write (the eyes reaction on a PR comment needs it; the
+# caller's grant must include it, as it already does). No issues: write.
 #
 # With GITHUB_TOKEN a recheck can't resolve review threads: GitHub requires
 # contents: write for that, which is deliberately not granted (the full run
@@ -53,10 +54,10 @@ name: Review Council
 #   - Every check (event, fork, draft, open, commenter permission) runs in the
 #     `gate` job, which holds no concurrency group, so a comment from a user
 #     without write access cannot cancel anything. Only the `review` job, which
-#     runs after the gate passes, takes a group: a recheck takes a per-PR group
-#     with cancel-in-progress, so with several pushes in a row only the newest
-#     recheck runs; a full run takes its own group (the run id), so it is never
-#     cancelled by, and never cancels, another run.
+#     runs after the gate passes, takes a per-PR group with cancel-in-progress:
+#     one for full runs (a newer full run supersedes the older) and one for
+#     rechecks (with several pushes in a row only the newest recheck runs).
+#     The groups differ, so a push never cancels a full review.
 #   - The reviewed repo is checked out without persisted credentials; the
 #     token used to post is GITHUB_TOKEN, scoped by the caller's grant.
 #   - In federation mode run-review.sh unsets the OIDC request variables
@@ -194,7 +195,6 @@ jobs:
       contents: read        # check out the gate action from deployhq/review-council
       pull-requests: write  # read the live PR and its reviews; the eyes reaction
                             # on a PR comment needs this (issues: write alone gets a 403)
-      issues: write         # unused by the gate today (see pull-requests above)
     outputs:
       proceed: ${{ steps.gate.outputs.proceed }}
       pr_number: ${{ steps.gate.outputs.pr_number }}
@@ -231,14 +231,15 @@ jobs:
     # grant (contents: read, pull-requests: write, issues: write, plus
     # id-token: write for federation only). See the header.
     # Taken only after the gate passed, so only an authorised trigger can
-    # cancel anything. A recheck shares a per-PR group with cancel-in-progress:
-    # with several pushes in a row, only the newest recheck runs. A full run
-    # gets a group of its own (the run id): a push never cancels it, and it
-    # never cancels a recheck. A recheck cancelled mid-post is safe: the next
-    # one carries on from what is on the PR.
+    # cancel anything. Two per-PR groups, both with cancel-in-progress: a newer
+    # full run supersedes an older full run, and with several pushes in a row
+    # only the newest recheck runs. The groups differ, so a push (a recheck)
+    # never cancels a full review, and a full review never cancels a recheck.
+    # A recheck cancelled mid-post is safe: the next one carries on from what
+    # is on the PR.
     concurrency:
-      group: ${{ needs.gate.outputs.mode == 'recheck' && format('rc-recheck-{0}-{1}', github.repository, needs.gate.outputs.pr_number) || format('rc-run-{0}', github.run_id) }}
-      cancel-in-progress: ${{ needs.gate.outputs.mode == 'recheck' }}
+      group: ${{ needs.gate.outputs.mode == 'recheck' && format('rc-recheck-{0}-{1}', github.repository, needs.gate.outputs.pr_number) || format('review-council-{0}-{1}', github.repository, needs.gate.outputs.pr_number) }}
+      cancel-in-progress: true
     steps:
       - name: Check out the pull request
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1

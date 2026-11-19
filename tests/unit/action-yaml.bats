@@ -59,11 +59,23 @@ ROOT="$(cd "$(dirname "$BATS_TEST_FILENAME")/../.." && pwd)"
   [ "$(yq "$run_step | .env.RC_RECHECK_MODEL" "$act")" = '${{ inputs.recheck_model }}' ]
 }
 
-@test "the gate job may react (pull-requests: write); only a recheck's review job cancels in progress" {
+@test "the gate may react without issues: write; full runs and rechecks cancel within separate per-PR groups" {
   command -v yq >/dev/null || skip "yq not installed"
   wf="$ROOT/.github/workflows/review-council.yml"
   [ "$(yq '.jobs.gate.permissions."pull-requests"' "$wf")" = write ]
+  [ "$(yq '.jobs.gate.permissions.issues' "$wf")" = null ]
   [ "$(yq '.jobs.gate.concurrency' "$wf")" = null ]
-  [ "$(yq '.jobs.review.concurrency."cancel-in-progress"' "$wf")" = "\${{ needs.gate.outputs.mode == 'recheck' }}" ]
-  [[ "$(yq '.jobs.review.concurrency.group' "$wf")" == *"format('rc-run-{0}', github.run_id)"* ]]
+  [ "$(yq '.jobs.review.concurrency."cancel-in-progress"' "$wf")" = true ]
+  group="$(yq '.jobs.review.concurrency.group' "$wf")"
+  [[ "$group" == *"format('rc-recheck-{0}-{1}', github.repository, needs.gate.outputs.pr_number)"* ]]
+  [[ "$group" == *"format('review-council-{0}-{1}', github.repository, needs.gate.outputs.pr_number)"* ]]
+}
+
+@test "a recheck skips the Codex, custom-seat and static-analysis installs" {
+  command -v yq >/dev/null || skip "yq not installed"
+  act="$ROOT/.github/actions/review/action.yml"
+  for name in "Install Codex CLI" "Install custom-seat harnesses" "Install static-analysis tools"; do
+    cond="$(yq ".runs.steps[] | select(.name == \"$name\") | .if" "$act")"
+    [[ "$cond" == "inputs.mode != 'recheck'"* ]] || { echo "$name: $cond"; return 1; }
+  done
 }

@@ -50,8 +50,8 @@ on:
 #
 # Do NOT add a workflow-level `concurrency:` with cancel-in-progress here: every
 # PR comment and push triggers this workflow and would cancel a running review.
-# The reusable workflow already cancels an older recheck when a newer one
-# starts, and only an authorised trigger can cancel anything.
+# The reusable workflow already allows one full review and one recheck per PR
+# at a time, and only an authorised trigger can cancel anything.
 permissions:
   contents: read
   pull-requests: write
