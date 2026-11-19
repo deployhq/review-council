@@ -2,6 +2,7 @@
 # Run `/review-council:run` unattended (called by .github/actions/review/action.yml,
 # from the reviewed repo's checkout).
 # Inputs (env): RC_AUTH_MODE (api_key|federation), RC_TIMEOUT_MINUTES, PR_NUMBER,
+#   RC_MODE (full|recheck), RC_RECHECK_MODEL,
 #   RC_CLAUDE_MODEL, RC_CODEX_MODEL, RC_CODEX_PROVIDER, the RC_* run settings, GH_TOKEN, the provider keys,
 #   CLAUDE_CODE_OAUTH_TOKEN, CODEX_ACCESS_TOKEN, RC_PR_BOT_TOKEN(_ENV), and in
 #   federation mode the ANTHROPIC_* federation IDs plus the runner's
@@ -14,6 +15,7 @@ plugin_dir="$(cd "$GITHUB_ACTION_PATH/../../.." && pwd -P)"
 # (an empty credential variable can still win its precedence slot).
 for v in ANTHROPIC_API_KEY CLAUDE_CODE_OAUTH_TOKEN CODEX_API_KEY CODEX_ACCESS_TOKEN \
          OPENROUTER_API_KEY PERPLEXITY_API_KEY RC_CLAUDE_MODEL RC_CODEX_MODEL RC_CODEX_PROVIDER \
+         RC_RECHECK_MODEL RC_MODE \
          ANTHROPIC_FEDERATION_RULE_ID ANTHROPIC_ORGANIZATION_ID \
          ANTHROPIC_SERVICE_ACCOUNT_ID ANTHROPIC_WORKSPACE_ID; do
   [ -n "${!v:-}" ] || unset "$v"
@@ -47,29 +49,21 @@ if [ -n "${CODEX_API_KEY:-}" ] && [ -n "${CODEX_ACCESS_TOKEN:-}" ]; then
   echo "::error::Give Codex only one credential: the OPENAI_API_KEY secret or the CODEX_ACCESS_TOKEN secret."
   exit 1
 fi
-# check_model <input> <value> [allow-1m]: a model ID from a workflow input.
-# Whole-string match ([[ =~ ]], not grep -x, which passes a multi-line value).
-# The charset keeps it safe on a command line and inside a TOML string.
-# allow-slash is for OpenRouter IDs (vendor/model).
-check_model() {
-  local re='^[A-Za-z0-9][A-Za-z0-9._:-]{0,79}' extra=""
-  case "${3:-}" in
-    allow-1m)
-      re+='(\[[A-Za-z0-9]{1,8}\])?'
-      extra=" and an optional [1m] suffix"
-      ;;
-    allow-slash)
-      re='^[A-Za-z0-9][A-Za-z0-9._:/-]{0,79}'
-      extra=" /"
-      ;;
-  esac
-  re+='$'
-  if [ -n "$2" ] && ! [[ "$2" =~ $re ]]; then
-    echo "::error::Invalid $1 (allowed: letters, digits, . _ : -$extra)."
-    exit 1
-  fi
-}
+# check_model <input> <value> [allow-1m|allow-slash] (exits 1 on a bad value).
+# shellcheck source=/dev/null
+. "$plugin_dir/scripts/rc-lib-model.sh"
 check_model claude_model "${RC_CLAUDE_MODEL:-}" allow-1m
+check_model recheck_model "${RC_RECHECK_MODEL:-}" allow-1m
+# RC_MODE: full (default; unset/empty too) runs the whole council; recheck
+# only re-checks the council's open comments (scripts/rc-recheck.sh).
+case "${RC_MODE:-full}" in
+  full|recheck) ;;
+  *)
+    # The value is not echoed: a multi-line one could forge log commands.
+    echo "::error::Unknown mode (expected full or recheck)."
+    exit 1
+    ;;
+esac
 # codex_provider: openai (default; OPENAI_API_KEY or CODEX_ACCESS_TOKEN) or
 # openrouter (OPENROUTER_API_KEY and an OpenRouter model ID). Native Codex also
 # refutes Claude's findings, so on OpenRouter its model must come from a known
@@ -179,6 +173,31 @@ else
 fi
 unset oidc_url oidc_tok
 
+# rc-recheck.sh writes its counts here; summary.sh adds them to the job summary.
+export RC_RECHECK_SUMMARY="$RUNNER_TEMP/rc-recheck.md"
+rm -f "$RC_RECHECK_SUMMARY"
+
+# recheck mode: no council run. scripts/rc-recheck.sh re-checks the council's
+# open comments with one small claude call per batch (it runs claude with an
+# env allowlist) and posts the result through rc-post.sh. The Codex, OpenRouter
+# and Perplexity credentials are only for the full run, so drop them here.
+# Not exec: in federation mode the token refresher above must stay alive.
+if [ "${RC_MODE:-full}" = recheck ]; then
+  unset CODEX_API_KEY CODEX_ACCESS_TOKEN OPENROUTER_API_KEY PERPLEXITY_API_KEY
+  # The gate's timeout as given (15 for a recheck); review-timeout.sh is for
+  # the full run only (it raises the limit for custom seats).
+  recheck_min="${RC_TIMEOUT_MINUTES:-}"
+  case "$recheck_min" in ''|*[!0-9]*|0) recheck_min=15 ;; esac
+  echo "Recheck time limit: ${recheck_min} minutes"
+  rc=0
+  timeout -k 30 "${recheck_min}m" "$plugin_dir/scripts/rc-recheck.sh" "$PR_NUMBER" || rc=$?
+  if [ "$rc" -eq 124 ]; then
+    echo "::error::Review Council recheck timed out after ${recheck_min} minutes."
+  fi
+  echo "recheck exited with $rc"
+  exit "$rc"
+fi
+
 # Codex with an Enterprise access token: log in once (into ~/.codex, where the
 # council's `codex exec` reads it), then drop the variable from the env.
 if [ -n "${CODEX_ACCESS_TOKEN:-}" ]; then
@@ -233,6 +252,13 @@ timeout_min="$("$plugin_dir/scripts/rc-config.sh" .review-council 2>/dev/null \
 case "$timeout_min" in ''|*[!0-9]*|0) timeout_min=45 ;; esac
 echo "Review time limit: ${timeout_min} minutes"
 
+# rc-post.sh `review` writes the posting plan here (head, status, block,
+# reported, posted); it reaches rc-post.sh through claude's Bash tool, which
+# inherits this environment (as RC_FAIL_LOG and GH_TOKEN do). The recheck
+# after the run reads it. Removed first so a stale file is never read.
+export RC_PLAN_OUT="$RUNNER_TEMP/rc-plan.json"
+rm -f "$RC_PLAN_OUT"
+
 rc=0
 # --setting-sources user: the reviewed PR's .claude/ settings and hooks never
 # load into a session that holds the API keys.
@@ -250,4 +276,14 @@ if [ "$rc" -eq 124 ]; then
   echo "::error::Review Council timed out after ${timeout_min} minutes (run_budget_seconds plus 30 minutes of headroom)."
 fi
 echo "claude exited with $rc"
+
+# In CI the skill skips its re-check of earlier comments (§6.6.4): it runs
+# here instead, after the review was posted. rc-recheck.sh skips (exit 0) when
+# there is no plan file, nothing was posted, or the run was degraded. It never
+# changes the run's exit code: a failed recheck is a warning.
+if [ -e "$RC_PLAN_OUT" ]; then
+  rrc=0
+  timeout -k 30 15m "$plugin_dir/scripts/rc-recheck.sh" "$PR_NUMBER" --after-run "$RC_PLAN_OUT" || rrc=$?
+  [ "$rrc" -eq 0 ] || echo "::warning::Review Council: the recheck of earlier comments failed (exit $rrc); the review itself was posted."
+fi
 exit "$rc"

@@ -32,10 +32,16 @@ if [ -s "$fails" ]; then
   done
 fi
 
+# rc-recheck.sh's counts (both modes: a recheck run, or the recheck after a
+# full run). A recheck run has no rc-run.jsonl: only this section is shown.
+recheck_md="$RUNNER_TEMP/rc-recheck.md"
+
 {
   echo "## Review Council"
   echo
-  if [ ! -s "$log" ]; then
+  if [ ! -s "$log" ] && [ -s "$recheck_md" ]; then
+    :
+  elif [ ! -s "$log" ]; then
     echo "No output was captured (the run did not start, or was cancelled before writing)."
   else
     jq -r 'select(.type == "result")
@@ -51,5 +57,9 @@ fi
     else
       echo "The run produced no final result (timed out or cancelled?). The step log has the tool trace."
     fi
+  fi
+  if [ -s "$recheck_md" ]; then
+    echo
+    cat "$recheck_md"
   fi
 } >> "$GITHUB_STEP_SUMMARY"
