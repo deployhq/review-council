@@ -33,6 +33,19 @@
 #                                   See the `review / stale` section below.
 #   stale <pr> <ledger> [envname]   Print (JSON) our open inline comments whose
 #                                   finding this run no longer reports.
+#   open <pr> [envname]             Print (JSON) the council's state on the PR:
+#                                   our inline comments and outside-the-diff
+#                                   findings with a status each, our active
+#                                   "request changes" reviews, what blocks them
+#                                   and what a person acknowledged. See the
+#                                   `open / recheck` section below.
+#   recheck <pr> <verdicts> [envname]
+#                                   Act on a recheck's verdicts: reply "looks
+#                                   fixed" (and resolve) on the fixed inline
+#                                   comments, one PR comment for the fixed
+#                                   outside-the-diff findings, and dismiss our
+#                                   "request changes" when nothing blocking is
+#                                   left. Never posts a review or new findings.
 #   identity [envname]              Print `identity=<who we post as>`.
 #   redact                          Read text on stdin, write it to stdout with
 #                                   likely secrets replaced by [REDACTED]; the
@@ -54,6 +67,9 @@
 # still be dismissed by a clean run). Any other value: a stderr note, then
 # `true`. Read from the environment only, never from config (committed config
 # is untrusted, so a reviewed PR must not be able to turn the block off).
+# RC_PLAN_OUT (`review`) — a file path: `review` writes {"head", "status",
+# "block", "reported", "posted"} there (posted false until the run posted), for
+# the recheck that follows a full run in CI.
 #
 # Requires: gh (authenticated), jq, git.
 
@@ -425,24 +441,60 @@ DIFFMAP_JQ='
   | from_entries'
 
 # Our earlier inline comments: root comments by us that carry a finding marker,
-# joined with their review thread ({id, resolved} from GraphQL, null if unknown).
+# joined with their review thread ({id, resolved, by} from GraphQL, null if
+# unknown), each with a status:
+#   fixed    — we replied "looks fixed" (`rc:fixed`, either variant) and nobody
+#              reopened it;
+#   reopened — after our `rc:fixed resolved` reply the thread is unresolved
+#              (replies don't count), or after our plain `rc:fixed` reply (we
+#              could not resolve) a person replied;
+#   resolved_by_person — the thread is resolved by a person (resolvedBy is not
+#              us, null = not a person) and either has no "looks fixed" reply,
+#              or a person replied to our plain `rc:fixed` and it was then
+#              resolved;
+#   resolved — the thread is resolved otherwise (by us);
+#   open     — anything else, including an unknown thread state.
+# `fixed` (bool) = status fixed: a finding that comes back gets a new comment.
+# A person = a User other than the identity we post as (as for dismissals).
 # shellcheck disable=SC2016  # jq program, not shell
 OURS_JQ='
+  def ours: if $me != "" then .user.login == $me
+            else (.user.type == "Bot" and ($fb == "" or .user.login == $fb)) end;
   ([ $t[0][] | .data.repository.pullRequest.reviewThreads.nodes[]? ]
-   | map({key: (.comments.nodes[0].databaseId | tostring), value: {id: .id, resolved: .isResolved}})
+   | map({key: (.comments.nodes[0].databaseId | tostring),
+          value: {id: .id, resolved: .isResolved, by: (.resolvedBy.login? // null)}})
    | from_entries) as $th
-  | [ .[] | arrays | .[]
-      | select((.body | type) == "string"
-          and (if $me != "" then .user.login == $me
-               else (.user.type == "Bot" and ($fb == "" or .user.login == $fb)) end)) ] as $mine
-  # Roots we already answered "looks fixed" (resolved or not): never stale
-  # again, and a finding that comes back gets a new comment.
-  | ([ $mine[] | select(.in_reply_to_id != null and (.body | contains("<!-- rc:fixed -->")))
-       | .in_reply_to_id | tostring ]) as $fixed
+  | [ .[] | arrays | .[] | select((.body | type) == "string") ] as $all
+  | [ $all[] | select(ours) ] as $mine
   | [ $mine[] | select(.in_reply_to_id == null)
       | (.body | capture("<!-- rc:finding (?<fp>[A-Za-z0-9._:/@+-]{1,200}) -->\\s*$") .fp) as $fp
-      | {id, fp: $fp, path, line: (.line // .original_line), body, thread: $th[.id | tostring],
-         fixed: (.id | tostring | IN($fixed[]))} ]'
+      | .id as $rid
+      | $th[$rid | tostring] as $thr
+      # Our latest "looks fixed" reply (old `rc:fixed` and new `rc:fixed resolved`).
+      | ([ $mine[] | select(.in_reply_to_id == $rid and (.body | contains("<!-- rc:fixed"))) ] | max_by(.id)) as $fx
+      | ($fx != null and any($all[]; .in_reply_to_id == $rid and (.id | type) == "number" and .id > $fx.id
+                             and .user.type == "User" and (ours | not))) as $replied
+      | ($fx != null and ($fx.body | contains("<!-- rc:fixed resolved -->"))) as $weresolved
+      | ($thr != null and ($thr.by | type) == "string" and $thr.by != "" and $thr.by != $me and $thr.by != $fb) as $byperson
+      # The disagreement signal matches the footer each reply showed:
+      # "Unresolve this conversation" (we resolved it) -> only the thread state
+      # counts (a "thanks" reply never reopens; resolvedBy is ignored, so our
+      # own resolve can never read as a person resolving); "Reply here" (our resolve
+      # failed) -> a person reply reopens, and a person then resolving it
+      # hands it to them.
+      | (if $fx == null then
+           (if $thr != null and $thr.resolved == true
+            then (if $byperson then "resolved_by_person" else "resolved" end) else "open" end)
+         elif $weresolved then
+           (if $thr != null and $thr.resolved == false then "reopened" else "fixed" end)
+         elif $replied then
+           (if $thr != null and $thr.resolved == true and $byperson then "resolved_by_person" else "reopened" end)
+         else "fixed" end) as $st
+      | {id, fp: $fp, path, line: (.line // .original_line), body, url: (.html_url // null), thread: $thr,
+         status: $st, fixed: ($st == "fixed"),
+         severity: (.body | if startswith("**🔴 Critical**") then "critical"
+                            elif startswith("**🟠 Important**") then "important"
+                            elif startswith("**🟡 Suggestion**") then "suggestion" else "unknown" end)} ]'
 
 # Shared jq definitions: the ledger's reported findings, normalised.
 # shellcheck disable=SC2016  # jq program, not shell
@@ -469,6 +521,34 @@ LEDGER_DEFS='
         line: (if (.location.line_end | posint) then .location.line_end else .location.line end),
         start_line: .location.line,
         tracked: ((.fingerprint | type) == "string" and (.fingerprint | test("^[A-Za-z0-9._:/@+-]{1,200}$")))});
+'
+
+# The "looks fixed" texts (needs LEDGER_DEFS). $why: {summary, points} written
+# by a model (or null): through `clean`, summary <= 300 chars, <= 5 points of
+# <= 300 chars, so it can never carry a marker, a secret or a live @mention.
+# shellcheck disable=SC2016  # jq program, not shell
+REPLY_DEFS='
+  # An odd backtick count would leave an unclosed "code span" that `clean`
+  # skips but GitHub renders as text (a live @mention): drop them then.
+  def rtext: tostring | (if ([match("`"; "g")] | length) % 2 == 1 then gsub("`"; "") else . end) | oneline;
+  def whysum($why; $dflt):
+    (if ($why | type) == "object" and ($why.summary | type) == "string" then $why.summary | rtext else "" end)
+    | if . == "" then $dflt else . end;
+  def whydetails($why):
+    [ (if ($why | type) == "object" and ($why.points | type) == "array" then $why.points[] else empty end)
+      | strings | rtext | select(. != "") ][0:5]
+    | if length == 0 then ""
+      else "\n\n<details>\n<summary>Why we think it\u0027s fixed</summary>\n\n"
+           + (map("- " + .) | join("\n")) + "\n\n</details>" end;
+  def signoff($who): "<sub>Recheck by [Review Council](https://github.com/deployhq/review-council/)"
+    + (if $who != "" then " · " + $who else "" end);
+  # The inline reply: $resolved = whether we resolved the thread.
+  def fixedreply($why; $short; $resolved; $who; $dflt):
+    "**Looks fixed** at `" + $short + "` · rechecked by Review Council\n\n" + whysum($why; $dflt) + whydetails($why)
+    + "\n\n" + signoff($who) + " · Disagree? "
+    + (if $resolved then "Unresolve this conversation" else "Reply here" end)
+    + " and the council will treat it as still open.</sub>\n\n"
+    + (if $resolved then "<!-- rc:fixed resolved -->" else "<!-- rc:fixed -->" end);
 '
 
 # The plan: what to post, list outside the diff, and resolve.
@@ -540,33 +620,38 @@ PLAN_JQ='
       else .out += [$x] end)
   | .out
   | map(. + {md: render, loc: loc})
+  # A finding with one of our comments that is not "fixed" (open, reopened or
+  # resolved) is not posted again; a fixed one that comes back is.
   | ([$ex[0][] | select(.fixed | not) | .fp] + ($cov | map(tostring))) as $have
   | map(. as $x | . + {have: ($x.tracked and ($have | index($x.fingerprint)) != null)}) as $fs
   | [ $fs[] | select((.have | not) and .tracked) | . + {a: anchor} | select(.a != null) ] as $cand
   | ([$fs[] | select(.tracked) | .fingerprint]) as $fps
-  | {
+  # Outside-the-diff entries: the text, and the fingerprint for the
+  # `rc:outside` marker (null = untracked: listed without a marker).
+  | def outent: {fp: (if .tracked then .fingerprint else null end), md: (.loc + "\n\n" + .md)};
+  {
       block: any($fs[]; .severity == "critical" or .severity == "important"),
       blocking: [ $fs[] | select(.severity == "critical" or .severity == "important") | if .tracked then .fingerprint else "" end ],
+      reported: ($fps | unique),
       kept: ([$fs[] | select(.have)] | length),
       new: [ $cand[0:$maxn][] | .a + {path, body: (.md + "\n\n" + $footer + "\n\n<!-- rc:finding " + .fingerprint + " -->"),
-                                      outside: (.loc + "\n\n" + .md)} ],
+                                      outside: outent} ],
       outside: ([ $fs[] | select(.have | not) | select(. as $x | any($cand[0:$maxn][]; .fingerprint == $x.fingerprint) | not)
-                  | .loc + "\n\n" + .md ]),
-      stale: [ $ex[0][] | select((.fp as $fp | $fps | index($fp)) == null and (.fixed | not)
+                  | outent ]),
+      # Only an open comment is re-checked: a reopened one never is again.
+      stale: [ $ex[0][] | select((.fp as $fp | $fps | index($fp)) == null and .status == "open"
                                  and .thread != null and .thread.resolved == false) ],
     }
   | .resolve = [ .stale[] | select(.id as $i | $res | index($i)) | select(.thread.id | test("^[A-Za-z0-9_=-]+$"))
                  | {id, thread: .thread.id} ]
   # Our critical/important comments the re-check did not find fixed (still
-  # present, or not re-checked): they keep our "request changes" in place.
-  # Built from all our comments, not .stale: when the threads cannot be listed
-  # every .thread is null (unknown), and an unknown thread holds; only one
-  # known to be resolved does not.
-  | .held = [ $ex[0][] | select((.fp as $fp | $fps | index($fp)) == null and (.fixed | not)
-                                and (.thread == null or .thread.resolved == false))
-              | select(.id as $i | $res | index($i) | not)
-              | select((.body | type) == "string"
-                  and ((.body | startswith("**🔴 Critical**")) or (.body | startswith("**🟠 Important**"))))
+  # present, or not re-checked), and the ones a person reopened: they keep our
+  # "request changes" in place. Built from all our comments, not .stale: when
+  # the threads cannot be listed every .thread is null (unknown), and an
+  # unknown thread holds (status open); only one known to be resolved does not.
+  | .held = [ $ex[0][] | select((.fp as $fp | $fps | index($fp)) == null)
+              | select(.status == "reopened" or (.status == "open" and (.id as $i | $res | index($i) | not)))
+              | select(.severity == "critical" or .severity == "important")
               | .id ]'
 
 # load_pr_state <pr> <dir>: write <dir>/diff.json and <dir>/ours.json. Sets
@@ -577,6 +662,7 @@ load_pr_state() {
   printf '{}\n' >"$2/diff.json"
   printf '[]\n' >"$2/ours.json"
   _inline=true
+  _threads_ok=false
   _local_head="$(git rev-parse HEAD 2>/dev/null)" || _local_head=""
   _pr_head="$(gh_post api "repos/$_repo/pulls/$1" 2>/dev/null | jq -r '.head.sha // empty' 2>/dev/null)" || _pr_head=""
   if [ -z "$_pr_head" ] || [ "$_local_head" != "$_pr_head" ]; then
@@ -586,13 +672,20 @@ load_pr_state() {
   fi
   # A failed thread listing is not fatal: nothing gets resolved (threads unknown).
   # shellcheck disable=SC2016  # GraphQL variables, not shell
-  _threads="$(gh_post api graphql --paginate -F owner="${_repo%%/*}" -F name="${_repo#*/}" -F number="$1" \
+  if _threads="$(gh_post api graphql --paginate -F owner="${_repo%%/*}" -F name="${_repo#*/}" -F number="$1" \
     -f query='query($owner: String!, $name: String!, $number: Int!, $endCursor: String) {
       repository(owner: $owner, name: $name) { pullRequest(number: $number) {
         reviewThreads(first: 100, after: $endCursor) {
           pageInfo { hasNextPage endCursor }
-          nodes { id isResolved comments(first: 1) { nodes { databaseId } } } } } } }' 2>/dev/null)" || _threads=""
-  printf '%s' "$_threads" | jq -s '.' >"$2/threads.json" 2>/dev/null || printf '[]\n' >"$2/threads.json"
+          nodes { id isResolved resolvedBy { login } comments(first: 1) { nodes { databaseId } } } } } } }' 2>/dev/null)"; then
+    _threads_ok=true
+  else
+    _threads=""
+  fi
+  printf '%s' "$_threads" | jq -s '.' >"$2/threads.json" 2>/dev/null || {
+    printf '[]\n' >"$2/threads.json"
+    _threads_ok=false
+  }
   if _files="$(gh_post api --paginate "repos/$_repo/pulls/$1/files" 2>/dev/null)" \
     && printf '%s' "$_files" | jq -s "$DIFFMAP_JQ" >"$2/diff.json" 2>/dev/null \
     && _rcs="$(gh_post api --paginate "repos/$_repo/pulls/$1/comments" 2>/dev/null)" \
@@ -651,22 +744,169 @@ do_stale() {
   fi
   jq -n --slurpfile f "$_ledger" --slurpfile ex "$_tmp/ours.json" --arg re "$SECRET_RE" "$LEDGER_DEFS"'
     ($f[0] | reported | map(select(.tracked) | .fingerprint)) as $fps
-    | [ $ex[0][] | select((.fp as $fp | $fps | index($fp)) == null and (.fixed | not)
+    | [ $ex[0][] | select((.fp as $fp | $fps | index($fp)) == null and .status == "open"
                           and .thread != null and .thread.resolved == false)
         | {id, fingerprint: .fp, path, line, body} ]'
 }
 
+# Our reviews (every review we post carries `<!-- rc:review -->`: another
+# bot's or another workflow's review is never ours to count or dismiss):
+#   active   — ours still requesting changes;
+#   ack      — blocking fingerprints (the hidden `rc:blocking` line of each
+#              "request changes" review) whose review a PERSON dismissed: they
+#              never block again. The dismisser comes from the PR timeline; if
+#              it can't be read, every dismissed review of ours counts as a
+#              person's (never re-raise by mistake);
+#   blocking — the fingerprints the active reviews block on; "" = an untracked
+#              blocker (`rc:blocking-untracked`, or no `rc:blocking` line);
+#   outside  — the tracked outside-the-diff findings (`rc:outside-begin` …
+#              `rc:outside <fp>`, both written only by this script), the latest
+#              review per fingerprint. Reviews posted before these markers have
+#              none: their outside findings are not recheckable.
+# shellcheck disable=SC2016  # jq program, not shell
+REVIEWS_JQ='
+  def ours: if $me != "" then .user.login == $me
+            else (.user.type == "Bot" and ($fb == "" or .user.login == $fb)) end;
+  def sevof: if contains("**🔴 Critical**") then "critical" elif contains("**🟠 Important**") then "important"
+             elif contains("**🟡 Suggestion**") then "suggestion" else "unknown" end;
+  [ .[] | arrays | .[]
+    | select((.body | type) == "string" and (.body | contains("<!-- rc:review -->")) and ours) ] as $ours
+  # A person = a User actor other than the identity we post as.
+  | (if $tl[0] == null then null
+     else [ $tl[0][] | arrays | .[]
+            | select(.event == "review_dismissed" and .actor.type == "User" and .actor.login != $me)
+            | .dismissed_review.review_id | tostring ] end) as $human
+  | { active: [ $ours[] | select(.state == "CHANGES_REQUESTED") | .id ],
+      ack: ([ $ours[] | select(.state == "DISMISSED") | . as $r
+              | select($human == null or ($r.id | tostring | IN($human[])))
+              | .body | capture("<!-- rc:blocking (?<l>[A-Za-z0-9._:/@+ -]*) -->").l
+              | split(" ")[] | select(. != "") ] | unique),
+      blocking: ([ $ours[] | select(.state == "CHANGES_REQUESTED") | .body
+                   | [match("<!-- rc:blocking (?<l>[A-Za-z0-9._:/@+ -]*) -->"; "g") | .captures[0].string] as $ls
+                   | if ($ls | length) == 0 then ""
+                     else ($ls[] | split(" ")[] | select(. != "")),
+                          (if contains("<!-- rc:blocking-untracked -->") then "" else empty end) end ] | unique),
+      outside: ([ $ours[] | . as $r | ($r.body | split("<!-- rc:outside ")) as $parts
+                  | range(1; $parts | length) as $i
+                  | ([$parts[$i] | capture("^(?<fp>[A-Za-z0-9._:/@+-]{1,200}) -->") | .fp] | first) as $fp
+                  | select($fp != null)
+                  | ($parts[$i - 1] | split("<!-- rc:outside-begin -->")
+                     | if length > 1 then last | sub("^\\s+"; "") | sub("\\s+$"; "") else "" end) as $text
+                  # The location line the script wrote first: `path:12`, `path:3-5` or none.
+                  | ([$text | split("\n")[0] | capture("^`(?<p>[^`]+?)(?::(?<l>[0-9]+)(?:-[0-9]+)?)?`$")] | first) as $loc
+                  | {fingerprint: $fp, severity: ($text | sevof), review_id: $r.id, url: ($r.html_url // null),
+                     path: ($loc.p? // null), line: ($loc.l? // null | if . == null then null else tonumber end),
+                     title: ([$text | split("\n")[] | capture("^\\*\\*(?<t>.+)\\*\\*$") | .t
+                              | select(IN("🔴 Critical", "🟠 Important", "🟡 Suggestion", "Finding") | not)] | first // ""),
+                     text: $text, submitted_at: ($r.submitted_at // null)} ]
+                | group_by(.fingerprint) | map(max_by(.review_id))) }'
+
+# load_reviews <pr>: our reviews into $_tmp/rv.json (REVIEWS_JQ). Sets
+# _rv_ok=false (and an empty object) when they can't be read: a failed listing
+# must not look like an empty one. The timeline goes through a file, never
+# argv (Linux caps one argument at 128 KB, and a busy PR's timeline is bigger).
+load_reviews() {
+  _rv_ok=false
+  printf '{"active":[],"ack":[],"blocking":[],"outside":[]}\n' >"$_tmp/rv.json"
+  _revs="$(gh_post api --paginate "repos/$_repo/pulls/$1/reviews" 2>/dev/null)" || return 0
+  printf 'null\n' >"$_tmp/tl.json"
+  if _tlraw="$(gh_post api --paginate "repos/$_repo/issues/$1/timeline" 2>/dev/null)"; then
+    printf '%s' "$_tlraw" | jq -s -c '.' >"$_tmp/tl.json" 2>/dev/null || printf 'null\n' >"$_tmp/tl.json"
+  fi
+  if printf '%s' "$_revs" | jq -s -c --arg me "$_me" --arg fb "$_fb_login" --slurpfile tl "$_tmp/tl.json" \
+    "$REVIEWS_JQ" >"$_tmp/rv.new" 2>/dev/null && [ -s "$_tmp/rv.new" ]; then
+    mv "$_tmp/rv.new" "$_tmp/rv.json"
+    _rv_ok=true
+  fi
+}
+
+# load_outside_fixed <pr>: [{fp, at}] of our PR comments that say an outside
+# finding looks fixed (`rc:outside-fixed <fp>`) into $_tmp/ofixed.json. Sets
+# _ic_ok=false when the comments can't be listed.
+load_outside_fixed() {
+  _ic_ok=false
+  printf '[]\n' >"$_tmp/ofixed.json"
+  _ics="$(gh_post api --paginate "repos/$_repo/issues/$1/comments" 2>/dev/null)" || return 0
+  # shellcheck disable=SC2016  # jq program, not shell
+  if printf '%s' "$_ics" | jq -s -c --arg me "$_me" --arg fb "$_fb_login" '
+      [ .[] | arrays | .[]
+        | select((.body | type) == "string"
+            and (if $me != "" then .user.login == $me
+                 else (.user.type == "Bot" and ($fb == "" or .user.login == $fb)) end))
+        | (.created_at // "") as $at
+        | .body | [match("<!-- rc:outside-fixed ([A-Za-z0-9._:/@+-]{1,200}) -->"; "g") | .captures[0].string][]
+        | {fp: ., at: $at} ]' >"$_tmp/ofixed.new" 2>/dev/null && [ -s "$_tmp/ofixed.new" ]; then
+    mv "$_tmp/ofixed.new" "$_tmp/ofixed.json"
+    _ic_ok=true
+  fi
+}
+
+# resolve_thread <thread-id>: resolve one review thread (id charset-checked
+# by the caller). Non-zero when GitHub refuses (e.g. the Actions token).
+resolve_thread() {
+  # shellcheck disable=SC2016  # GraphQL variables, not shell
+  gh_post api graphql -f id="$1" \
+    -f query='mutation($id: ID!) { resolveReviewThread(input: {threadId: $id}) { thread { isResolved } } }' >/dev/null 2>&1
+}
+
+# post_fixed_reply <comment-id> <resolved: true|false> <why-file> <default summary>:
+# the "looks fixed" reply on our inline comment. <why-file> holds the model's
+# {summary, points} (or null); every text goes through jq (REPLY_DEFS).
+post_fixed_reply() {
+  if ! jq -n --slurpfile w "$3" --arg short "$_short" --argjson r "$2" --arg who "$_who" --arg d "$4" \
+    --arg re "$SECRET_RE" "$LEDGER_DEFS$REPLY_DEFS"'{body: fixedreply($w[0]; $short; $r; $who; $d)}' >"$_tmp/reply.raw" 2>/dev/null \
+    || ! redact_file "$_tmp/reply.raw" "$_tmp/reply.json"; then
+    echo "rc-post: could not compose the reply on inline comment $1" >&2
+    return 1
+  fi
+  gh_post api "repos/$_repo/pulls/$_pr/comments/$1/replies" -X POST --input - <"$_tmp/reply.json" >/dev/null 2>&1 || {
+    echo "rc-post: could not reply on inline comment $1" >&2
+    return 1
+  }
+}
+
+# dismiss_active <message>: dismiss each of our active reviews ($_active, a
+# JSON array of ids). Adds to _n_dis.
+dismiss_active() {
+  printf '%s' "$_active" | jq -r '.[] | select(type == "number" and . == floor and . > 0)' >"$_tmp/dismiss.txt" 2>/dev/null || : >"$_tmp/dismiss.txt"
+  jq -n --arg m "$1" '{event: "DISMISS", message: $m}' >"$_tmp/dismiss.json"
+  while read -r _rid; do
+    if gh_post api "repos/$_repo/pulls/$_pr/reviews/$_rid/dismissals" -X PUT --input - <"$_tmp/dismiss.json" >/dev/null 2>&1; then
+      _n_dis=$((_n_dis + 1))
+    else
+      echo "rc-post: could not dismiss review $_rid" >&2
+    fi
+  done <"$_tmp/dismiss.txt"
+}
+
+# plan_out <posted: true|false>: the RC_PLAN_OUT side file (when set), for the
+# recheck that follows a full run: the reviewed commit, the run status, whether
+# it blocks, the tracked fingerprints it reported, and whether it was posted.
+plan_out() {
+  [ -n "${RC_PLAN_OUT:-}" ] || return 0
+  if [ "$1" = true ]; then
+    jq -c --arg h "${_local_head:-}" --arg s "${_status:-}" \
+      '{head: $h, status: $s, block: (.block != false), reported: [.reported[]? | strings], posted: true}' \
+      "$_tmp/plan.json" >"$RC_PLAN_OUT" 2>/dev/null
+  else
+    printf '{"head":"","status":"","block":true,"reported":[],"posted":false}\n' >"$RC_PLAN_OUT" 2>/dev/null
+  fi || echo "rc-post: could not write RC_PLAN_OUT" >&2
+}
+
 # review <pr> <digest-file> <ledger> [envname] [recheck-file]
 # recheck-file (optional, orchestrator-written): {"fixed": [<comment id>...],
-# "covered": ["<fingerprint>"...]} — `fixed` = stale comments the re-check found
-# fixed (resolved here, if still stale); `covered` = new fingerprints an earlier
-# comment already covers (not posted again).
+# "covered": ["<fingerprint>"...], "why": {"<comment id>": {"summary", "points"}}}
+# — `fixed` = stale comments the re-check found fixed (resolved here, if still
+# stale); `covered` = new fingerprints an earlier comment already covers (not
+# posted again); `why` (optional) = the re-check's reasons, shown in the reply.
 do_review() {
   _pr="${1:?rc-post: review needs <pr-number>}"
   _body="${2:?rc-post: review needs <digest-file>}"
   _ledger="${3:?rc-post: review needs <ledger-file>}"
   _tokname="${4:-}"
   _recheck="${5:-}"
+  # Until this run has posted, the side file says so (never a stale success).
+  plan_out false
 
   [ -f "$_body" ] || {
     echo "rc-post: digest file not found: $_body" >&2
@@ -708,48 +948,29 @@ do_review() {
     --arg re "$SECRET_RE" --arg footer "$_footer" \
     "$LEDGER_DEFS"' $f[0] | '"$PLAN_JQ" >"$_tmp/plan.json" 2>/dev/null; then
     echo "rc-post: could not place the findings; posting the digest only" >&2
-    printf '{"block":false,"blocking":[],"kept":0,"new":[],"outside":[],"stale":[],"resolve":[],"held":[]}\n' >"$_tmp/plan.json"
+    printf '{"block":false,"blocking":[],"reported":[],"kept":0,"new":[],"outside":[],"stale":[],"resolve":[],"held":[]}\n' >"$_tmp/plan.json"
   fi
 
-  # Our reviews: `active` = ours still requesting changes; `ack` = blocking
-  # fingerprints (from the hidden `rc:blocking` line of each "request changes"
-  # review we posted) that a PERSON dismissed — those never block again; only
-  # a new critical/important finding does. The dismisser comes from the PR
-  # timeline; if it can't be read, every dismissed review of ours counts as a
-  # person's (never re-raise by mistake). A failed reviews listing must not
-  # look like an empty one: then "unknown" — no new block, no dismissal.
+  # Our reviews (REVIEWS_JQ): `active` = ours still requesting changes; `ack`
+  # = blocking fingerprints a PERSON waved through (dismissed the review, or
+  # resolved the comment's thread) — those never block again; only a new
+  # critical/important finding does. A failed reviews listing must not look
+  # like an empty one: then "unknown" — no new block, no dismissal.
   _active=""
   _ack='[]'
-  # Every review we post carries `<!-- rc:review -->`: another bot's (or
-  # another workflow's) review is never ours to count or dismiss. The
-  # timeline goes through a file, never argv (Linux caps one argument at
-  # 128 KB, and a busy PR's timeline is bigger).
-  if _revs="$(gh_post api --paginate "repos/$_repo/pulls/$_pr/reviews" 2>/dev/null)"; then
-    printf 'null\n' >"$_tmp/tl.json"
-    if _tlraw="$(gh_post api --paginate "repos/$_repo/issues/$_pr/timeline" 2>/dev/null)"; then
-      printf '%s' "$_tlraw" | jq -s -c '.' >"$_tmp/tl.json" 2>/dev/null || printf 'null\n' >"$_tmp/tl.json"
-    fi
-    # shellcheck disable=SC2016  # jq program, not shell
-    _rv="$(printf '%s' "$_revs" | jq -s -c --arg me "$_me" --arg fb "$_fb_login" --slurpfile tl "$_tmp/tl.json" '
-        [ .[] | arrays | .[]
-          | select((.body // "" | contains("<!-- rc:review -->"))
-              and (if $me != "" then .user.login == $me
-                   else (.user.type == "Bot" and ($fb == "" or .user.login == $fb)) end)) ] as $ours
-        # A person = a User actor other than the identity we post as.
-        | (if $tl[0] == null then null
-           else [ $tl[0][] | arrays | .[]
-                  | select(.event == "review_dismissed" and .actor.type == "User" and .actor.login != $me)
-                  | .dismissed_review.review_id | tostring ] end) as $human
-        | { active: [ $ours[] | select(.state == "CHANGES_REQUESTED") | .id ],
-            ack: ([ $ours[] | select(.state == "DISMISSED") | . as $r
-                    | select($human == null or ($r.id | tostring | IN($human[])))
-                    | (.body // "") | capture("<!-- rc:blocking (?<l>[A-Za-z0-9._:/@+ -]*) -->").l
-                    | split(" ")[] | select(. != "") ] | unique) }' 2>/dev/null)" || _rv=""
-    if [ -n "$_rv" ]; then
-      _active="$(printf '%s' "$_rv" | jq -c '.active')"
-      _ack="$(printf '%s' "$_rv" | jq -c '.ack')"
-    else
-      echo "rc-post: could not read our earlier reviews; not requesting changes or dismissing this run" >&2
+  load_reviews "$_pr"
+  if [ "$_rv_ok" = true ]; then
+    _active="$(jq -c '.active' "$_tmp/rv.json")"
+    _ack="$(jq -c '.ack' "$_tmp/rv.json")"
+  else
+    echo "rc-post: could not read our earlier reviews; not requesting changes or dismissing this run" >&2
+  fi
+  # A thread a person resolved: only with a known identity (unknown = any
+  # resolver could be us).
+  if [ "$_known" = true ]; then
+    if _ack2="$(jq -c --argjson a "$_ack" '$a + [.[] | select(.status == "resolved_by_person") | .fp] | unique' "$_tmp/ours.json" 2>/dev/null)" \
+      && [ -n "$_ack2" ]; then
+      _ack="$_ack2"
     fi
   fi
   _block="$(jq -r '.block' "$_tmp/plan.json")"
@@ -785,37 +1006,32 @@ do_review() {
     jq -r '.resolve[] | "\(.id) \(.thread)"' "$_tmp/plan.json" >"$_tmp/resolve.txt"
     # Resolve first, then one marked reply saying how it went. The marker makes
     # the comment never stale again, so a refused resolve (GitHub may refuse
-    # the Actions token) costs one reply, not one per run.
+    # the Actions token) costs one reply, not one per run. The re-check may
+    # give its reasons (`why`); without them the reply says the finding is no
+    # longer reported.
     while read -r _cid _tid; do
-      # shellcheck disable=SC2016  # GraphQL variables, not shell
-      if gh_post api graphql -f id="$_tid" \
-        -f query='mutation($id: ID!) { resolveReviewThread(input: {threadId: $id}) { thread { isResolved } } }' >/dev/null 2>&1; then
+      if resolve_thread "$_tid"; then
         _n_res=$((_n_res + 1))
-        _rmsg="Re-checked at $_short: this looks fixed. Resolved."
+        _rok=true
       else
         echo "rc-post: could not resolve the thread of inline comment $_cid" >&2
-        _rmsg="Re-checked at $_short: this looks fixed. (The thread could not be resolved automatically.)"
+        _rok=false
       fi
-      jq -n --arg m "$_rmsg" '{body: ($m + "\n\n<!-- rc:fixed -->")}' >"$_tmp/reply.json"
-      gh_post api "repos/$_repo/pulls/$_pr/comments/$_cid/replies" -X POST --input - <"$_tmp/reply.json" >/dev/null 2>&1 \
-        || echo "rc-post: could not reply on inline comment $_cid" >&2
+      printf 'null\n' >"$_tmp/why.json"
+      if [ -n "$_recheck" ]; then
+        jq -c --arg k "$_cid" 'if (.why | type) == "object" then .why[$k] else null end' "$_recheck" >"$_tmp/why.json" 2>/dev/null \
+          || printf 'null\n' >"$_tmp/why.json"
+      fi
+      post_fixed_reply "$_cid" "$_rok" "$_tmp/why.json" "This finding is no longer reported." || true
     done <"$_tmp/resolve.txt"
     # Dismiss only on a run the rc:state line calls clean (no critical or
     # important finding), so an empty or unreadable ledger never lifts a block,
     # and never while one of our critical/important comments is still open
-    # without the re-check finding it fixed.
+    # without the re-check finding it fixed, or reopened by a person.
     _held="$(jq '.held // [] | length' "$_tmp/plan.json" 2>/dev/null)" || _held=1
     if [ "$_inline" = true ] && [ "$_block" = false ] && [ "$_status" = clean ] \
       && [ "$_held" = 0 ] && [ -n "$_active" ] && [ "$_active" != '[]' ]; then
-      printf '%s' "$_active" | jq -r '.[]' >"$_tmp/dismiss.txt"
-      while read -r _rid; do
-        jq -n --arg s "$_short" '{event: "DISMISS", message: "No critical or important findings in the Review Council review of \($s)."}' >"$_tmp/dismiss.json"
-        if gh_post api "repos/$_repo/pulls/$_pr/reviews/$_rid/dismissals" -X PUT --input - <"$_tmp/dismiss.json" >/dev/null 2>&1; then
-          _n_dis=$((_n_dis + 1))
-        else
-          echo "rc-post: could not dismiss review $_rid" >&2
-        fi
-      done <"$_tmp/dismiss.txt"
+      dismiss_active "No critical or important findings in the Review Council review of $_short."
     fi
   fi
 
@@ -842,7 +1058,8 @@ do_review() {
       {event: $ev,
        body: ($b + "\n\n<!-- rc:review -->"
               + (if $ev == "REQUEST_CHANGES"
-                 then "\n\n<!-- rc:blocking " + ([$p[0].blocking[] | select(. != "")] | join(" ")) + " -->" else "" end)),
+                 then (if any($p[0].blocking[]; . == "") then "\n\n<!-- rc:blocking-untracked -->" else "" end)
+                      + "\n\n<!-- rc:blocking " + ([$p[0].blocking[] | select(. != "")] | join(" ")) + " -->" else "" end)),
        comments: (if $wi then [$p[0].new[] | del(.outside)] else [] end)}
       + (if $sha != "" then {commit_id: $sha} else {} end)' >"$_tmp/review.raw"
     if redact_file "$_tmp/review.raw" "$_tmp/review.json" \
@@ -881,16 +1098,251 @@ do_review() {
     _url="$_DG_URL"
   fi
 
+  plan_out true
   printf 'action=%s\nurl=%s\n' "$_action" "$_url"
   printf 'review_url=%s\nreview_event=%s\ninline_new=%s\nkept=%s\nresolved=%s\ndismissed=%s\noutside=%s\n' \
     "$_review_url" "$([ -n "$_review_url" ] && echo "$_event")" "$_n_new" "$(jq '.kept' "$_tmp/plan.json")" \
     "$_n_res" "$_n_dis" "$([ "$_n_new" = 0 ] && jq '.outside + .new | length' "$_tmp/plan.json" || echo "$_n_out")"
 }
 
+# ---------------------------------------------------------------------------
+# open / recheck: re-check the council's open comments without a full run.
+#
+# `open` prints the state a recheck works from (one JSON object):
+#   {head, inline_ok, known, active, blocking, ack, inline: [...], outside: [...]}
+# inline_ok is false unless the checked-out commit is the PR head AND the
+# threads, review comments, reviews and PR comments could all be read; known is
+# false when we can't tell our own comments from another bot's. Either way the
+# object is still printed, and the caller does nothing.
+# inline[]: {id, fingerprint, severity, path, line, url, body, status} (status:
+# see OURS_JQ). outside[]: {fingerprint, severity, review_id, url, path, line,
+# title, text, status: open|fixed} (path/line null when unknown) — fixed when one of our PR comments carries
+# `rc:outside-fixed <fp>` posted after the review that listed it; a fingerprint
+# with an inline comment is left out. ack = fingerprints of reviews a person
+# dismissed + of threads a person resolved.
+#
+# `recheck` acts on the verdicts (orchestrator-written, model-derived: DATA):
+#   {"head", "degraded", "blocking_now", "reported": [fp], "checked": n,
+#    "fixed": [{"kind": "inline", "id", "summary", "points"},
+#              {"kind": "outside", "fingerprint", "summary", "points"}]}
+# Nothing happens unless degraded and blocking_now are literally false (for
+# the dismissal), the identity is known, inline_ok, and head is the PR head.
+# Fixed inline comments that are still open: resolve the thread, then reply
+# (marker `rc:fixed resolved` only when the resolve worked). Fixed outside
+# findings that are still open: one PR comment. Then our "request changes" is
+# dismissed when nothing blocking is left (see recheck_eval).
+# ---------------------------------------------------------------------------
+
+# load_state <pr>: everything `open` prints, into $_tmp/state.json (inline
+# entries also carry `_thread`, the charset-checked thread id or null).
+load_state() {
+  case "$_pr" in
+    '' | *[!0-9]*)
+      echo "rc-post: invalid PR number '$_pr' (must be digits)" >&2
+      return 1
+      ;;
+  esac
+  _tmp="$(mktemp -d "${TMPDIR:-/tmp}/rc-review.XXXXXX")" || {
+    echo "rc-post: could not create a temp dir" >&2
+    return 1
+  }
+  trap 'rm -rf "$_tmp"' EXIT
+  GH_POST_TOKEN="$(resolve_token "$_tokname")"
+  _repo="$(gh repo view --json nameWithOwner 2>/dev/null | jq -r '.nameWithOwner // empty')"
+  [ -n "$_repo" ] || {
+    echo "rc-post: could not resolve owner/repo (gh not authenticated?)" >&2
+    return 1
+  }
+  resolve_identity
+  load_pr_state "$_pr" "$_tmp"
+  load_reviews "$_pr"
+  load_outside_fixed "$_pr"
+  _inline_ok=false
+  if [ "$_inline" = true ] && [ "$_threads_ok" = true ] && [ "$_rv_ok" = true ] && [ "$_ic_ok" = true ]; then
+    _inline_ok=true
+  fi
+  # shellcheck disable=SC2016  # jq program, not shell
+  jq -n --slurpfile ours "$_tmp/ours.json" --slurpfile rv "$_tmp/rv.json" --slurpfile of "$_tmp/ofixed.json" \
+    --arg head "$_pr_head" --argjson ok "$_inline_ok" --argjson known "$_known" '
+    $ours[0] as $in | $rv[0] as $r
+    | ([$in[] | .fp]) as $infps
+    | {head: $head, inline_ok: $ok, known: $known,
+       active: $r.active, blocking: $r.blocking,
+       ack: ($r.ack + (if $known then [$in[] | select(.status == "resolved_by_person") | .fp] else [] end) | unique),
+       inline: [ $in[] | {id, fingerprint: .fp, severity, path, line, url, body, status,
+                          _thread: (.thread.id? // null | if type == "string" and test("^[A-Za-z0-9_=-]+$") then . else null end)} ],
+       outside: [ $r.outside[] | select(.fingerprint as $f | $infps | index($f) | not) | . as $o
+                  | . + {status: (if any($of[0][]; .fp == $o.fingerprint and (.at | type) == "string"
+                                         and .at > ($o.submitted_at // "")) then "fixed" else "open" end)}
+                  | del(.submitted_at) ]}' >"$_tmp/state.json" 2>/dev/null || {
+    echo "rc-post: could not assemble the PR state" >&2
+    return 1
+  }
+}
+
+# open <pr> [envname]
+do_open() {
+  _pr="${1:?rc-post: open needs <pr-number>}"
+  _tokname="${2:-}"
+  load_state || return 1
+  jq '.inline |= map(del(._thread))' "$_tmp/state.json"
+}
+
+# recheck_out: the key=value summary of a recheck.
+recheck_out() {
+  printf 'checked=%s\nfixed_inline=%s\nresolved=%s\noutside_fixed=%s\ndismissed=%s\nheld=%s\n' \
+    "$(int "$_checked")" "$(int "$_n_fi")" "$(int "$_n_res")" "$(int "$_n_of")" "$(int "$_n_dis")" "$(int "$_held")"
+}
+
+# int <value>: the value when it is a plain integer, else 0 (never empty).
+int() {
+  case "$1" in '' | *[!0-9]*) printf '0' ;; *) printf '%s' "$1" ;; esac
+}
+
+# recheck <pr> <verdicts-file> [envname]
+do_recheck() {
+  _pr="${1:?rc-post: recheck needs <pr-number>}"
+  _verd="${2:?rc-post: recheck needs <verdicts-file>}"
+  _tokname="${3:-}"
+  _checked=0
+  _n_fi=0
+  _n_res=0
+  _n_of=0
+  _n_dis=0
+  _held=0
+  if ! jq -e 'type == "object"' "$_verd" >/dev/null 2>&1; then
+    echo "rc-post: the verdicts are not a JSON object; nothing done" >&2
+    recheck_out
+    return 0
+  fi
+  load_state || return 1
+  _checked="$(jq '.checked | if type == "number" and . >= 0 and . == floor then . else 0 end' "$_verd" 2>/dev/null)" || _checked=0
+  _vhead="$(jq -r '.head | strings | select(test("^[0-9a-f]{40}$"))' "$_verd" 2>/dev/null)" || _vhead=""
+  _why=""
+  if ! jq -e '.degraded == false' "$_verd" >/dev/null 2>&1; then
+    _why="the recheck is degraded"
+  elif [ "$_known" != true ]; then
+    _why="we can't tell our own comments from another bot's"
+  elif [ "$_inline_ok" != true ]; then
+    _why="the PR head or its comments, threads or reviews can't be read"
+  elif [ -z "$_vhead" ] || [ "$_vhead" != "$_pr_head" ]; then
+    _why="the checked commit is no longer the PR head (a newer push will recheck)"
+  fi
+  if [ -n "$_why" ]; then
+    echo "rc-post: recheck: $_why; nothing done" >&2
+    recheck_out
+    return 0
+  fi
+  _short="$(printf '%s' "$_pr_head" | cut -c1-7)"
+  _active="$(jq -c '.active' "$_tmp/state.json")"
+  : >"$_tmp/done_inline.txt"
+  : >"$_tmp/done_outside.txt"
+
+  # 1. Inline: resolve, then reply. Only ids of our comments that are open.
+  jq -r --slurpfile s "$_tmp/state.json" '
+    [.fixed[]? | objects | select(.kind == "inline") | .id
+     | select(type == "number" and . == floor and . > 0)] | unique | .[] as $id
+    | $s[0].inline[] | select(.id == $id and .status == "open") | "\(.id) \(._thread // "-")"' \
+    "$_verd" >"$_tmp/fix.txt" 2>/dev/null || : >"$_tmp/fix.txt"
+  while read -r _cid _tid; do
+    case "$_cid" in '' | *[!0-9]*) continue ;; esac
+    jq -c --argjson id "$_cid" '[.fixed[]? | objects | select(.kind == "inline" and .id == $id)] | first' \
+      "$_verd" >"$_tmp/why.json" 2>/dev/null || printf 'null\n' >"$_tmp/why.json"
+    _rok=false
+    if [ "$_tid" != - ]; then
+      if resolve_thread "$_tid"; then
+        _rok=true
+        _n_res=$((_n_res + 1))
+      else
+        echo "rc-post: could not resolve the thread of inline comment $_cid" >&2
+      fi
+    fi
+    if post_fixed_reply "$_cid" "$_rok" "$_tmp/why.json" "This looks fixed."; then
+      _n_fi=$((_n_fi + 1))
+      printf '%s\n' "$_cid" >>"$_tmp/done_inline.txt"
+    elif [ "$_rok" = true ]; then
+      # Resolved without our reply: no longer open either way.
+      printf '%s\n' "$_cid" >>"$_tmp/done_inline.txt"
+    fi
+  done <"$_tmp/fix.txt"
+
+  # 2. Outside the diff: one PR comment for every fixed finding still open.
+  # shellcheck disable=SC2016  # jq program, not shell
+  if jq -c --slurpfile s "$_tmp/state.json" --arg short "$_short" --arg who "$_who" --arg re "$SECRET_RE" \
+    "$LEDGER_DEFS$REPLY_DEFS"'
+    [ .fixed[]? | objects | select(.kind == "outside" and (.fingerprint | type) == "string") ] as $v
+    | [ $v | map(.fingerprint) | unique | .[] as $f
+        | ($s[0].outside[] | select(.fingerprint == $f and .status == "open")) as $o
+        | {fp: $f, o: $o, why: ([$v[] | select(.fingerprint == $f)] | first)} ] as $ents
+    | if ($ents | length) == 0 then empty else
+      {fps: [$ents[].fp],
+       body: (($ents | map(
+                 ((.o.title // "" | rtext | gsub("[\\[\\]]"; "")) | if . == "" then "a finding" else . end) as $t
+                 | (if (.o.url | type) == "string" and (.o.url | test("^https://[^\\s()<>\\[\\]]+$"))
+                    then "[" + $t + "](" + .o.url + ")" else $t end) as $link
+                 | "**Looks fixed** at `" + $short + "`: " + $link + " from an earlier review. "
+                   + whysum(.why; "This looks fixed.") + whydetails(.why)
+                   + "\n\n<!-- rc:outside-fixed " + .fp + " -->")
+               | join("\n\n"))
+              + "\n\n" + signoff($who) + "</sub>")} end' "$_verd" >"$_tmp/ofix.raw" 2>/dev/null; then
+    if [ -s "$_tmp/ofix.raw" ]; then
+      if jq -c '{body}' "$_tmp/ofix.raw" >"$_tmp/ofix.body" 2>/dev/null \
+        && redact_file "$_tmp/ofix.body" "$_tmp/ofix.json" \
+        && gh_post api "repos/$_repo/issues/$_pr/comments" -X POST --input - <"$_tmp/ofix.json" >/dev/null 2>&1; then
+        jq -r '.fps[]' "$_tmp/ofix.raw" >"$_tmp/done_outside.txt"
+        _n_of="$(jq '.fps | length' "$_tmp/ofix.raw")"
+      else
+        echo "rc-post: could not post the outside-the-diff recheck comment" >&2
+      fi
+    fi
+  else
+    echo "rc-post: could not compose the outside-the-diff recheck comment" >&2
+  fi
+
+  # 3. Dismiss our "request changes" when nothing blocking is left.
+  recheck_eval >"$_tmp/eval.json" 2>/dev/null || printf '{"held":1,"dismiss":false}\n' >"$_tmp/eval.json"
+  _held="$(jq '.held' "$_tmp/eval.json")"
+  if [ "$(jq -r '.dismiss' "$_tmp/eval.json")" = true ]; then
+    dismiss_active "Rechecked at $_short: $((_n_fi + _n_of)) of $_checked open findings look fixed; no critical or important finding is left open."
+  fi
+  recheck_out
+}
+
+# recheck_eval: {held, dismiss}. Dismiss only when the verdicts say nothing
+# blocks now (blocking_now literally false), we have an active review, every
+# fingerprint it blocks on is satisfied — acknowledged by a person, its
+# inline comment fixed or resolved, its outside finding fixed, or still
+# reported (but no longer blocking) — none is untracked (""), and no
+# critical/important inline comment is open or reopened unless acknowledged.
+# held = what keeps the block: those comments + the unsatisfied fingerprints.
+recheck_eval() {
+  jq -R -s 'split("\n") | map(select(test("^[0-9]+$")) | tonumber)' "$_tmp/done_inline.txt" >"$_tmp/di.json"
+  jq -R -s 'split("\n") | map(select(. != ""))' "$_tmp/done_outside.txt" >"$_tmp/do.json"
+  # shellcheck disable=SC2016  # jq program, not shell
+  jq -c --slurpfile s "$_tmp/state.json" --slurpfile di "$_tmp/di.json" --slurpfile dout "$_tmp/do.json" '
+    . as $v | $s[0] as $st | $di[0] as $di | $dout[0] as $dout
+    | ([$v.reported[]? | strings | gsub("[^A-Za-z0-9._:/@+-]"; "-") | .[0:200] | select(length > 0)]) as $rep
+    | ($st.inline | map(if (.id as $i | $di | index($i)) != null then .status = "fixed" else . end)) as $in
+    | ($st.outside | map(if (.fingerprint as $f | $dout | index($f)) != null then .status = "fixed" else . end)) as $out
+    | [ $in[] | select((.status == "open" or .status == "reopened")
+                       and (.severity == "critical" or .severity == "important")
+                       and (.fingerprint as $f | $st.ack | index($f)) == null) | .fingerprint ] as $hold
+    | [ $st.blocking[] | . as $f
+        | select(. == ""
+            or ((($st.ack | index($f)) != null)
+                or any($in[]; .fingerprint == $f and (.status == "fixed" or .status == "resolved_by_person" or .status == "resolved"))
+                or any($out[]; .fingerprint == $f and .status == "fixed")
+                or (($rep | index($f)) != null) | not)) ] as $unsat
+    | {held: (($hold | length) + ([$unsat[] | select(. as $f | $hold | index($f) | not)] | length)),
+       dismiss: ($v.blocking_now == false and ($st.active | length) > 0
+                 and ($unsat | length) == 0 and ($hold | length) == 0)}' "$_verd"
+}
+
 # compose_body <with-inline>: the summary for this run's review (or the
 # fallback comment) into $_tmp/body.md: the digest, the counts in place of its
 # `rc:inline` line, the tags legend, the findings outside the diff (with the
-# inline ones too when <with-inline> is false), then the footer. Hidden-marker
+# inline ones too when <with-inline> is false; each tracked one between
+# `rc:outside-begin` and `rc:outside <fp>`), then the footer. Hidden-marker
 # openers are neutralised everywhere except the rc:report line and a strict
 # rc:state line, so only those and the lines this script writes are markers.
 # Needs _tmp, _body, _n_res, _footer.
@@ -909,7 +1361,13 @@ compose_body() {
     # rc:inline placeholder, and every other comment opener is neutralised.
     | ($l[(if $hasst then 2 else 1 end):] | join("\n") | split($mark) | map(defuse) | join($mark)) as $rest
     | (if $wi then $p[0].new | length else 0 end) as $nn
-    | ($p[0].outside + (if $wi then [] else [$p[0].new[].outside] end)) as $o
+    # A tracked outside finding sits between `rc:outside-begin` and
+    # `rc:outside <fp>` (the recheck finds it there); an untracked one has no
+    # markers. Only this script writes them: every other opener is defused.
+    | ([ ($p[0].outside + (if $wi then [] else [$p[0].new[].outside] end))[]
+         | if (.fp | type) == "string" and (.fp | test("^[A-Za-z0-9._:/@+-]{1,200}$"))
+           then "<!-- rc:outside-begin -->\n\n" + .md + "\n\n<!-- rc:outside " + .fp + " -->"
+           else .md end ]) as $o
     | ([ ("critical", "important", "suggestion") as $k
          | ($st[$k] // 0) as $n | select(($n | type) == "number" and $n > 0)
          | "\($n) \($k)" + (if $k == "suggestion" and $n > 1 then "s" else "" end) ]
@@ -963,10 +1421,12 @@ case "$_cmd" in
   post) do_post "$@" ;;
   review) do_review "$@" ;;
   stale) do_stale "$@" ;;
+  open) do_open "$@" ;;
+  recheck) do_recheck "$@" ;;
   identity) do_identity "$@" ;;
   redact) do_redact "$@" ;;
   *)
-    echo "usage: rc-post.sh <detect | open-draft | post <pr> <body-file> [envname] | review <pr> <digest-file> <ledger> [envname] [recheck-file] | stale <pr> <ledger> [envname] | identity [envname] | redact>" >&2
+    echo "usage: rc-post.sh <detect | open-draft | post <pr> <body-file> [envname] | review <pr> <digest-file> <ledger> [envname] [recheck-file] | stale <pr> <ledger> [envname] | open <pr> [envname] | recheck <pr> <verdicts-file> [envname] | identity [envname] | redact>" >&2
     exit 2
     ;;
 esac
