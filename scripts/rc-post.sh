@@ -449,7 +449,11 @@ DIFFMAP_JQ='
 #              had resolved (`rc:fixed resolved`), or replied after us;
 #   resolved_by_person — the thread is resolved by a person (resolvedBy is not
 #              us, null = not a person) and was not answered "looks fixed", or
-#              a person resolved it again after reopening it;
+#              a person resolved it after replying to our unresolved "looks
+#              fixed". A thread we resolved (`rc:fixed resolved`) that is
+#              resolved now is fixed whoever resolvedBy names (or reopened if a
+#              person replied after us): our own resolve must never read as a
+#              person's acknowledgement;
 #   resolved — the thread is resolved otherwise (by us);
 #   open     — anything else, including an unknown thread state.
 # `fixed` (bool) = status fixed: a finding that comes back gets a new comment.
@@ -476,7 +480,11 @@ OURS_JQ='
       | ($thr != null and ($thr.by | type) == "string" and $thr.by != "" and $thr.by != $me and $thr.by != $fb) as $byperson
       | (if $thr != null and $thr.resolved == true then
            (if $fx == null then (if $byperson then "resolved_by_person" else "resolved" end)
-            elif $byperson and ($replied or $weresolved) then "resolved_by_person"
+            # We resolved it (`rc:fixed resolved`): resolvedBy is never trusted
+            # (a bot token may resolve under another login), so it stays fixed
+            # unless a person replied after us.
+            elif $weresolved then (if $replied then "reopened" else "fixed" end)
+            elif $byperson and $replied then "resolved_by_person"
             elif $replied then "reopened"
             else "fixed" end)
          elif $fx != null then
