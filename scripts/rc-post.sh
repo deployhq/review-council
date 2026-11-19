@@ -1158,7 +1158,11 @@ load_state() {
   load_reviews "$_pr"
   load_outside_fixed "$_pr"
   _inline_ok=false
-  if [ "$_inline" = true ] && [ "$_threads_ok" = true ] && [ "$_rv_ok" = true ] && [ "$_ic_ok" = true ]; then
+  # The timeline too: without it every dismissed review of ours counts as a
+  # person's (see REVIEWS_JQ), which is safe for raising a block but would let
+  # a recheck treat unknown dismissals as acknowledgements and lift one.
+  if [ "$_inline" = true ] && [ "$_threads_ok" = true ] && [ "$_rv_ok" = true ] && [ "$_ic_ok" = true ] \
+    && jq -e 'type == "array"' "$_tmp/tl.json" >/dev/null 2>&1; then
     _inline_ok=true
   fi
   # shellcheck disable=SC2016  # jq program, not shell

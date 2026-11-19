@@ -1347,6 +1347,13 @@ verdicts() {
   [ "$(printf '%s' "$output" | jq '.inline_ok')" = false ]
 }
 
+@test "open: unreadable timeline -> inline_ok false (unknown dismissals never count as acknowledged)" {
+  open_fixtures
+  TIMELINE_FAIL=1 PATH="$SANDBOX" run --separate-stderr "$SCRIPT" open 5
+  [ "$status" -eq 0 ]
+  [ "$(printf '%s' "$output" | jq '.inline_ok')" = false ]
+}
+
 @test "open: blocking from the active reviews ('' for untracked or no line)" {
   open_fixtures
   active "fp70 fp72"
