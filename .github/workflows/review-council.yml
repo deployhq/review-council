@@ -113,7 +113,7 @@ on:
         type: boolean
         default: true
       recheck_model:
-        description: Optional. The model a recheck runs (`/review-council recheck`, or the recheck on push). Empty = claude-sonnet-5-5. It makes one small call per recheck, so a cheap model is fine.
+        description: Optional. The model that re-checks the council's earlier comments against the current code, in a recheck (`/review-council recheck`, or on a push) and at the end of a full review. Empty = claude-sonnet-5-5. It makes one small call per recheck, so a cheap model is fine.
         type: string
         default: ''
       request_changes:

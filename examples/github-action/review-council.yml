@@ -91,7 +91,8 @@ jobs:
       # On a push, recheck the open comments while a council review requests
       # changes (needs `synchronize` above). false: pushes run nothing.
       recheck_on_push: true
-      # The model a recheck runs. Empty = claude-sonnet-5-5.
+      # The model that re-checks earlier comments, in a recheck and at the end
+      # of a full review. Empty = claude-sonnet-5-5.
       # recheck_model: ""
       # Git ref of deployhq/review-council to load the plugin from.
       # Keep it the same as the ref in `uses:` above.

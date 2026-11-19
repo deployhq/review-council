@@ -25,7 +25,7 @@ inputs:
     required: false
     default: full
   recheck_model:
-    description: Optional. The model a recheck runs (RC_RECHECK_MODEL); empty = claude-sonnet-5-5.
+    description: Optional. The model that re-checks earlier comments, in a recheck and after a full run (RC_RECHECK_MODEL); empty = claude-sonnet-5-5.
     required: false
     default: ''
   approved_seats:
@@ -123,9 +123,7 @@ runs:
       shell: bash
       env:
         RC_AUTH_MODE: ${{ inputs.auth_mode }}
-        RC_MODE: ${{ inputs.mode }}
         RC_CLAUDE_MODEL: ${{ inputs.claude_model }}
-        RC_RECHECK_MODEL: ${{ inputs.recheck_model }}
         RC_CODEX_MODEL: ${{ inputs.codex_model }}
         RC_CODEX_PROVIDER: ${{ inputs.codex_provider }}
         ANTHROPIC_API_KEY: ${{ inputs.anthropic_api_key }}
