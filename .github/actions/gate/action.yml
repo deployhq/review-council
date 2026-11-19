@@ -3,7 +3,8 @@ description: >
   Internal to Review Council's reusable workflow (review-council.yml).
   Resolves the PR, enforces the event, fork,
   draft, open-state and commenter-permission checks, reacts to a
-  `/review-council` comment with eyes, and sizes the review step's timeout.
+  `/review-council` comment with eyes, picks the mode (a full run, or a
+  recheck of the council's open comments) and sizes the review step's timeout.
   Holds no credentials beyond the job's GITHUB_TOKEN.
 
 inputs:
@@ -15,6 +16,10 @@ inputs:
     description: "'true' skips PRs opened by a bot account (Dependabot, Renovate, Apps)."
     required: false
     default: 'false'
+  recheck_on_push:
+    description: "'true' rechecks on a push (pull_request synchronize) while a council review requests changes; anything else skips pushes."
+    required: false
+    default: 'true'
 
 outputs:
   proceed:
@@ -29,6 +34,9 @@ outputs:
   timeout_minutes:
     description: Timeout for the review run, in minutes.
     value: ${{ steps.gate.outputs.timeout_minutes }}
+  mode:
+    description: "'full' (a whole council run) or 'recheck' (re-check the council's open comments only)."
+    value: ${{ steps.gate.outputs.mode }}
 
 runs:
   using: composite
@@ -40,10 +48,13 @@ runs:
       env:
         GH_TOKEN: ${{ github.token }}
         EVENT_NAME: ${{ github.event_name }}
+        EVENT_ACTION: ${{ github.event.action }}
         REPO: ${{ github.repository }}
         PR_NUMBER: ${{ github.event.pull_request.number || github.event.issue.number }}
         COMMENT_ID: ${{ github.event.comment.id }}
+        COMMENT_BODY: ${{ github.event.comment.body }}
         COMMENTER: ${{ github.event.comment.user.login }}
         RUN_BUDGET: ${{ inputs.run_budget_seconds }}
         SKIP_BOT_PRS: ${{ inputs.skip_bot_prs }}
+        RECHECK_ON_PUSH: ${{ inputs.recheck_on_push }}
       run: bash "$GITHUB_ACTION_PATH/gate.sh"
