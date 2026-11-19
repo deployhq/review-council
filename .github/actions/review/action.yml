@@ -165,7 +165,7 @@ runs:
         "$HOME/.local/bin/yq" --version
 
     - name: Install Codex CLI
-      if: inputs.openai_api_key != '' || inputs.codex_access_token != '' || inputs.codex_provider == 'openrouter'
+      if: inputs.mode != 'recheck' && (inputs.openai_api_key != '' || inputs.codex_access_token != '' || inputs.codex_provider == 'openrouter')
       shell: bash
       env:
         CODEX_VERSION: ${{ inputs.codex_version }}
@@ -173,9 +173,12 @@ runs:
         npm install -g "@openai/codex@${CODEX_VERSION}"
         codex --version
 
+    # A recheck (mode recheck) runs only Claude, so it skips the Codex,
+    # custom-seat and static-analysis installs below.
     # Install only the harnesses the resolved config actually uses. The reader
     # gets the same trusted env (RC_CI, RC_APPROVED_SEATS) the review does.
     - name: Install custom-seat harnesses
+      if: inputs.mode != 'recheck'
       shell: bash
       working-directory: ${{ github.workspace }}/repo
       env:
@@ -191,7 +194,7 @@ runs:
     # Note: trufflehog's verified mode makes outbound calls to confirm a secret
     # is live; drop it via static_analysis.tools in config to opt out.
     - name: Install static-analysis tools
-      if: inputs.static_analysis == 'true'
+      if: inputs.mode != 'recheck' && inputs.static_analysis == 'true'
       continue-on-error: true
       shell: bash
       env:
