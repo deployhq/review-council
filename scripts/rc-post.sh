@@ -520,12 +520,15 @@ LEDGER_DEFS='
 # <= 300 chars, so it can never carry a marker, a secret or a live @mention.
 # shellcheck disable=SC2016  # jq program, not shell
 REPLY_DEFS='
+  # An odd backtick count would leave an unclosed "code span" that `clean`
+  # skips but GitHub renders as text (a live @mention): drop them then.
+  def rtext: tostring | (if ([match("`"; "g")] | length) % 2 == 1 then gsub("`"; "") else . end) | oneline;
   def whysum($why; $dflt):
-    (if ($why | type) == "object" and ($why.summary | type) == "string" then $why.summary | oneline else "" end)
+    (if ($why | type) == "object" and ($why.summary | type) == "string" then $why.summary | rtext else "" end)
     | if . == "" then $dflt else . end;
   def whydetails($why):
     [ (if ($why | type) == "object" and ($why.points | type) == "array" then $why.points[] else empty end)
-      | strings | oneline | select(. != "") ][0:5]
+      | strings | rtext | select(. != "") ][0:5]
     | if length == 0 then ""
       else "\n\n<details>\n<summary>Why we think it\u0027s fixed</summary>\n\n"
            + (map("- " + .) | join("\n")) + "\n\n</details>" end;
@@ -884,15 +887,18 @@ plan_out() {
 
 # review <pr> <digest-file> <ledger> [envname] [recheck-file]
 # recheck-file (optional, orchestrator-written): {"fixed": [<comment id>...],
-# "covered": ["<fingerprint>"...]} — `fixed` = stale comments the re-check found
-# fixed (resolved here, if still stale); `covered` = new fingerprints an earlier
-# comment already covers (not posted again).
+# "covered": ["<fingerprint>"...], "why": {"<comment id>": {"summary", "points"}}}
+# — `fixed` = stale comments the re-check found fixed (resolved here, if still
+# stale); `covered` = new fingerprints an earlier comment already covers (not
+# posted again); `why` (optional) = the re-check's reasons, shown in the reply.
 do_review() {
   _pr="${1:?rc-post: review needs <pr-number>}"
   _body="${2:?rc-post: review needs <digest-file>}"
   _ledger="${3:?rc-post: review needs <ledger-file>}"
   _tokname="${4:-}"
   _recheck="${5:-}"
+  # Until this run has posted, the side file says so (never a stale success).
+  plan_out false
 
   [ -f "$_body" ] || {
     echo "rc-post: digest file not found: $_body" >&2
@@ -902,8 +908,6 @@ do_review() {
     echo "rc-post: refusing to post — body is not a Review Council digest (missing $MARKER)" >&2
     return 1
   }
-  # Until this run has posted, the side file says so (never a stale success).
-  plan_out false
   review_setup || return 1
 
   _fixed='[]'
@@ -1265,7 +1269,7 @@ do_recheck() {
     | if ($ents | length) == 0 then empty else
       {fps: [$ents[].fp],
        body: (($ents | map(
-                 ((.o.title // "" | oneline | gsub("[\\[\\]]"; "")) | if . == "" then "a finding" else . end) as $t
+                 ((.o.title // "" | rtext | gsub("[\\[\\]]"; "")) | if . == "" then "a finding" else . end) as $t
                  | (if (.o.url | type) == "string" and (.o.url | test("^https://[^\\s()<>\\[\\]]+$"))
                     then "[" + $t + "](" + .o.url + ")" else $t end) as $link
                  | "**Looks fixed** at `" + $short + "`: " + $link + " from an earlier review. "

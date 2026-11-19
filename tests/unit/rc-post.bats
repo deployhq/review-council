@@ -1504,6 +1504,16 @@ outside_round_trip() {
   [ "$(printf '%s\n' "$_r" | sed -n 3p | wc -m | tr -d ' ')" -le 301 ]
 }
 
+@test "recheck: an unclosed backtick cannot hide a live @mention" {
+  open_fixtures
+  verdicts '{fixed: [{kind: "inline", id: 70, summary: "see `@alice", points: ["`x` and `@bob"]}]}'
+  PATH="$SANDBOX" run --separate-stderr "$SCRIPT" recheck 5 "$VERD"
+  [ "$status" -eq 0 ]
+  _r="$(jq -r .body "$GHLOG.replies")"
+  ! printf '%s' "$_r" | grep -qF '@alice' || return 1
+  ! printf '%s' "$_r" | grep -qF '@bob' || return 1
+}
+
 @test "recheck: one grouped PR comment for the fixed outside findings" {
   outside_round_trip
   # a second tracked outside finding in the same review
@@ -1681,6 +1691,9 @@ dismissable() {
   [ "$status" -eq 0 ]
   [ "$(jq -c . "$RC_PLAN_OUT")" = '{"head":"1111111111111111111111111111111111111111","status":"findings","block":true,"reported":["a.sh::f::bug","a.sh::f::range","b.sh::g::style"],"posted":true}' ]
   PATH="$SANDBOX" run "$SCRIPT" review x "$BODY" "$LEDGER"
+  [ "$status" -ne 0 ]
+  [ "$(jq -c .posted "$RC_PLAN_OUT")" = false ]
+  PATH="$SANDBOX" run "$SCRIPT" review 5 "$BATS_TEST_TMPDIR/missing.md" "$LEDGER"
   [ "$status" -ne 0 ]
   [ "$(jq -c .posted "$RC_PLAN_OUT")" = false ]
   unset RC_PLAN_OUT
