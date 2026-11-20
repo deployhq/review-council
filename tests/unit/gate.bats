@@ -174,6 +174,8 @@ EOF
     proceeds
     mode_is recheck || { echo "body: $body"; return 1; }
   done
+  # every one of them got the 👀 reaction
+  [ "$(grep -c 'reactions' "$GHLOG")" -eq 7 ]
 }
 
 @test "mode: any other second word is a full run" {
