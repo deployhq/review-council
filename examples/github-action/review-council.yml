@@ -31,7 +31,7 @@ on:
   # Manual: someone with write access comments on a PR.
   #   `/review-council`          a full review (comment again to re-review).
   #   `/review-council recheck`  only re-check the council's open comments
-  #                              against the current code: one small model call
+  #                              against the current code: small model calls
   #                              (`/review-council check` works too).
   issue_comment:
     types: [created]
