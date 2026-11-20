@@ -61,3 +61,19 @@ tool() { printf '{"type":"assistant","message":{"content":[{"type":"tool_use","n
   [[ "$output" == *"::warning::Review Council: a reviewer call failed (a later call may have recovered; the review says who took part): Google (Antigravity): agy: auth failure"* ]] || false
   [[ "$output" != *"ABCDEFGHIJKLMNOPQRSTUVWXYZ012345"* ]] || false
 }
+
+@test "summary: a recheck run (no run log) shows only the recheck counts" {
+  printf '### Review Council recheck\n\n| checked |\n' >"$RUNNER_TEMP/rc-recheck.md"
+  run bash "$ACTION/summary.sh"
+  [ "$status" -eq 0 ]
+  ! grep -qF 'No output was captured' "$GITHUB_STEP_SUMMARY" || return 1
+  grep -qF '### Review Council recheck' "$GITHUB_STEP_SUMMARY"
+}
+
+@test "summary: after a full run, the recheck counts follow the run's result" {
+  printf '{"type":"result","subtype":"success","is_error":false,"duration_ms":1000,"result":"done"}\n' >"$LOG"
+  printf '### Review Council recheck\n' >"$RUNNER_TEMP/rc-recheck.md"
+  run bash "$ACTION/summary.sh"
+  [ "$status" -eq 0 ]
+  [ "$(grep -nxF 'done' "$GITHUB_STEP_SUMMARY" | cut -d: -f1)" -lt "$(grep -nF '### Review Council recheck' "$GITHUB_STEP_SUMMARY" | cut -d: -f1)" ]
+}

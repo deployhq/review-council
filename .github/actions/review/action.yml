@@ -20,6 +20,14 @@ inputs:
     description: Timeout for the review run, in minutes (from the gate).
     required: false
     default: '45'
+  mode:
+    description: "'full' runs the whole council; 'recheck' only re-checks the council's open comments (RC_MODE, from the gate)."
+    required: false
+    default: full
+  recheck_model:
+    description: Optional. The model that re-checks earlier comments, in a recheck and after a full run (RC_RECHECK_MODEL); empty = claude-sonnet-5-5.
+    required: false
+    default: ''
   approved_seats:
     description: Comma-separated custom-seat slot names pre-approved for CI (RC_APPROVED_SEATS).
     required: false
@@ -157,7 +165,7 @@ runs:
         "$HOME/.local/bin/yq" --version
 
     - name: Install Codex CLI
-      if: inputs.openai_api_key != '' || inputs.codex_access_token != '' || inputs.codex_provider == 'openrouter'
+      if: inputs.mode != 'recheck' && (inputs.openai_api_key != '' || inputs.codex_access_token != '' || inputs.codex_provider == 'openrouter')
       shell: bash
       env:
         CODEX_VERSION: ${{ inputs.codex_version }}
@@ -165,9 +173,12 @@ runs:
         npm install -g "@openai/codex@${CODEX_VERSION}"
         codex --version
 
+    # A recheck (mode recheck) runs only Claude, so it skips the Codex,
+    # custom-seat and static-analysis installs below.
     # Install only the harnesses the resolved config actually uses. The reader
     # gets the same trusted env (RC_CI, RC_APPROVED_SEATS) the review does.
     - name: Install custom-seat harnesses
+      if: inputs.mode != 'recheck'
       shell: bash
       working-directory: ${{ github.workspace }}/repo
       env:
@@ -183,7 +194,7 @@ runs:
     # Note: trufflehog's verified mode makes outbound calls to confirm a secret
     # is live; drop it via static_analysis.tools in config to opt out.
     - name: Install static-analysis tools
-      if: inputs.static_analysis == 'true'
+      if: inputs.mode != 'recheck' && inputs.static_analysis == 'true'
       continue-on-error: true
       shell: bash
       env:
@@ -204,6 +215,8 @@ runs:
       env:
         RC_AUTH_MODE: ${{ inputs.auth_mode }}
         RC_TIMEOUT_MINUTES: ${{ inputs.timeout_minutes }}
+        RC_MODE: ${{ inputs.mode }}
+        RC_RECHECK_MODEL: ${{ inputs.recheck_model }}
         RC_CI: 'true'
         RC_PR_COMMENTS: 'true'
         RC_APPROVED_SEATS: ${{ inputs.approved_seats }}

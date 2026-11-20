@@ -3,6 +3,16 @@ name: Review Council
 # Reusable workflow: run a Review Council review of a pull request, unattended,
 # and post one review on it: the summary plus inline comments.
 #
+# Two modes (the gate picks one):
+#   - full: the whole council. On `/review-council`, and on a PR opened or
+#     marked ready for review.
+#   - recheck: no new review. Small model calls re-check the council's
+#     open comments against the current code, mark the fixed ones, and
+#     dismiss our "request changes" when no critical or important finding is
+#     left. On `/review-council recheck` (or `check`), and on a push
+#     (`synchronize`) while one of our reviews still requests changes (input recheck_on_push,
+#     default on). A push never starts a full run.
+#
 # Claude authenticates in one of three ways:
 #   - API key (default): pass the ANTHROPIC_API_KEY secret.
 #   - Subscription token: pass the CLAUDE_CODE_OAUTH_TOKEN secret
@@ -16,7 +26,8 @@ name: Review Council
 #
 # Call it from a workflow in your repo that triggers on `pull_request` and/or
 # `issue_comment` (see examples/github-action/review-council.yml and
-# docs/github-action.md). The caller must grant:
+# docs/github-action.md). Add `synchronize` to the caller's `pull_request`
+# types for the recheck on push. The caller must grant:
 #   contents: read, pull-requests: write, issues: write
 #   + id-token: write  (federation only; API-key callers must NOT grant it)
 #
@@ -25,7 +36,17 @@ name: Review Council
 # grants. Callers must therefore grant the minimum above and nothing more.
 # (A job that declared `id-token: write` here would force every caller to
 # grant it, even API-key callers, since GitHub validates skipped jobs too.)
-# The `gate` job keeps its own narrow grant.
+# The `gate` job keeps its own narrow grant: contents: read and
+# pull-requests: write (the eyes reaction on a PR comment needs it; the
+# caller's grant must include it, as it already does). No issues: write.
+#
+# With GITHUB_TOKEN a recheck can't resolve review threads: GitHub requires
+# contents: write for that, which is deliberately not granted (the full run
+# gives a model a Bash tool on the PR's code). Its "looks fixed" reply alone
+# marks a comment as handled. A PR_BOT_TOKEN that may resolve threads does both,
+# but the full run's model (which has Bash) can see that token, so a token with
+# repo write access brings back the risk withheld above: the reply-only default
+# is the recommended setup.
 #
 # Security model, in short:
 #   - Fork PRs are skipped (secrets would be exposed to untrusted code paths).
@@ -34,9 +55,12 @@ name: Review Council
 #   - Every event-derived value (comment body, login, branch name) reaches a
 #     script through `env:`, never through `${{ }}` inside `run:`.
 #   - Every check (event, fork, draft, open, commenter permission) runs in the
-#     `gate` job, which holds no concurrency group. Only the `review` job, which
-#     runs after the gate passes, takes the per-PR group with cancel-in-progress
-#     — so a comment from a user without write access cannot cancel a review.
+#     `gate` job, which holds no concurrency group, so a comment from a user
+#     without write access cannot cancel anything. Only the `review` job, which
+#     runs after the gate passes, takes a per-PR group with cancel-in-progress:
+#     one for full runs (a newer full run supersedes the older) and one for
+#     rechecks (with several pushes in a row only the newest recheck runs).
+#     The groups differ, so a push never cancels a full review.
 #   - The reviewed repo is checked out without persisted credentials; the
 #     token used to post is GITHUB_TOKEN, scoped by the caller's grant.
 #   - In federation mode run-review.sh unsets the OIDC request variables
@@ -88,6 +112,14 @@ on:
         description: Skip PRs opened by a bot account (Dependabot, Renovate, a GitHub App). Their text can come from outside your org. Off by default, so agent-opened PRs are reviewed.
         type: boolean
         default: false
+      recheck_on_push:
+        description: "On a push (pull_request synchronize), recheck the council's open comments while one of its reviews still requests changes. Needs `synchronize` in the caller's pull_request types. false = pushes never run anything. A push never starts a full review."
+        type: boolean
+        default: true
+      recheck_model:
+        description: Optional. The model that re-checks the council's earlier comments against the current code, in a recheck (`/review-council recheck`, or on a push) and at the end of a full review. Empty = claude-sonnet-5-5. It makes one small call per recheck, so a cheap model is fine.
+        type: string
+        default: ''
       request_changes:
         description: "false = post plain comments only; Critical/Important findings never request changes. Default true: a Critical or Important finding posts the review as \"request changes\"."
         type: boolean
@@ -143,13 +175,15 @@ on:
 jobs:
   gate:
     name: Gate
-    # Cheap pre-filter; the gate step re-checks against the live PR.
+    # Cheap pre-filter; the gate step re-checks against the live PR (and on a
+    # push, whether one of our reviews still requests changes).
     # Deliberately NO concurrency group here: anyone can trigger this job by
     # commenting, so it must never be able to cancel a review in progress.
     if: >
       (
         github.event_name == 'pull_request' &&
         github.event.action != 'closed' &&
+        (github.event.action != 'synchronize' || inputs.recheck_on_push) &&
         github.event.pull_request.draft == false &&
         github.event.pull_request.head.repo.full_name == github.repository
       ) ||
@@ -162,13 +196,14 @@ jobs:
     permissions:
       # (metadata: read is implicit and covers the collaborator-permission lookup)
       contents: read        # check out the gate action from deployhq/review-council
-      pull-requests: read   # read the live PR
-      issues: write         # the eyes reaction on the triggering comment
+      pull-requests: write  # read the live PR and its reviews; the eyes reaction
+                            # on a PR comment needs this (issues: write alone gets a 403)
     outputs:
       proceed: ${{ steps.gate.outputs.proceed }}
       pr_number: ${{ steps.gate.outputs.pr_number }}
       head_ref: ${{ steps.gate.outputs.head_ref }}
       timeout_minutes: ${{ steps.gate.outputs.timeout_minutes }}
+      mode: ${{ steps.gate.outputs.mode }}
     steps:
       - name: Check out the gate action
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -185,6 +220,7 @@ jobs:
         with:
           run_budget_seconds: ${{ inputs.run_budget_seconds }}
           skip_bot_prs: ${{ inputs.skip_bot_prs }}
+          recheck_on_push: ${{ inputs.recheck_on_push }}
 
   review:
     name: Review Council
@@ -198,9 +234,14 @@ jobs:
     # grant (contents: read, pull-requests: write, issues: write, plus
     # id-token: write for federation only). See the header.
     # Taken only after the gate passed, so only an authorised trigger can
-    # cancel (supersede) a review in progress for the same PR.
+    # cancel anything. Two per-PR groups, both with cancel-in-progress: a newer
+    # full run supersedes an older full run, and with several pushes in a row
+    # only the newest recheck runs. The groups differ, so a push (a recheck)
+    # never cancels a full review, and a full review never cancels a recheck.
+    # A recheck cancelled mid-post is safe: the next one carries on from what
+    # is on the PR.
     concurrency:
-      group: review-council-${{ github.repository }}-${{ needs.gate.outputs.pr_number }}
+      group: ${{ needs.gate.outputs.mode == 'recheck' && format('rc-recheck-{0}-{1}', github.repository, needs.gate.outputs.pr_number) || format('review-council-{0}-{1}', github.repository, needs.gate.outputs.pr_number) }}
       cancel-in-progress: true
     steps:
       - name: Check out the pull request
@@ -228,6 +269,8 @@ jobs:
           auth_mode: ${{ inputs.anthropic_federation_rule_id != '' && 'federation' || 'api_key' }}
           pr_number: ${{ needs.gate.outputs.pr_number }}
           timeout_minutes: ${{ needs.gate.outputs.timeout_minutes }}
+          mode: ${{ needs.gate.outputs.mode }}
+          recheck_model: ${{ inputs.recheck_model }}
           approved_seats: ${{ inputs.approved_seats }}
           run_budget_seconds: ${{ inputs.run_budget_seconds }}
           claude_code_version: ${{ inputs.claude_code_version }}

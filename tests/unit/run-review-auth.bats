@@ -102,6 +102,9 @@ run_stub() {
 #!/bin/sh
 cat "${CODEX_HOME:-$HOME/.codex}/config.toml" 2>/dev/null
 echo "fail_log=${RC_FAIL_LOG:-}"
+echo "plan_out=${RC_PLAN_OUT:-}"
+echo "args=$*" >>"$HOME/claude.calls"
+[ -z "${STUB_PLAN:-}" ] || printf '%s\n' "$STUB_PLAN" >"$RC_PLAN_OUT"
 STUB
   chmod +x "$bin/claude"
   # macOS has no `timeout`; the stub drops its options and runs the command.
@@ -222,4 +225,73 @@ PY
   run_stub RC_CODEX_MODEL=gpt-6-luna
   [ "$status" -eq 0 ]
   ! grep -q 'model_provider' "$BATS_TEST_TMPDIR/.codex/config.toml" || return 1
+}
+
+# mode / recheck ---------------------------------------------------------------
+
+@test "auth: an unknown mode is refused, and the value isn't echoed" {
+  check ANTHROPIC_API_KEY=k RC_MODE="$(printf 'recheck\nevil')"
+  fails_with 'Unknown mode'
+  ! printf '%s' "$output" | grep -qF 'evil' || return 1
+  check ANTHROPIC_API_KEY=k RC_MODE=recheck
+  [ "$status" -eq 0 ]
+  check ANTHROPIC_API_KEY=k RC_MODE=
+  [ "$status" -eq 0 ]
+}
+
+@test "auth: recheck_model is checked like claude_model" {
+  check ANTHROPIC_API_KEY=k RC_RECHECK_MODEL=claude-sonnet-5-5
+  [ "$status" -eq 0 ]
+  check ANTHROPIC_API_KEY=k RC_RECHECK_MODEL='sonnet; id'
+  fails_with 'recheck_model'
+  check ANTHROPIC_API_KEY=k RC_RECHECK_MODEL="$(printf 'sonnet\nevil')"
+  fails_with 'recheck_model'
+  ! printf '%s' "$output" | grep -qF 'evil' || return 1
+}
+
+# post_stub: a stand-in for rc-post.sh (RC_POST_BIN) whose `open` says the
+# identity is unknown, so rc-recheck.sh stops before any model call.
+post_stub() {
+  printf '#!/bin/sh\necho "$*" >>"%s/post.calls"\n[ "$1" = open ] && echo %s\n' \
+    "$BATS_TEST_TMPDIR" "'{\"head\":\"x\",\"known\":false,\"inline_ok\":true,\"inline\":[],\"outside\":[]}'" \
+    >"$BATS_TEST_TMPDIR/post"
+  chmod +x "$BATS_TEST_TMPDIR/post"
+}
+
+@test "run: full mode exports RC_PLAN_OUT to claude; no plan file -> no recheck" {
+  post_stub
+  run_stub RC_POST_BIN="$BATS_TEST_TMPDIR/post"
+  [ "$status" -eq 0 ]
+  grep -qxF "plan_out=$BATS_TEST_TMPDIR/runner/rc-plan.json" "$BATS_TEST_TMPDIR/runner/rc-run.jsonl"
+  [ ! -e "$BATS_TEST_TMPDIR/post.calls" ]
+}
+
+@test "run: full mode runs the recheck after the run when the plan file exists, keeping claude's exit code" {
+  post_stub
+  run_stub RC_POST_BIN="$BATS_TEST_TMPDIR/post" STUB_PLAN='{"posted": true, "status": "clean", "block": false, "reported": []}'
+  [ "$status" -eq 0 ]
+  grep -qx 'open 1 RC_PR_BOT_TOKEN' "$BATS_TEST_TMPDIR/post.calls"
+  grep -qF 'identity unknown' "$BATS_TEST_TMPDIR/runner/rc-recheck.md"
+  run_stub RC_POST_BIN="$BATS_TEST_TMPDIR/post" STUB_PLAN='{"posted": false}'
+  [ "$status" -eq 0 ]
+  grep -qF 'posted no review' "$BATS_TEST_TMPDIR/runner/rc-recheck.md"
+}
+
+@test "run: a failed recheck after a full run is a warning, not a failed run" {
+  printf '#!/bin/sh\nexit 7\n' >"$BATS_TEST_TMPDIR/post"
+  chmod +x "$BATS_TEST_TMPDIR/post"
+  run_stub RC_POST_BIN="$BATS_TEST_TMPDIR/post" STUB_PLAN='{"posted": true, "status": "clean"}'
+  [ "$status" -eq 0 ]
+  printf '%s' "$output" | grep -qF '::warning::Review Council: the recheck of earlier comments failed'
+}
+
+@test "run: recheck mode never starts the council run and skips the Codex setup" {
+  post_stub
+  run_stub RC_MODE=recheck RC_POST_BIN="$BATS_TEST_TMPDIR/post" RC_CODEX_MODEL=gpt-6-luna
+  [ "$status" -eq 0 ]
+  [ ! -e "$BATS_TEST_TMPDIR/claude.calls" ]
+  [ ! -e "$BATS_TEST_TMPDIR/.codex/config.toml" ]
+  [ ! -e "$BATS_TEST_TMPDIR/runner/rc-run.jsonl" ]
+  grep -qx 'open 1 RC_PR_BOT_TOKEN' "$BATS_TEST_TMPDIR/post.calls"
+  printf '%s' "$output" | grep -qF 'recheck exited with 0'
 }

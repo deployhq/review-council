@@ -78,7 +78,7 @@ case "$1" in
         [ -n "${REVIEW_FAIL:-}" ] && exit 1
         [ -n "${REVIEW_FAIL_RC:-}" ] && grep -qF REQUEST_CHANGES "$REVIEWBODY" && exit 1
         printf '{"html_url":"https://gh/review"}\n' ;;
-      *dismissals*)  cat >/dev/null; printf '{}\n' ;;
+      *dismissals*)  cat >>"$GHLOG.dismiss"; printf '\n' >>"$GHLOG.dismiss"; printf '{}\n' ;;
       *"api graphql"*mutation*) [ -n "${RESOLVE_FAIL:-}" ] && exit 1; printf '{}\n' ;;
       *replies*)     cat >>"$GHLOG.replies"; printf '\n' >>"$GHLOG.replies"; printf '{}\n' ;;
       *"api graphql"*) [ -n "${THREADS_FAIL:-}" ] && exit 1; cat "$THREADS" ;;
@@ -231,6 +231,20 @@ EOF
   [ "$status" -eq 0 ]
   has "action=created"
   ! grep -qF -- "issues/comments/42" "$GHLOG" || return 1
+}
+
+@test "review: the commands section is in the summary only under GITHUB_ACTIONS" {
+  review_fixtures
+  GITHUB_ACTIONS=true PATH="$SANDBOX" run "$SCRIPT" review 5 "$BODY" "$LEDGER"
+  [ "$status" -eq 0 ]
+  digest_sent | grep -qF '<summary>Commands</summary>'
+  digest_sent | grep -qF '`/review-council recheck` (or `check`)'
+  digest_sent | grep -qF "council's open comments"
+  review_fixtures
+  GITHUB_ACTIONS= PATH="$SANDBOX" run "$SCRIPT" review 5 "$BODY" "$LEDGER"
+  [ "$status" -eq 0 ]
+  digest_sent | grep -qF 'What the tags mean'
+  ! digest_sent | grep -qF 'Commands' || return 1
 }
 
 @test "post: under GITHUB_ACTIONS (no bot token) only github-actions[bot] is matched" {
@@ -696,6 +710,26 @@ with_code() {
   ! grep -qF "reviews/301" "$GHLOG" || return 1
 }
 
+@test "review: with RC_PLAN_OUT (a recheck follows in CI) a clean run leaves the dismissal to it" {
+  review_fixtures clean
+  only_suggestions
+  printf '[{"id":300,"state":"CHANGES_REQUESTED","user":{"login":"rc-bot"},"body":"x <!-- rc:review -->"}]\n' >"$REVIEWS"
+  RC_PLAN_OUT="$BATS_TEST_TMPDIR/plan-out.json" PATH="$SANDBOX" run "$SCRIPT" review 5 "$BODY" "$LEDGER"
+  [ "$status" -eq 0 ]
+  has "dismissed=0"
+  ! grep -qF dismissals "$GHLOG" || return 1
+}
+
+@test "review: an unreadable ledger never dismisses, even on a clean digest" {
+  review_fixtures clean
+  printf 'not json' >"$LEDGER"
+  printf '[{"id":300,"state":"CHANGES_REQUESTED","user":{"login":"rc-bot"},"body":"x <!-- rc:review -->"}]\n' >"$REVIEWS"
+  PATH="$SANDBOX" run "$SCRIPT" review 5 "$BODY" "$LEDGER"
+  [ "$status" -eq 0 ]
+  has "dismissed=0"
+  ! grep -qF dismissals "$GHLOG" || return 1
+}
+
 @test "review: a degraded run never dismisses" {
   review_fixtures degraded
   only_suggestions
@@ -1051,8 +1085,9 @@ dismissed_fixtures() {
   RESOLVE_FAIL=1 PATH="$SANDBOX" run "$SCRIPT" review 5 "$BODY" "$LEDGER" "" "$BATS_TEST_TMPDIR/recheck.json"
   [ "$status" -eq 0 ]
   has "resolved=0"
-  grep -qF 'could not be resolved automatically' "$GHLOG.replies"
+  grep -qF 'Reply here' "$GHLOG.replies"
   grep -qF '<!-- rc:fixed -->' "$GHLOG.replies"
+  ! grep -qF 'rc:fixed resolved' "$GHLOG.replies" || return 1
   # next run: our marked reply is there -> 70 is not stale
   printf '[{"id":70,"in_reply_to_id":null,"user":{"login":"rc-bot"},"path":"a.sh","line":4,"body":"gone\\n\\n<!-- rc:finding a.sh::old::gone -->"},{"id":72,"in_reply_to_id":70,"user":{"login":"rc-bot"},"body":"looks fixed\\n\\n<!-- rc:fixed -->"}]\n' >"$RCOMMENTS"
   PATH="$SANDBOX" run "$SCRIPT" stale 5 "$LEDGER"
@@ -1257,4 +1292,562 @@ FOOTER_LOCAL='<sub>Review done with [Review Council](https://github.com/deployhq
   [ ! -f "$POSTBODY" ]
   [[ "$stderr" == *"could not update comment 10"* ]] || false
   [[ "$stderr" != *"posting a fresh one"* ]] || false
+}
+
+# ---- open / recheck ----------------------------------------------------------
+# Our inline comments, one per status (we are rc-bot; alice is a person):
+#   70 open (important)             71 fixed: we resolved, `rc:fixed resolved`
+#   72 reopened: we resolved, alice unresolved   73 reopened: alice replied after us
+#   74 resolved_by_person (important)            75 legacy `rc:fixed` reply (a bot
+#      replied after: still fixed)
+#   76 we resolved, alice replied, thread resolved: fixed (on a thread we resolved
+#      only the thread state counts)             77 resolved by us, no reply
+#   78 we resolved; resolvedBy names another login (bot token): fixed, no ack
+#   79 plain `rc:fixed`, alice replied, then resolved: resolved_by_person
+#   80 we resolved, alice replied, thread unresolved: reopened
+open_fixtures() {
+  install_fake_git
+  printf '[]\n' >"$FILES"
+  jq -n '
+    def root($id; $sev; $fp): {id: $id, in_reply_to_id: null, user: {login: "rc-bot", type: "User"}, path: "a.sh",
+      line: 3, html_url: "https://gh/c/\($id)", body: "**\($sev)** · found by claude\n\n**T\($id)**\n\n<!-- rc:finding \($fp) -->"};
+    def reply($id; $to; $who; $type; $body): {id: $id, in_reply_to_id: $to, user: {login: $who, type: $type}, body: $body,
+      author_association: (if $type == "User" then "COLLABORATOR" else "NONE" end)};
+    [ root(70; "🟠 Important"; "fp70"), root(71; "🟠 Important"; "fp71"), root(72; "🔴 Critical"; "fp72"),
+      root(73; "🟠 Important"; "fp73"), root(74; "🟠 Important"; "fp74"), root(75; "🟡 Suggestion"; "fp75"),
+      root(76; "🟠 Important"; "fp76"), root(77; "🟠 Important"; "fp77"),
+      root(78; "🟠 Important"; "fp78"), root(79; "🟠 Important"; "fp79"), root(80; "🟠 Important"; "fp80"),
+      reply(90; 80; "rc-bot"; "User"; "Looks fixed\n\n<!-- rc:fixed resolved -->"),
+      reply(100; 80; "alice"; "User"; "thanks"),
+      reply(88; 78; "rc-bot"; "User"; "Looks fixed\n\n<!-- rc:fixed resolved -->"),
+      reply(89; 79; "rc-bot"; "User"; "Looks fixed\n\n<!-- rc:fixed -->"),
+      reply(99; 79; "alice"; "User"; "not fixed"),
+      reply(81; 71; "rc-bot"; "User"; "Looks fixed\n\n<!-- rc:fixed resolved -->"),
+      reply(82; 72; "rc-bot"; "User"; "Looks fixed\n\n<!-- rc:fixed resolved -->"),
+      reply(83; 73; "rc-bot"; "User"; "Looks fixed\n\n<!-- rc:fixed -->"),
+      reply(93; 73; "alice"; "User"; "No, still broken"),
+      reply(85; 75; "rc-bot"; "User"; "Re-checked at abc: this looks fixed. Resolved.\n\n<!-- rc:fixed -->"),
+      reply(95; 75; "other[bot]"; "Bot"; "bot noise"),
+      reply(86; 76; "rc-bot"; "User"; "Looks fixed\n\n<!-- rc:fixed resolved -->"),
+      reply(96; 76; "alice"; "User"; "not fixed") ]' >"$RCOMMENTS"
+  jq -n '
+    def th($n; $res; $by): {id: "PRRT_\($n)", isResolved: $res, resolvedBy: (if $by then {login: $by} else null end),
+      comments: {nodes: [{databaseId: $n}]}};
+    {data: {repository: {pullRequest: {reviewThreads: {nodes: [
+      th(70; false; null), th(71; true; "rc-bot"), th(72; false; null), th(73; false; null),
+      th(74; true; "alice"), th(75; false; null), th(76; true; "alice"), th(77; true; null),
+      th(78; true; "other-app[bot]"), th(79; true; "alice"), th(80; false; null) ]}}}}}' >"$THREADS"
+  printf '[]\n' >"$REVIEWS"
+  VERD="$BATS_TEST_TMPDIR/verdicts.json"
+}
+
+# active <blocking-line-or-empty> [extra-body]: our active request-changes review 300.
+active() {
+  jq -n --arg b "$1" --arg x "${2:-}" '[{id: 300, state: "CHANGES_REQUESTED", user: {login: "rc-bot", type: "User"},
+    html_url: "https://gh/r/300", submitted_at: "2026-01-01T00:00:00Z",
+    body: ("digest\n\n<!-- rc:review -->" + $x + (if $b == "" then "" else "\n\n<!-- rc:blocking " + $b + " -->" end))}]' >"$REVIEWS"
+}
+
+# verdicts <jq-object-merge>: head = the PR head, not degraded, nothing blocking now.
+verdicts() {
+  jq -n "{head: \"1111111111111111111111111111111111111111\", degraded: false, blocking_now: false,
+          reported: [], checked: 3, fixed: []} + ($1)" >"$VERD"
+}
+
+@test "open: every inline status, and ack from person-resolved threads" {
+  open_fixtures
+  PATH="$SANDBOX" run --separate-stderr "$SCRIPT" open 5
+  [ "$status" -eq 0 ]
+  [ "$(printf '%s' "$output" | jq -c '[.inline[] | {(.id | tostring): .status}] | add')" = \
+    '{"70":"open","71":"fixed","72":"reopened","73":"reopened","74":"resolved_by_person","75":"fixed","76":"fixed","77":"resolved","78":"fixed","79":"resolved_by_person","80":"reopened"}' ]
+  [ "$(printf '%s' "$output" | jq -c '.ack')" = '["fp74","fp79"]' ]
+  [ "$(printf '%s' "$output" | jq -c '[.inline_ok, .known, .head]')" = '[true,true,"1111111111111111111111111111111111111111"]' ]
+  [ "$(printf '%s' "$output" | jq -c '.inline[0] | {fingerprint, severity, path, line, url}')" = \
+    '{"fingerprint":"fp70","severity":"important","path":"a.sh","line":3,"url":"https://gh/c/70"}' ]
+  ! printf '%s' "$output" | jq -e '.inline[0] | has("_thread")' >/dev/null || return 1
+}
+
+@test "open: unreadable threads -> inline_ok false, still prints the object" {
+  open_fixtures
+  THREADS_FAIL=1 PATH="$SANDBOX" run --separate-stderr "$SCRIPT" open 5
+  [ "$status" -eq 0 ]
+  [ "$(printf '%s' "$output" | jq '.inline_ok')" = false ]
+  [ "$(printf '%s' "$output" | jq -r '.inline[] | select(.id == 70) | .status')" = open ]
+}
+
+@test "open: head moved -> inline_ok false" {
+  open_fixtures
+  PR_HEAD=2222222222222222222222222222222222222222 PATH="$SANDBOX" run --separate-stderr "$SCRIPT" open 5
+  [ "$status" -eq 0 ]
+  [ "$(printf '%s' "$output" | jq '.inline_ok')" = false ]
+}
+
+@test "open: unreadable timeline -> inline_ok false (unknown dismissals never count as acknowledged)" {
+  open_fixtures
+  TIMELINE_FAIL=1 PATH="$SANDBOX" run --separate-stderr "$SCRIPT" open 5
+  [ "$status" -eq 0 ]
+  [ "$(printf '%s' "$output" | jq '.inline_ok')" = false ]
+}
+
+@test "open: blocking from the active reviews ('' for untracked or no line)" {
+  open_fixtures
+  active "fp70 fp72"
+  PATH="$SANDBOX" run --separate-stderr "$SCRIPT" open 5
+  [ "$(printf '%s' "$output" | jq -c '[.active, .blocking]')" = '[[300],["fp70","fp72"]]' ]
+  active "fp70" $'\n\n<!-- rc:blocking-untracked -->'
+  PATH="$SANDBOX" run --separate-stderr "$SCRIPT" open 5
+  [ "$(printf '%s' "$output" | jq -c '.blocking')" = '["","fp70"]' ]
+  active ""
+  PATH="$SANDBOX" run --separate-stderr "$SCRIPT" open 5
+  [ "$(printf '%s' "$output" | jq -c '.blocking')" = '[""]' ]
+}
+
+# outside_round_trip: post a review whose b.sh finding is outside the diff, then
+# make that review ours on the PR (review 300, submitted 2026-01-01).
+outside_round_trip() {
+  review_fixtures
+  PATH="$SANDBOX" run "$SCRIPT" review 5 "$BODY" "$LEDGER"
+  [ "$status" -eq 0 ]
+  jq '[{id: 300, state: "CHANGES_REQUESTED", user: {login: "rc-bot", type: "User"}, html_url: "https://gh/r/300",
+        submitted_at: "2026-01-01T00:00:00Z", body: .body}]' "$REVIEWBODY.REQUEST_CHANGES" >"$REVIEWS"
+  printf '[]\n' >"$RCOMMENTS"
+  printf '{"data":{"repository":{"pullRequest":{"reviewThreads":{"nodes":[]}}}}}\n' >"$THREADS"
+  VERD="$BATS_TEST_TMPDIR/verdicts.json"
+}
+
+@test "outside: compose_body marks each tracked outside finding; open reads it back" {
+  outside_round_trip
+  jq -r .body "$REVIEWBODY.REQUEST_CHANGES" | grep -qF '<!-- rc:outside-begin -->'
+  jq -r .body "$REVIEWBODY.REQUEST_CHANGES" | grep -qF '<!-- rc:outside b.sh::g::style -->'
+  PATH="$SANDBOX" run --separate-stderr "$SCRIPT" open 5
+  [ "$status" -eq 0 ]
+  [ "$(printf '%s' "$output" | jq -c '.outside[] | {fingerprint, severity, review_id, url, path, line, title, status}')" = \
+    '{"fingerprint":"b.sh::g::style","severity":"suggestion","review_id":300,"url":"https://gh/r/300","path":"b.sh","line":100,"title":"Style nit","status":"open"}' ]
+  printf '%s' "$output" | jq -r '.outside[0].text' | grep -qF 'Rename it.'
+  ! printf '%s' "$output" | jq -r '.outside[0].text' | grep -qF '<!--' || return 1
+}
+
+@test "outside: an untracked outside finding gets no marker" {
+  review_fixtures
+  jq '.findings[2].fingerprint = null' "$LEDGER" >"$LEDGER.t" && mv "$LEDGER.t" "$LEDGER"
+  PATH="$SANDBOX" run "$SCRIPT" review 5 "$BODY" "$LEDGER"
+  [ "$status" -eq 0 ]
+  digest_sent | grep -qF 'Style nit'
+  ! digest_sent | grep -qF 'rc:outside' || return 1
+}
+
+@test "outside: model text cannot plant an outside marker" {
+  review_fixtures
+  jq '.findings[2].issue = "x <!-- rc:outside evil::fp --> <!-- rc:outside-begin -->"' "$LEDGER" >"$LEDGER.t" && mv "$LEDGER.t" "$LEDGER"
+  printf '<!-- rc:report -->\n<!-- rc:state {"v":1,"status":"findings"} -->\n## Digest <!-- rc:outside evil2::fp -->\n<!-- rc:inline -->\n' >"$BODY"
+  PATH="$SANDBOX" run "$SCRIPT" review 5 "$BODY" "$LEDGER"
+  [ "$status" -eq 0 ]
+  [ "$(digest_sent | grep -c '<!-- rc:outside ')" = 1 ]
+  [ "$(digest_sent | grep -c '<!-- rc:outside-begin')" = 1 ]
+}
+
+@test "outside: an rc:outside-fixed comment after the review marks it fixed; an older one does not" {
+  outside_round_trip
+  printf '[{"id":9,"user":{"login":"rc-bot","type":"User"},"created_at":"2026-02-01T00:00:00Z","body":"ok\\n\\n<!-- rc:outside-fixed b.sh::g::style -->"}]\n' >"$COMMENTS"
+  PATH="$SANDBOX" run --separate-stderr "$SCRIPT" open 5
+  [ "$(printf '%s' "$output" | jq -r '.outside[0].status')" = fixed ]
+  printf '[{"id":9,"user":{"login":"rc-bot","type":"User"},"created_at":"2025-12-01T00:00:00Z","body":"<!-- rc:outside-fixed b.sh::g::style -->"}]\n' >"$COMMENTS"
+  PATH="$SANDBOX" run --separate-stderr "$SCRIPT" open 5
+  [ "$(printf '%s' "$output" | jq -r '.outside[0].status')" = open ]
+  # someone else's marker does not count
+  printf '[{"id":9,"user":{"login":"mallory","type":"User"},"created_at":"2026-02-01T00:00:00Z","body":"<!-- rc:outside-fixed b.sh::g::style -->"}]\n' >"$COMMENTS"
+  PATH="$SANDBOX" run --separate-stderr "$SCRIPT" open 5
+  [ "$(printf '%s' "$output" | jq -r '.outside[0].status')" = open ]
+}
+
+@test "outside: a fingerprint with an inline comment is left out of outside" {
+  outside_round_trip
+  printf '[{"id":70,"in_reply_to_id":null,"user":{"login":"rc-bot"},"path":"b.sh","line":1,"body":"x\\n\\n<!-- rc:finding b.sh::g::style -->"}]\n' >"$RCOMMENTS"
+  PATH="$SANDBOX" run --separate-stderr "$SCRIPT" open 5
+  [ "$(printf '%s' "$output" | jq '.outside | length')" = 0 ]
+}
+
+@test "recheck: degraded -> nothing posted, integer output" {
+  open_fixtures
+  active "fp70"
+  verdicts '{degraded: true, fixed: [{kind: "inline", id: 70, summary: "s"}]}'
+  PATH="$SANDBOX" run --separate-stderr "$SCRIPT" recheck 5 "$VERD"
+  [ "$status" -eq 0 ]
+  has "fixed_inline=0"
+  has "dismissed=0"
+  has "held=0"
+  [[ "$stderr" == *degraded* ]] || false
+  ! grep -qF mutation "$GHLOG" || return 1
+  [ ! -f "$GHLOG.replies" ] && [ ! -f "$GHLOG.dismiss" ]
+}
+
+@test "recheck: head moved, missing degraded, unknown identity -> nothing done" {
+  open_fixtures
+  active "fp70"
+  verdicts '{head: "2222222222222222222222222222222222222222", fixed: [{kind: "inline", id: 70}]}'
+  PATH="$SANDBOX" run --separate-stderr "$SCRIPT" recheck 5 "$VERD"
+  [ "$status" -eq 0 ]
+  [[ "$stderr" == *"no longer the PR head"* ]] || false
+  verdicts '{fixed: [{kind: "inline", id: 70}]}'
+  jq 'del(.degraded)' "$VERD" >"$VERD.t" && mv "$VERD.t" "$VERD"
+  PATH="$SANDBOX" run --separate-stderr "$SCRIPT" recheck 5 "$VERD"
+  [[ "$stderr" == *degraded* ]] || false
+  verdicts '{fixed: [{kind: "inline", id: 70}]}'
+  MYTOK=t USER_FAIL=1 PATH="$SANDBOX" run --separate-stderr "$SCRIPT" recheck 5 "$VERD" MYTOK
+  [[ "$stderr" == *"another bot"* ]] || false
+  PR_HEAD=2222222222222222222222222222222222222222 PATH="$SANDBOX" run --separate-stderr "$SCRIPT" recheck 5 "$VERD"
+  [[ "$stderr" == *"can't be read"* ]] || false
+  ! grep -qF mutation "$GHLOG" || return 1
+  [ ! -f "$GHLOG.replies" ] && [ ! -f "$GHLOG.dismiss" ]
+}
+
+@test "recheck: resolves then replies 'rc:fixed resolved' with the reasons" {
+  open_fixtures
+  verdicts '{fixed: [{kind: "inline", id: 70, summary: "The guard is there now.", points: ["a.sh:3 checks it", "tests cover it"]}]}'
+  PATH="$SANDBOX" run --separate-stderr "$SCRIPT" recheck 5 "$VERD"
+  [ "$status" -eq 0 ]
+  has "fixed_inline=1"
+  has "resolved=1"
+  logged "[id=PRRT_70]"
+  logged "pulls/5/comments/70/replies"
+  _r="$(jq -r .body "$GHLOG.replies")"
+  printf '%s' "$_r" | head -1 | grep -qxF '**Looks fixed** at `1111111` · rechecked by Review Council'
+  printf '%s' "$_r" | grep -qF 'The guard is there now.'
+  printf '%s' "$_r" | grep -qF "<summary>Why we think it's fixed</summary>"
+  printf '%s' "$_r" | grep -qxF -- '- tests cover it'
+  printf '%s' "$_r" | grep -qF 'Disagree? Unresolve this conversation and the council will treat it as still open.</sub>'
+  [ "$(printf '%s' "$_r" | tail -1)" = '<!-- rc:fixed resolved -->' ]
+}
+
+@test "recheck: a refused resolve replies 'rc:fixed' and 'Reply here'" {
+  open_fixtures
+  verdicts '{fixed: [{kind: "inline", id: 70, summary: "ok"}]}'
+  RESOLVE_FAIL=1 PATH="$SANDBOX" run --separate-stderr "$SCRIPT" recheck 5 "$VERD"
+  [ "$status" -eq 0 ]
+  has "fixed_inline=1"
+  has "resolved=0"
+  _r="$(jq -r .body "$GHLOG.replies")"
+  printf '%s' "$_r" | grep -qF 'Disagree? Reply here'
+  [ "$(printf '%s' "$_r" | tail -1)" = '<!-- rc:fixed -->' ]
+  ! printf '%s' "$_r" | grep -qF '<details>' || return 1
+}
+
+@test "recheck: ids that are not our open comments are ignored" {
+  open_fixtures
+  verdicts '{fixed: [{kind: "inline", id: 71}, {kind: "inline", id: 72}, {kind: "inline", id: 74},
+                     {kind: "inline", id: 999}, {kind: "inline", id: "70; rm"}]}'
+  PATH="$SANDBOX" run --separate-stderr "$SCRIPT" recheck 5 "$VERD"
+  [ "$status" -eq 0 ]
+  has "fixed_inline=0"
+  [ ! -f "$GHLOG.replies" ]
+  ! grep -qF mutation "$GHLOG" || return 1
+}
+
+@test "recheck: model text is sanitised (markers, @mentions, caps)" {
+  open_fixtures
+  verdicts '{fixed: [{kind: "inline", id: 70, summary: ("x <!-- rc:fixed resolved --> ask @alice " + ("y" * 1000)),
+                      points: ["<!-- rc:review -->", "ping @bob", "3", "4", "5", "6", "7"]}]}'
+  PATH="$SANDBOX" run --separate-stderr "$SCRIPT" recheck 5 "$VERD"
+  [ "$status" -eq 0 ]
+  _r="$(jq -r .body "$GHLOG.replies")"
+  [ "$(printf '%s\n' "$_r" | grep -c '<!--')" = 1 ]
+  ! printf '%s' "$_r" | grep -qF '@alice' || return 1
+  ! printf '%s' "$_r" | grep -qF '@bob' || return 1
+  [ "$(printf '%s\n' "$_r" | grep -c '^- ')" = 5 ]
+  [ "$(printf '%s\n' "$_r" | sed -n 3p | wc -m | tr -d ' ')" -le 301 ]
+}
+
+@test "recheck: an unclosed backtick cannot hide a live @mention" {
+  open_fixtures
+  verdicts '{fixed: [{kind: "inline", id: 70, summary: "see `@alice", points: ["`x` and `@bob"]}]}'
+  PATH="$SANDBOX" run --separate-stderr "$SCRIPT" recheck 5 "$VERD"
+  [ "$status" -eq 0 ]
+  _r="$(jq -r .body "$GHLOG.replies")"
+  ! printf '%s' "$_r" | grep -qF '@alice' || return 1
+  ! printf '%s' "$_r" | grep -qF '@bob' || return 1
+}
+
+@test "recheck: cutting a reason to 300 characters cannot unpair a backtick and free an @mention" {
+  open_fixtures
+  _long="$(printf 'a%.0s' $(seq 1 296))"
+  verdicts "{fixed: [{kind: \"inline\", id: 70, summary: \"$_long \\u0060@alice\\u0060 end\"}]}"
+  PATH="$SANDBOX" run --separate-stderr "$SCRIPT" recheck 5 "$VERD"
+  [ "$status" -eq 0 ]
+  _r="$(jq -r .body "$GHLOG.replies")"
+  # the cut lands right after "`@a": no live mention may remain in the reason
+  _s="$(printf '%s\n' "$_r" | grep '^aaaa')"
+  [ -n "$_s" ]
+  ! printf '%s' "$_s" | grep -qE '@[A-Za-z]' || return 1
+}
+
+@test "recheck: one grouped PR comment for the fixed outside findings" {
+  outside_round_trip
+  # a second tracked outside finding in the same review
+  jq '.[0].body |= sub("<!-- rc:review -->"; "<!-- rc:outside-begin -->\n\n`c.sh:7`\n\n**🟠 Important**\n\n**Other [thing]**\n\n<!-- rc:outside c.sh::h::x -->\n\n<!-- rc:review -->")' \
+    "$REVIEWS" >"$REVIEWS.t" && mv "$REVIEWS.t" "$REVIEWS"
+  verdicts '{fixed: [{kind: "outside", fingerprint: "b.sh::g::style", summary: "Renamed.", points: ["see b.sh"]},
+                     {kind: "outside", fingerprint: "c.sh::h::x", summary: "Gone."},
+                     {kind: "outside", fingerprint: "nope::fp", summary: "x"}]}'
+  PATH="$SANDBOX" run --separate-stderr "$SCRIPT" recheck 5 "$VERD"
+  [ "$status" -eq 0 ]
+  has "outside_fixed=2"
+  [ "$(grep -c 'issues/5/comments.*POST' "$GHLOG")" = 1 ]
+  _b="$(jq -r .body "$POSTBODY")"
+  printf '%s' "$_b" | grep -qF '**Looks fixed** at `1111111`: [Style nit](https://gh/r/300) from an earlier review. Renamed.'
+  printf '%s' "$_b" | grep -qF '[Other thing](https://gh/r/300) from an earlier review. Gone.'
+  printf '%s' "$_b" | grep -qxF '<!-- rc:outside-fixed b.sh::g::style -->'
+  printf '%s' "$_b" | grep -qxF '<!-- rc:outside-fixed c.sh::h::x -->'
+  ! printf '%s' "$_b" | grep -qF 'nope::fp' || return 1
+  [ "$(printf '%s' "$_b" | tail -1)" = '<sub>Recheck by [Review Council](https://github.com/deployhq/review-council/) · posted by @rc-bot (not a personal comment)</sub>' ]
+}
+
+@test "recheck: dismisses once every blocker is satisfied" {
+  open_fixtures
+  # fp70 fixed now, fp74 resolved by a person (ack), fp71 fixed earlier, rep reported again (not blocking)
+  active "fp70 fp71 fp74 rep"
+  # the two reopened important/critical comments are acknowledged elsewhere? no: drop them for this case
+  jq '[.[] | select(.id != 72 and .id != 73 and .id != 80 and .in_reply_to_id != 72 and .in_reply_to_id != 73 and .in_reply_to_id != 80)]' "$RCOMMENTS" >"$RCOMMENTS.t" && mv "$RCOMMENTS.t" "$RCOMMENTS"
+  verdicts '{reported: ["rep"], fixed: [{kind: "inline", id: 70, summary: "ok"}]}'
+  PATH="$SANDBOX" run --separate-stderr "$SCRIPT" recheck 5 "$VERD"
+  [ "$status" -eq 0 ]
+  has "dismissed=1"
+  has "held=0"
+  logged "reviews/300/dismissals"
+  [ "$(jq -r .message "$GHLOG.dismiss")" = 'Rechecked at 1111111: 1 of 3 open findings look fixed; no critical or important finding is left open.' ]
+}
+
+@test "recheck: no dismissal while a reopened comment holds" {
+  open_fixtures
+  active "fp70"
+  verdicts '{fixed: [{kind: "inline", id: 70, summary: "ok"}]}'
+  PATH="$SANDBOX" run --separate-stderr "$SCRIPT" recheck 5 "$VERD"
+  [ "$status" -eq 0 ]
+  has "fixed_inline=1"
+  has "dismissed=0"
+  has "held=3"
+  [ ! -f "$GHLOG.dismiss" ]
+}
+
+# dismissable: only comment 70 (open, important), our review 300 blocks on fp70.
+dismissable() {
+  open_fixtures
+  jq '[.[] | select(.id == 70)]' "$RCOMMENTS" >"$RCOMMENTS.t" && mv "$RCOMMENTS.t" "$RCOMMENTS"
+  active "${1:-fp70}" "${2:-}"
+}
+
+@test "recheck: blocking_now keeps the block" {
+  dismissable
+  verdicts '{blocking_now: true, fixed: [{kind: "inline", id: 70}]}'
+  PATH="$SANDBOX" run --separate-stderr "$SCRIPT" recheck 5 "$VERD"
+  has "fixed_inline=1"
+  has "dismissed=0"
+}
+
+@test "recheck: an untracked blocker keeps the block" {
+  dismissable fp70 $'\n\n<!-- rc:blocking-untracked -->'
+  verdicts '{fixed: [{kind: "inline", id: 70}]}'
+  PATH="$SANDBOX" run --separate-stderr "$SCRIPT" recheck 5 "$VERD"
+  has "dismissed=0"
+  has "held=1"
+}
+
+@test "recheck: a still-open blocker keeps the block; still reported but not blocking satisfies it" {
+  dismissable "fp70 other"
+  verdicts '{fixed: [{kind: "inline", id: 70}]}'
+  PATH="$SANDBOX" run --separate-stderr "$SCRIPT" recheck 5 "$VERD"
+  has "dismissed=0"
+  verdicts '{reported: ["other"], fixed: [{kind: "inline", id: 70}]}'
+  rm -f "$GHLOG.replies"
+  PATH="$SANDBOX" run --separate-stderr "$SCRIPT" recheck 5 "$VERD"
+  has "dismissed=1"
+}
+
+@test "recheck: an open critical comment reported again by this run no longer holds" {
+  dismissable "fp70 other"
+  jq '. + [{id: 69, in_reply_to_id: null, user: {login: "rc-bot", type: "User"}, path: "a.sh", line: 3,
+            html_url: "https://gh/c/69", body: "**🔴 Critical** · found by claude\n\n**T69**\n\n<!-- rc:finding other -->"}]' \
+    "$RCOMMENTS" >"$RCOMMENTS.t" && mv "$RCOMMENTS.t" "$RCOMMENTS"
+  verdicts '{fixed: [{kind: "inline", id: 70}]}'
+  PATH="$SANDBOX" run --separate-stderr "$SCRIPT" recheck 5 "$VERD"
+  has "dismissed=0"
+  verdicts '{reported: ["other"], fixed: [{kind: "inline", id: 70}]}'
+  rm -f "$GHLOG.replies"
+  PATH="$SANDBOX" run --separate-stderr "$SCRIPT" recheck 5 "$VERD"
+  has "dismissed=1"
+  has "held=0"
+}
+
+@test "recheck: a finding back outside the diff is rechecked, though its old inline comment looks fixed" {
+  open_fixtures
+  # 71: our inline comment, "looks fixed" and resolved by us -> fixed.
+  jq '[.[] | select(.id == 71 or .in_reply_to_id == 71)]' "$RCOMMENTS" >"$RCOMMENTS.t" && mv "$RCOMMENTS.t" "$RCOMMENTS"
+  active "fp71"
+  # A later review lists fp71 again, outside the diff.
+  jq '. + [{id: 301, state: "COMMENTED", user: {login: "rc-bot", type: "User"}, html_url: "https://gh/r/301",
+            submitted_at: "2026-01-02T00:00:00Z",
+            body: "digest\n\n<!-- rc:outside-begin -->\n\n`a.sh:9`\n\n**🟠 Important**\n\n**Back again**\n\n<!-- rc:outside fp71 -->\n\n<!-- rc:review -->"}]' \
+    "$REVIEWS" >"$REVIEWS.t" && mv "$REVIEWS.t" "$REVIEWS"
+  PATH="$SANDBOX" run --separate-stderr "$SCRIPT" open 5
+  [ "$(printf '%s' "$output" | jq -c '[.inline[] | {id, status}]')" = '[{"id":71,"status":"fixed"}]' ]
+  [ "$(printf '%s' "$output" | jq -c '[.outside[] | {fingerprint, status}]')" = '[{"fingerprint":"fp71","status":"open"}]' ]
+  verdicts '{}'
+  PATH="$SANDBOX" run --separate-stderr "$SCRIPT" recheck 5 "$VERD"
+  has "dismissed=0"
+  has "held=1"
+}
+
+@test "recheck: a reopened comment holds even when this run reported it again" {
+  open_fixtures
+  # 70 open, 73 reopened (a person replied after our plain rc:fixed reply).
+  jq '[.[] | select(.id == 70 or .id == 73 or .in_reply_to_id == 73)]' "$RCOMMENTS" >"$RCOMMENTS.t" && mv "$RCOMMENTS.t" "$RCOMMENTS"
+  active "fp70"
+  verdicts '{reported: ["fp73"], fixed: [{kind: "inline", id: 70}]}'
+  PATH="$SANDBOX" run --separate-stderr "$SCRIPT" recheck 5 "$VERD"
+  has "dismissed=0"
+  has "held=1"
+}
+
+@test "recheck: an open critical finding outside the diff holds the block, even from a COMMENT review" {
+  dismissable "fp70"
+  jq '. + [{id: 301, state: "COMMENTED", user: {login: "rc-bot", type: "User"}, html_url: "https://gh/r/301",
+            submitted_at: "2026-01-02T00:00:00Z",
+            body: "digest\n\n<!-- rc:outside-begin -->\n\n`c.sh:7`\n\n**🔴 Critical**\n\n**Bad thing**\n\n<!-- rc:outside c.sh::h::x -->\n\n<!-- rc:review -->"}]' \
+    "$REVIEWS" >"$REVIEWS.t" && mv "$REVIEWS.t" "$REVIEWS"
+  PATH="$SANDBOX" run --separate-stderr "$SCRIPT" open 5
+  [ "$(printf '%s' "$output" | jq -c '[.outside[] | {fingerprint, severity, status}]')" = '[{"fingerprint":"c.sh::h::x","severity":"critical","status":"open"}]' ]
+  verdicts '{fixed: [{kind: "inline", id: 70}]}'
+  PATH="$SANDBOX" run --separate-stderr "$SCRIPT" recheck 5 "$VERD"
+  has "dismissed=0"
+  has "held=1"
+  [ ! -f "$GHLOG.dismiss" ]
+}
+
+@test "recheck: an open important comment not re-checked fixed holds the block" {
+  dismissable "fp70"
+  verdicts '{}'
+  PATH="$SANDBOX" run --separate-stderr "$SCRIPT" recheck 5 "$VERD"
+  has "dismissed=0"
+  has "held=1"
+}
+
+@test "recheck: nothing open (all resolved by people) -> no model needed, dismissed" {
+  open_fixtures
+  jq '[.[] | select(.id == 74)]' "$RCOMMENTS" >"$RCOMMENTS.t" && mv "$RCOMMENTS.t" "$RCOMMENTS"
+  active "fp74"
+  verdicts '{checked: 0}'
+  PATH="$SANDBOX" run --separate-stderr "$SCRIPT" recheck 5 "$VERD"
+  [ "$status" -eq 0 ]
+  has "checked=0"
+  has "dismissed=1"
+}
+
+@test "recheck: a fixed outside blocker satisfies the block" {
+  outside_round_trip
+  jq '.[0].body |= sub("<!-- rc:blocking [^>]*-->"; "<!-- rc:blocking b.sh::g::style -->")' "$REVIEWS" >"$REVIEWS.t" && mv "$REVIEWS.t" "$REVIEWS"
+  verdicts '{fixed: [{kind: "outside", fingerprint: "b.sh::g::style", summary: "Renamed."}]}'
+  PATH="$SANDBOX" run --separate-stderr "$SCRIPT" recheck 5 "$VERD"
+  [ "$status" -eq 0 ]
+  has "outside_fixed=1"
+  has "dismissed=1"
+}
+
+# ---- review path: recheck-era changes -----------------------------------------
+
+@test "review: the looks-fixed reply uses the new format, with the re-check's reasons" {
+  stale_fixtures
+  printf '{"fixed":[70],"why":{"70":{"summary":"Removed in this push.","points":["gone from a.sh"]}}}\n' >"$BATS_TEST_TMPDIR/recheck.json"
+  PATH="$SANDBOX" run "$SCRIPT" review 5 "$BODY" "$LEDGER" "" "$BATS_TEST_TMPDIR/recheck.json"
+  [ "$status" -eq 0 ]
+  _r="$(jq -r .body "$GHLOG.replies")"
+  printf '%s' "$_r" | grep -qF 'Removed in this push.'
+  printf '%s' "$_r" | grep -qxF -- '- gone from a.sh'
+  [ "$(printf '%s' "$_r" | tail -1)" = '<!-- rc:fixed resolved -->' ]
+}
+
+@test "review: without reasons the reply says the finding is no longer reported" {
+  stale_fixtures
+  printf '{"fixed":[70]}\n' >"$BATS_TEST_TMPDIR/recheck.json"
+  PATH="$SANDBOX" run "$SCRIPT" review 5 "$BODY" "$LEDGER" "" "$BATS_TEST_TMPDIR/recheck.json"
+  [ "$status" -eq 0 ]
+  _r="$(jq -r .body "$GHLOG.replies")"
+  printf '%s' "$_r" | grep -qxF 'This finding is no longer reported.'
+  ! printf '%s' "$_r" | grep -qF '<details>' || return 1
+}
+
+@test "review: a reopened blocking comment holds the block and is never stale" {
+  stale_fixtures clean
+  only_suggestions
+  jq '.[0].body = "**🟠 Important**\n\n**Bug**\n\n<!-- rc:finding a.sh::old::gone -->"
+      | . + [{id: 80, in_reply_to_id: 70, user: {login: "rc-bot"}, body: "x\n\n<!-- rc:fixed resolved -->"}]' "$RCOMMENTS" >"$RCOMMENTS.t" && mv "$RCOMMENTS.t" "$RCOMMENTS"
+  printf '[{"id":300,"state":"CHANGES_REQUESTED","user":{"login":"rc-bot"},"body":"x <!-- rc:review -->"}]\n' >"$REVIEWS"
+  PATH="$SANDBOX" run "$SCRIPT" review 5 "$BODY" "$LEDGER"
+  [ "$status" -eq 0 ]
+  has "dismissed=0"
+  PATH="$SANDBOX" run "$SCRIPT" stale 5 "$LEDGER"
+  [ "$output" = "[]" ]
+}
+
+@test "review: a finding whose thread a person resolved never requests changes again" {
+  review_fixtures
+  jq '.findings = [.findings[0]]' "$LEDGER" >"$LEDGER.t" && mv "$LEDGER.t" "$LEDGER"
+  printf '[{"id":70,"in_reply_to_id":null,"user":{"login":"rc-bot"},"path":"a.sh","line":3,"body":"**🔴 Critical**\\n\\n<!-- rc:finding a.sh::f::bug -->"}]\n' >"$RCOMMENTS"
+  printf '{"data":{"repository":{"pullRequest":{"reviewThreads":{"nodes":[{"id":"PRRT_a","isResolved":true,"resolvedBy":{"login":"alice"},"comments":{"nodes":[{"databaseId":70}]}}]}}}}}\n' >"$THREADS"
+  PATH="$SANDBOX" run "$SCRIPT" review 5 "$BODY" "$LEDGER"
+  [ "$status" -eq 0 ]
+  has "review_event=COMMENT"
+  # resolved by us (or by nobody we know) is not an acknowledgement
+  sed -i.bak 's/"login":"alice"/"login":"rc-bot"/' "$THREADS"
+  PATH="$SANDBOX" run "$SCRIPT" review 5 "$BODY" "$LEDGER"
+  has "review_event=REQUEST_CHANGES"
+}
+
+@test "review: an untracked blocking finding is recorded for the recheck" {
+  review_fixtures
+  jq '.findings[2].fingerprint = null | .findings[2].severity = "critical"' "$LEDGER" >"$LEDGER.t" && mv "$LEDGER.t" "$LEDGER"
+  PATH="$SANDBOX" run "$SCRIPT" review 5 "$BODY" "$LEDGER"
+  [ "$status" -eq 0 ]
+  jq -r .body "$REVIEWBODY.REQUEST_CHANGES" | grep -qxF '<!-- rc:blocking-untracked -->'
+  jq -r .body "$REVIEWBODY.REQUEST_CHANGES" | tail -1 | grep -qxF '<!-- rc:blocking a.sh::f::bug a.sh::f::range -->'
+}
+
+@test "review: RC_PLAN_OUT gets the run's plan, posted false until it posts" {
+  review_fixtures
+  export RC_PLAN_OUT="$BATS_TEST_TMPDIR/plan-out.json"
+  PATH="$SANDBOX" run "$SCRIPT" review 5 "$BODY" "$LEDGER"
+  [ "$status" -eq 0 ]
+  [ "$(jq -c . "$RC_PLAN_OUT")" = '{"head":"1111111111111111111111111111111111111111","status":"findings","block":true,"reported":["a.sh::f::bug","a.sh::f::range","b.sh::g::style"],"posted":true}' ]
+  PATH="$SANDBOX" run "$SCRIPT" review x "$BODY" "$LEDGER"
+  [ "$status" -ne 0 ]
+  [ "$(jq -c .posted "$RC_PLAN_OUT")" = false ]
+  PATH="$SANDBOX" run "$SCRIPT" review 5 "$BATS_TEST_TMPDIR/missing.md" "$LEDGER"
+  [ "$status" -ne 0 ]
+  [ "$(jq -c .posted "$RC_PLAN_OUT")" = false ]
+  unset RC_PLAN_OUT
+}
+
+@test "review: RC_PLAN_OUT blocks unless rc:state calls the run clean, whatever the ledger says" {
+  # rc:state says findings, but the ledger has suggestions only
+  review_fixtures findings
+  only_suggestions
+  export RC_PLAN_OUT="$BATS_TEST_TMPDIR/plan-out.json"
+  PATH="$SANDBOX" run "$SCRIPT" review 5 "$BODY" "$LEDGER"
+  [ "$status" -eq 0 ]
+  [ "$(jq -c '[.status, .block]' "$RC_PLAN_OUT")" = '["findings",true]' ]
+  # the same ledger on a clean run does not block
+  review_fixtures clean
+  only_suggestions
+  PATH="$SANDBOX" run "$SCRIPT" review 5 "$BODY" "$LEDGER"
+  [ "$status" -eq 0 ]
+  [ "$(jq -c '[.status, .block]' "$RC_PLAN_OUT")" = '["clean",false]' ]
+  unset RC_PLAN_OUT
+}
+
+@test "review: an unreadable ledger makes RC_PLAN_OUT report a block" {
+  review_fixtures
+  export RC_PLAN_OUT="$BATS_TEST_TMPDIR/plan-out.json"
+  printf 'not json' >"$LEDGER"
+  PATH="$SANDBOX" run "$SCRIPT" review 5 "$BODY" "$LEDGER"
+  [ "$status" -eq 0 ]
+  [ "$(jq -c '[.block, .posted, .reported]' "$RC_PLAN_OUT")" = '[true,true,[]]' ]
+  unset RC_PLAN_OUT
 }

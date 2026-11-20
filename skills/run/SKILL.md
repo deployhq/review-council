@@ -928,7 +928,7 @@ RC_DIGEST="$(mktemp "${TMPDIR:-/tmp}/rc-digest.XXXXXX")"
 Remember both literal paths (shell variables do not survive between `Bash` calls). If the §6.5 command fails, post nothing and say why.
 
 ### 6.6.4 Re-check earlier inline comments
-A re-run must not leave stale comments open, nor close real problems just because this run didn't mention them. **Skip this subsection when `rc:state` status is `degraded`** (a failed reviewer reports nothing, not "fixed"). Otherwise list our earlier inline comments whose finding this run no longer reports (`<VAR>` = the reader-validated `pr_comments.bot_token_env`, `''` when none):
+A re-run must not leave stale comments open, nor close real problems just because this run didn't mention them. **Under `settings.ci=true`, skip this subsection** and pass `''` as the re-check file in 6.6.5: the CI workflow runs `scripts/rc-recheck.sh` itself after the run. **Skip it too when `rc:state` status is `degraded`** (a failed reviewer reports nothing, not "fixed"). Otherwise list our earlier inline comments whose finding this run no longer reports (`<VAR>` = the reader-validated `pr_comments.bot_token_env`, `''` when none):
 ```bash
 "${CLAUDE_PLUGIN_ROOT}/scripts/rc-post.sh" stale <pr-number> '<ledger-file>' '<VAR>'
 ```
@@ -937,10 +937,10 @@ It prints a JSON array `[{id, fingerprint, path, line, body}]` of our unresolved
 - `STILL_PRESENT` — the problem is still there.
 - `DUPLICATE_OF <fingerprint>` — still there, and it is the same problem as one of this run's findings (reworded under a new fingerprint).
 
-Any unclear case is `STILL_PRESENT`. Then write the re-check file in one `Bash` call (quoted heredoc, random delimiter as in §5.7; `fixed` = the ids judged `FIXED`, `covered` = the fingerprints named by `DUPLICATE_OF`):
+For each `FIXED` id also ask for a one-sentence `summary` and up to 5 short `points` (why it looks fixed, citing the code). Any unclear case is `STILL_PRESENT`. Then write the re-check file in one `Bash` call (quoted heredoc, random delimiter as in §5.7; `fixed` = the ids judged `FIXED`, `covered` = the fingerprints named by `DUPLICATE_OF`, `why` = optional, the summary and points per `FIXED` id, shown in the "looks fixed" reply):
 ```bash
 RC_RECHECK="$(mktemp "${TMPDIR:-/tmp}/rc-recheck.XXXXXX")" && cat >"$RC_RECHECK" <<'RC_RECHECK_<random>'
-{"fixed": [<id>, …], "covered": ["<fingerprint>", …]}
+{"fixed": [<id>, …], "covered": ["<fingerprint>", …], "why": {"<id>": {"summary": "…", "points": ["…"]}}}
 RC_RECHECK_<random>
 echo "$RC_RECHECK"
 ```
@@ -955,7 +955,7 @@ Show the composed digest, the target, and what the re-check will resolve, and **
 ```bash
 "${CLAUDE_PLUGIN_ROOT}/scripts/rc-post.sh" review <pr-number> "$RC_DIGEST" '<ledger-file>' "<pr_comments.bot_token_env>" '<recheck-file or empty>'
 ```
-Pass the resolved `pr_comments.bot_token_env` (from Step 0) as the fourth argument (`""` when none), and the 6.6.4 re-check file as the fifth (`""` when 6.6.4 was skipped or found nothing). The script reads that env var; when it is unset/empty everything posts as the authenticated `gh` user (the default identity), otherwise as the bot that token authenticates. It resolves the re-checked `fixed` comments, dismisses our earlier "request changes" when nothing blocks any more (no critical/important finding this run, and none of our critical/important comments left open without the re-check finding it fixed), then posts **one review**: the digest as its body and the inline comments (skipping findings we already commented on). If GitHub accepts no review, it posts the digest as a PR comment instead. It prints `action=review|comment`, `url=` (the review, or that comment), `review_url=`, `review_event=`, `inline_new=`, `kept=`, `resolved=`, `dismissed=`, `outside=`. Surface the `url` with the counts. On non-zero exit, surface the script's stderr and **do not** claim a post happened. If the ledger file is missing (§5.7 failed), use `post <pr-number> "$RC_DIGEST" "<pr_comments.bot_token_env>"` instead — the digest alone. Then `rm -f '<digest-file>' '<body-file>' '<recheck-file>'` (the literal paths).
+Pass the resolved `pr_comments.bot_token_env` (from Step 0) as the fourth argument (`""` when none), and the 6.6.4 re-check file as the fifth (`""` when 6.6.4 was skipped, ran under `settings.ci=true`, or found nothing). The script reads that env var; when it is unset/empty everything posts as the authenticated `gh` user (the default identity), otherwise as the bot that token authenticates. It resolves the re-checked `fixed` comments, dismisses our earlier "request changes" when nothing blocks any more (no critical/important finding this run, and none of our critical/important comments left open without the re-check finding it fixed), then posts **one review**: the digest as its body and the inline comments (skipping findings we already commented on). If GitHub accepts no review, it posts the digest as a PR comment instead. It prints `action=review|comment`, `url=` (the review, or that comment), `review_url=`, `review_event=`, `inline_new=`, `kept=`, `resolved=`, `dismissed=`, `outside=`. Surface the `url` with the counts. On non-zero exit, surface the script's stderr and **do not** claim a post happened. If the ledger file is missing (§5.7 failed), use `post <pr-number> "$RC_DIGEST" "<pr_comments.bot_token_env>"` instead — the digest alone. Then `rm -f '<digest-file>' '<body-file>' '<recheck-file>'` (the literal paths).
 
 **Under `settings.ci=true`: no confirmation, no wait.** Print the target PR and identity as a plain note, then run the same `review` command at once (it is still the PR from 6.6.1's CI branch — never one from config) and surface its output — or, on failure, its stderr with `digest not posted`; the run still ends normally.
 

@@ -1,13 +1,39 @@
 #!/usr/bin/env bash
 # Review Council CI gate (called by .github/actions/gate/action.yml).
-# Inputs (env): GH_TOKEN EVENT_NAME REPO PR_NUMBER COMMENT_ID COMMENTER RUN_BUDGET
-#               SKIP_BOT_PRS
-# Writes proceed / pr_number / head_ref / timeout_minutes to $GITHUB_OUTPUT.
+# Inputs (env): GH_TOKEN EVENT_NAME EVENT_ACTION REPO PR_NUMBER COMMENT_ID
+#               COMMENT_BODY COMMENTER RUN_BUDGET SKIP_BOT_PRS RECHECK_ON_PUSH
+# Writes proceed / pr_number / head_ref / timeout_minutes / mode to
+# $GITHUB_OUTPUT. mode is `full` (a whole council run) or `recheck` (only
+# re-check the council's open comments).
 set -euo pipefail
 
 skip() { echo "Skipping: $1"; echo "proceed=false" >> "$GITHUB_OUTPUT"; exit 0; }
 
 case "${PR_NUMBER:-}" in ''|*[!0-9]*) skip "no PR number on this event" ;; esac
+
+# Mode. A comment's first word is /review-council (the workflow's pre-filter
+# checks that); a second word `recheck` or `check` asks for a recheck only,
+# anything else is a full run. Both words are matched ignoring case, and
+# hyphens in the second are ignored (`Re-check`). Split on any whitespace, CR
+# included (web comments use CRLF), with globbing off so a `*` in the comment
+# stays text.
+mode=full
+if [ "$EVENT_NAME" = "issue_comment" ]; then
+  set -f
+  # shellcheck disable=SC2046 # deliberate word splitting
+  set -- $(printf '%s' "${COMMENT_BODY:-}" | tr '\r\n\t' '   ')
+  set +f
+  w1="$(printf '%s' "${1:-}" | tr '[:upper:]' '[:lower:]')"
+  w2="$(printf '%s' "${2:-}" | tr '[:upper:]' '[:lower:]' | tr -d '-')"
+  if [ "$w1" = "/review-council" ] && { [ "$w2" = "recheck" ] || [ "$w2" = "check" ]; }; then
+    mode=recheck
+  fi
+elif [ "$EVENT_NAME" = "pull_request" ] && [ "${EVENT_ACTION:-}" = "synchronize" ]; then
+  # A push never starts a full run: it rechecks, and only while one of our
+  # reviews still requests changes (checked below, after the PR checks).
+  [ "${RECHECK_ON_PUSH:-true}" = "true" ] || skip "recheck_on_push is off"
+  mode=recheck
+fi
 
 if [ "$EVENT_NAME" = "issue_comment" ]; then
   perm_json="$(gh api "repos/$REPO/collaborators/$COMMENTER/permission")" \
@@ -35,6 +61,18 @@ if [ "${SKIP_BOT_PRS:-false}" = "true" ] && [ "$(jq -r '.user.type // ""' <<<"$p
   skip "PR #$PR_NUMBER was opened by a bot (skip_bot_prs)"
 fi
 
+# On a push, recheck only while one of our reviews still requests changes:
+# state CHANGES_REQUESTED and the council's hidden marker in its body. A
+# listing that fails or can't be parsed skips (the next push tries again).
+if [ "$EVENT_NAME" = "pull_request" ] && [ "${EVENT_ACTION:-}" = "synchronize" ]; then
+  reviews="$(gh api --paginate "repos/$REPO/pulls/$PR_NUMBER/reviews")" \
+    || skip "could not list the PR's reviews"
+  active="$(jq -s '[.[][] | select(.state == "CHANGES_REQUESTED" and ((.body // "") | contains("<!-- rc:review -->")))] | length' <<<"$reviews")" \
+    || skip "could not read the PR's reviews"
+  [ "${active:-0}" -gt 0 ] || skip "nothing to recheck (no Review Council review requests changes)"
+fi
+
+# The 👀 reaction needs pull-requests: write (a PR comment), not issues: write.
 if [ "$EVENT_NAME" = "issue_comment" ] && [ -n "${COMMENT_ID:-}" ]; then
   gh api --silent -X POST "repos/$REPO/issues/comments/$COMMENT_ID/reactions" \
     -f content=eyes || echo "::warning::could not react to the comment"
@@ -42,13 +80,19 @@ fi
 
 # Review timeout: budget (rounded up to minutes) + headroom for Round 1
 # (reviewer_timeout_seconds), setup, judging and posting.
-budget="${RUN_BUDGET:-}"
-case "$budget" in ''|*[!0-9]*) budget=900 ;; esac
-timeout_min=$(( (budget + 59) / 60 + 30 ))
+# A recheck is one small model call: a flat 15 minutes.
+if [ "$mode" = "recheck" ]; then
+  timeout_min=15
+else
+  budget="${RUN_BUDGET:-}"
+  case "$budget" in ''|*[!0-9]*) budget=900 ;; esac
+  timeout_min=$(( (budget + 59) / 60 + 30 ))
+fi
 
 {
   echo "proceed=true"
   echo "pr_number=$PR_NUMBER"
   echo "head_ref=$head_ref"
   echo "timeout_minutes=$timeout_min"
+  echo "mode=$mode"
 } >> "$GITHUB_OUTPUT"

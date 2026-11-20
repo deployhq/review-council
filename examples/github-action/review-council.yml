@@ -21,33 +21,38 @@
 #
 # Fork PRs are always skipped. A `/review-council` comment runs only when the
 # commenter has write access to the repo. On `issue_comment` GitHub runs the
-# default-branch copy of this file; on `pull_request` it runs the copy on the
-# PR's branch, so a PR can change these settings for its own run.
+# default-branch copy of this file; on `pull_request` (pushes included) it runs
+# the copy on the PR's branch, so a PR can change these settings for its own
+# run.
 
 name: Review Council
 
 on:
-  # Manual: a review runs when someone with write access comments
-  # `/review-council` on a PR. Comment again after pushing fixes to re-review
-  # (that is also when fixed findings get resolved).
+  # Manual: someone with write access comments on a PR.
+  #   `/review-council`          a full review (comment again to re-review).
+  #   `/review-council recheck`  only re-check the council's open comments
+  #                              against the current code: small model calls
+  #                              (`/review-council check` works too).
   issue_comment:
     types: [created]
-  # Automatic: review a PR when it is opened (not as a draft) and when a draft
-  # is marked ready for review. Pushes don't re-trigger it; comment
-  # `/review-council` to re-run. Remove this block for manual runs only. Add
-  # `synchronize` to review every push (one run per push; a newer run cancels
-  # the older one). Each run costs a full review. Drafts are always skipped.
+  # Automatic: a full review when a PR is opened (not as a draft) and when a
+  # draft is marked ready for review. Drafts are always skipped. Remove this
+  # block for manual runs only.
+  # `synchronize` (a push): while a council review still requests changes, a
+  # recheck runs; otherwise only a short gate job runs (no model). A push
+  # never starts a full review. With several pushes in a row only the newest recheck runs. Remove
+  # `synchronize` (or set recheck_on_push: false) to turn it off.
   pull_request:
-    types: [opened, ready_for_review]
+    types: [opened, ready_for_review, synchronize]
 
 # Required. The review job gets exactly this grant, so grant no more than this.
 # PR comments are issue comments, so issues: write is needed to post.
 # id-token: write is for federation only: leave it commented out with an API key.
 #
 # Do NOT add a workflow-level `concurrency:` with cancel-in-progress here: every
-# PR comment triggers this workflow and would cancel a running review. The
-# reusable workflow already allows one review per PR, and only an authorised
-# trigger can cancel it.
+# PR comment and push triggers this workflow and would cancel a running review.
+# The reusable workflow already allows one full review and one recheck per PR
+# at a time, and only an authorised trigger can cancel anything.
 permissions:
   contents: read
   pull-requests: write
@@ -84,6 +89,12 @@ jobs:
       # true: a review with a Critical or Important finding requests changes.
       # false: every review is a plain comment, so the bot never holds a merge.
       request_changes: true
+      # On a push, recheck the open comments while a council review requests
+      # changes (needs `synchronize` above). false: pushes run nothing.
+      recheck_on_push: true
+      # The model that re-checks earlier comments, in a recheck and at the end
+      # of a full review. Empty = claude-sonnet-5-5.
+      # recheck_model: ""
       # Git ref of deployhq/review-council to load the plugin from.
       # Keep it the same as the ref in `uses:` above.
       plugin_ref: main

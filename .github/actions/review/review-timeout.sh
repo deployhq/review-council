@@ -11,7 +11,8 @@
 set -euo pipefail
 
 HEADROOM=20 # judge, report and posting after the last seat finishes
-MAX=110     # the job's timeout-minutes (120) minus setup time
+MAX=95      # the job's timeout-minutes (120) minus setup time and the
+            # 15-minute recheck that follows the run
 
 limit="${1:-}"
 case "$limit" in ''|*[!0-9]*|0) limit=45 ;; esac
@@ -60,5 +61,10 @@ if [ -n "$longest" ]; then
     echo "::warning::Custom seat '$slot' may run for ${minutes} minutes, longer than the job allows. The run is capped at ${MAX} minutes; lower its timeout_minutes (or, for ocr, its effort)." >&2
     limit="$MAX"
   fi
+fi
+# The run budget alone can ask for more than the job allows too.
+if [ "$limit" -gt "$MAX" ]; then
+  echo "::warning::The run budget asks for ${limit} minutes, longer than the job allows. The run is capped at ${MAX} minutes; lower run_budget_seconds." >&2
+  limit="$MAX"
 fi
 printf '%s\n' "$limit"

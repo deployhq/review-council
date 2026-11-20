@@ -27,8 +27,10 @@ Pass exactly one. Everything else (inputs, optional secrets, behaviour) is the s
 
 **When it runs.**
 
-- **Automatically:** when a PR is **opened** (not as a draft), and when a draft is **marked ready for review**. Pushes don't start a review, so a PR is normally reviewed once on its own. Each run costs a full review.
-- **On request:** someone **comments `/review-council`** on a PR. The commenter must have write access (admin, maintain or write). The workflow reacts with 👀 so you know it started. Comment again after pushing fixes: that re-review is also when fixed findings get resolved.
+- **Automatically:** when a PR is **opened** (not as a draft), and when a draft is **marked ready for review**. A push never starts a full review, so a PR is normally reviewed once on its own. Each run costs a full review.
+- **On request:** someone **comments `/review-council`** on a PR. The commenter must have write access (admin, maintain or write). The workflow reacts with 👀 so you know it started. Comment again after pushing fixes for a new full review.
+- **Recheck:** `/review-council recheck` (or `check`; same access rule, same 👀) re-checks only the council's open comments against the current code. It is much cheaper than a review. See [Rechecks](#rechecks).
+- **Recheck on push:** while a council review **requests changes**, each push runs a recheck (on by default; needs `synchronize` in your caller's triggers). Otherwise a push runs only the short `gate` job, with no model.
 
 Either way, the PR must be open and not a draft. It never runs on PRs from forks. See [Fork PRs](#fork-prs).
 
@@ -57,7 +59,7 @@ The Google slot (`agy` / `gemini`) is not set up in CI.
 
 **Two jobs.** The reusable workflow has a `gate` job and a `review` job. `gate` does every check (event, draft, fork, commenter permission) and has no concurrency group, so any PR comment can start it without side effects. `review` runs only if `gate` passes (`needs: gate`).
 
-**Concurrency.** One review per PR. The `review` job has a per-PR concurrency group with `cancel-in-progress`. If an authorised trigger starts a new review for the same PR (a second `/review-council`, or another `pull_request` event), the older review is cancelled. A comment that fails the gate never reaches `review`, so it cannot cancel a running review.
+**Concurrency.** One full review per PR: full reviews share a per-PR group with `cancel-in-progress`, so a new authorised full review (a second `/review-council`, or another `opened`/`ready_for_review`) cancels the older one. Rechecks have their own per-PR group: with several pushes in a row, the older recheck is cancelled and only the newest one runs. The two groups differ, so a push never cancels a full review, and a full review never cancels a recheck. A comment that fails the gate never reaches `review`, so it cannot cancel anything. A recheck cancelled while posting is safe: the next one carries on from what is on the PR.
 
 **Reviewing your caller workflow.** On the PR that adds or changes your caller workflow, the reviewers are given Review Council's own workflow as reference, so they don't flag permissions or concurrency it already handles. Nothing is downloaded: the plugin uses the copy it ships with. Other reusable workflows your workflows call are not shown to reviewers.
 
@@ -96,7 +98,7 @@ on:
   issue_comment:                     # `/review-council` comments (manual)
     types: [created]
   pull_request:                      # automatic: a PR opened (not as a draft), or a draft marked ready
-    types: [opened, ready_for_review]  # not on pushes: comment `/review-council` to re-run
+    types: [opened, ready_for_review, synchronize]  # synchronize: recheck on push while changes are requested
 
 permissions:
   contents: read
@@ -123,11 +125,12 @@ jobs:
 
 Things to know:
 
-- **Keep the `permissions:` block, and grant no more.** The `review` job has no `permissions:` of its own, so it gets exactly what your caller grants. Without `pull-requests: write` and `issues: write`, the run cannot post. Comments on a PR are issue comments, so `issues: write` is needed. Don't add `id-token: write` with an API key or a subscription token. Only [federation](#federation-opt-in) needs it.
+- **Keep the `permissions:` block, and grant no more.** The `review` job has no `permissions:` of its own, so it gets exactly what your caller grants. Without `pull-requests: write` and `issues: write`, the run cannot post. Comments on a PR are issue comments, so `issues: write` is needed. The `gate` job asks for `pull-requests: write` too: the 👀 reaction on a PR comment needs it. Don't add `id-token: write` with an API key or a subscription token. Only [federation](#federation-opt-in) needs it.
 - **Merge it to your default branch first.** GitHub runs `issue_comment` workflows only from the default branch. Until the file is on `main` (or whatever your default is), `/review-council` does nothing.
-- **Don't add `concurrency:` with `cancel-in-progress` to the caller.** Every PR comment triggers the caller, so any comment would cancel a running review. The reusable workflow already allows one review per PR, and only an authorised trigger can cancel it.
+- **Don't add `concurrency:` with `cancel-in-progress` to the caller.** Every PR comment and push triggers the caller, so any of them would cancel a running review. The reusable workflow already allows one full review and one recheck per PR at a time, and only an authorised trigger can cancel anything.
 - **Pinning (optional).** With `main`, every upstream change reaches your runs. If you'd rather control when changes arrive, pin the ref in `uses:` (the *workflow*) and the `plugin_ref` input (the *plugin*) to the same commit SHA.
-- **Automatic reviews.** The `pull_request` trigger reviews a PR when it is ready: `opened` fires for a PR opened as non-draft, `ready_for_review` when a draft becomes ready. Pushes don't re-trigger it; comment `/review-council` to re-run. Want only manual runs? Remove the `pull_request` trigger. Want every push reviewed? Add `synchronize` to `types:` (a full review's cost per push; the newer run cancels the older). Drafts are skipped on every trigger, including `/review-council` comments.
+- **Automatic reviews.** The `pull_request` trigger reviews a PR when it is ready: `opened` fires for a PR opened as non-draft, `ready_for_review` when a draft becomes ready. `synchronize` (a push) never starts a full review: it runs a [recheck](#rechecks), and only while a council review requests changes. Without `synchronize`, pushes run nothing; set `recheck_on_push: false` for the same effect. Want only manual runs? Remove the `pull_request` trigger. Drafts are skipped on every trigger, including `/review-council` comments.
+- **Already listed `synchronize`?** Before this version, each push ran a full review. Now a push runs a recheck, and only while a "request changes" is active. Comment `/review-council` for a full review.
 
 ### 3. Try it
 
@@ -148,6 +151,8 @@ Comment `/review-council` on an open, non-draft PR. Watch the run in the **Actio
 | `static_analysis` | boolean | `true` | Run the static-analysis scan (secrets, CVEs, lint) before the review. Missing tools are skipped and noted; the run never stops to ask. |
 | `skip_bot_prs` | boolean | `false` | Skip PRs opened by a bot account (Dependabot, Renovate, a GitHub App). Their text can come from outside your org. Off by default, so agent-opened PRs are reviewed. |
 | `request_changes` | boolean | `true` | `true`: a review with a Critical or Important finding is posted as "request changes". `false`: every review is posted as a plain comment, so the bot never holds a merge. See [Request changes or comment only](#request-changes-or-comment-only). |
+| `recheck_on_push` | boolean | `true` | On a push, recheck the council's open comments while one of its reviews requests changes. Needs `synchronize` in your caller's `pull_request` types. `false`: pushes run nothing. See [Rechecks](#rechecks). |
+| `recheck_model` | string | `""` | The model that re-checks the council's earlier comments: in a [recheck](#rechecks), and at the end of a full review. Empty = `claude-sonnet-5-5`. It makes small calls (ten comments each), so a cheap model is fine. |
 | `pr_bot_login` | string | `""` | With `PR_BOT_TOKEN`: the login it posts as, e.g. `my-app[bot]`. See [Who posts](#who-posts). |
 | `anthropic_federation_rule_id` | string | `""` | Federation only. Rule ID (`fdrl_...`). Setting it switches Claude auth to federation. See [Federation (opt-in)](#federation-opt-in). |
 | `anthropic_organization_id` | string | `""` | Federation only (required with it). Anthropic organization ID (a UUID). |
@@ -391,7 +396,7 @@ Limits in CI:
 - **Use `harness: claude` (or `opencode`) for an OpenRouter seat.** Don't use a `codex` seat with OpenRouter: it cannot send `data_collection: deny`, and its sandbox does not stop it reading files (including its own key).
 - **No local models.** `provider: ollama` needs a model on the machine; the runner has none.
 - **The key is `OPENROUTER_API_KEY`.** `api_key_env`, `harness_options.flags` and `harness_options.env` are ignored from committed config. Typed options (`effort`, `timeout_minutes`, `max_turns`, …) still work.
-- **Run time limit.** The run normally gets the run budget plus 30 minutes (45 by default). When an approved seat may run longer, the limit grows to that seat's deadline plus 20 minutes. A seat's deadline is its `timeout_minutes`, or by default 30 minutes for a local (Ollama) seat and the 10-minute reviewer timeout for an OpenRouter seat. For an `ocr` seat it is multiplied by its effort rounds (1, 2 or 3). The job's cap is 120 minutes: above that the run is capped at 110 and the log shows a warning, so lower the seat's `timeout_minutes` or effort.
+- **Run time limit.** The run normally gets the run budget plus 30 minutes (45 by default). When an approved seat may run longer, the limit grows to that seat's deadline plus 20 minutes. A seat's deadline is its `timeout_minutes`, or by default 30 minutes for a local (Ollama) seat and the 10-minute reviewer timeout for an OpenRouter seat. For an `ocr` seat it is multiplied by its effort rounds (1, 2 or 3). The job's cap is 120 minutes: above 95 the run is capped at 95 (leaving room for setup and the recheck that follows) and the log shows a warning, so lower the seat's `timeout_minutes` or effort.
 - The seat's harness is installed only when the config names it.
 
 Seat roles, families and egress: see [Custom reviewer seats](../README.md#custom-reviewer-seats) in the README.
@@ -413,7 +418,7 @@ on:
   issue_comment:                     # `/review-council` comments (manual)
     types: [created]
   pull_request:                      # automatic: a PR opened (not as a draft), or a draft marked ready
-    types: [opened, ready_for_review]  # not on pushes: comment `/review-council` to re-run
+    types: [opened, ready_for_review, synchronize]  # synchronize: recheck on push while changes are requested
 
 permissions:
   contents: read
@@ -456,7 +461,7 @@ on:
   issue_comment:                     # `/review-council` comments (manual)
     types: [created]
   pull_request:                      # automatic: a PR opened (not as a draft), or a draft marked ready
-    types: [opened, ready_for_review]  # not on pushes: comment `/review-council` to re-run
+    types: [opened, ready_for_review, synchronize]  # synchronize: recheck on push while changes are requested
 
 permissions:
   contents: read
@@ -486,11 +491,12 @@ Kimi is a distinct model family (Moonshot), so with `role: reviewer` its finding
 Each reported finding that sits on a line of the PR's diff becomes an inline comment on that line (or range), like a human reviewer's. All of a run's comments go in **one** review, whose text is the summary (see [The summary](#the-summary)). Each comment shows the severity, the confidence badge, who found it, the problem, why it matters and the fix, plus a collapsed **Prompt for AI agents** you can paste into a coding agent. It ends with the same footer as the summary.
 
 - **Where it goes.** Each finding carries its `file:line` (or `file:start-end`) and the exact text of that line. Model line numbers can be a few lines off, so a script looks for that text in the file at the reviewed commit and uses the line it is on (the nearest one if it appears more than once). If the text isn't in the file, the finding goes in the summary. The script then checks the line against the PR's diff as GitHub reports it. If it fits, the comment goes there; if not (a file the PR didn't change, a line outside the changed hunks), the finding goes in the summary under **Outside the diff**.
-- **Request changes.** By default (`request_changes: true`), a run with any Critical or Important finding posts its review as **request changes**, once: not again while that request is still active. A later run with none dismisses it, unless an earlier Critical or Important comment is still open and the re-check didn't find it fixed (or GitHub couldn't list the review threads, so it can't tell). If GitHub refuses (for example, on a PR opened by `github-actions[bot]` itself), the review is posted as a plain comment.
+- **Request changes.** By default (`request_changes: true`), a run with any Critical or Important finding posts its review as **request changes**, once: not again while that request is still active. A later run with none (or a [recheck](#rechecks)) dismisses it, unless an earlier Critical or Important comment is still open and the re-check didn't find it fixed (or GitHub couldn't list the review threads, so it can't tell). In CI the dismissal comes from the recheck that ends the run, which also weighs the findings outside the diff. If GitHub refuses (for example, on a PR opened by `github-actions[bot]` itself), the review is posted as a plain comment.
 - **A person's dismissal sticks.** If someone dismisses the bot's "request changes" review, the findings it listed never request changes again on that PR. Only a new Critical or Important finding does.
 - **Dismissing may be refused.** On a protected branch that limits who can dismiss reviews, GitHub may refuse the bot's dismissal. Then its "request changes" stays until a person dismisses it (and that dismissal sticks, as above).
 - **Comment only.** With `request_changes: false`, no review requests changes. See below.
 - **Tags.** Each comment shows the finding's confidence tag, the same as in the report: `[verified]`, `[cross-reviewed]`, `[1 reviewer · unverified]`, `[unverified]` or `[tool-only:<rule>]`. The summary explains them under **What the tags mean**.
+- **Commands.** In CI the summary also lists the `/review-council` commands under **Commands**, collapsed.
 - **If GitHub rejects the review** (one bad line fails the whole review), it is posted again without inline comments, with every finding in the summary. If GitHub accepts no review at all, the summary is posted as a PR comment instead. Nothing is lost.
 - **At most 50 inline comments** per run; the rest go in the summary.
 - **If the PR head moved during the run** (a push landed), nothing goes inline, nothing requests changes and nothing is dismissed. Every finding goes in the summary.
@@ -524,17 +530,30 @@ Local runs that post (Step 6.6) honour the same env var. To post comment-only fr
 
 ### Re-runs
 
-A re-run (a new push, or `/review-council` again) is matched to earlier comments by each finding's fingerprint, a stable ID like `src/auth.ts::checkauth::missing-authz`:
+A re-run (`/review-council` again) is matched to earlier comments by each finding's fingerprint, a stable ID like `src/auth.ts::checkauth::missing-authz`:
 
 - **Already commented** → left alone: not posted again, not edited.
 - **New** → a new inline comment.
-- **No longer reported** → AI reviewers don't mention every problem on every run, so silence is not proof of a fix. Claude re-checks each such comment against the current code. Only the ones it finds **fixed** get a short reply ("Re-checked at `<sha>`: this looks fixed. Resolving.") and their thread resolved. The rest stay open. If Claude finds an old comment describes the same problem as a newly worded finding, the new one isn't posted again.
-- **Resolving may be refused.** With the Actions token, GitHub may refuse to resolve a thread. The bot still posts its one "looks fixed" reply (marked, never repeated), and the thread stays open for a person to resolve.
+- **No longer reported** → AI reviewers don't mention every problem on every run, so silence is not proof of a fix. After the review, the same small model calls as a [recheck](#rechecks) (`recheck_model`) checks each such comment against the current code. Only the ones it finds **fixed** get a short reply ("**Looks fixed** at `<sha>`", in the same format as a [recheck](#rechecks)'s) and their thread resolved where GitHub allows (see below). The rest stay open. In CI there is no duplicate check: if a run words an old finding differently (a new fingerprint), it is posted as a new comment, and the old one stays open until it looks fixed or a person resolves it.
+- **Resolving needs more than the Actions token.** GitHub lets `GITHUB_TOKEN` resolve a thread only with `contents: write`, which the workflow deliberately doesn't ask for. So the bot posts its one "Looks fixed" reply (marked, never repeated) and leaves the thread open, and that reply alone counts as handled. A `PR_BOT_TOKEN` that may resolve threads resolves them too, but think twice: the full run's model has a Bash tool on the PR's code and can see that token, so a token with repo write access gives a prompt-injected run the access the workflow withholds from `GITHUB_TOKEN`. Keep the reply-only default unless you accept that.
 - **Fixed, then back.** If a finding the bot resolved as fixed is reported again on a later run, it gets a new comment.
-- **Resolved by a person** → left alone. The bot never re-opens, replies to or re-posts a thread a person resolved.
+- **Resolved by a person** → handled. The bot never re-opens, replies to or re-posts it, it stops holding "request changes", and the same finding doesn't request changes again.
 - **A degraded run** (a reviewer failed) resolves nothing and dismisses nothing.
 
 Only comments posted by the same identity (`github-actions[bot]`, or your bot) count as earlier comments. A comment by anyone else that copies the hidden markers is ignored.
+
+### Rechecks
+
+A recheck asks one question: are the council's open comments fixed? It runs on `/review-council recheck` (or `check`, in any case), and on each push while a council review requests changes (`recheck_on_push`, on by default; your caller needs `synchronize` in its `pull_request` types). It never posts a new review, never adds findings and never requests changes.
+
+- **What it checks.** Every open council comment: Critical, Important and Suggestion. Only Critical and Important ones hold "request changes". Findings listed **outside the diff** are checked too, but only in reviews posted by this version or later: older reviews didn't mark them.
+- **Cost.** A script gathers each comment and 20 lines either side of it in the current file. Small model calls (`recheck_model`, default `claude-sonnet-5-5`, read-only tools) judge them, ten per call. The calls share 12 of the 15 minutes a recheck gets; comments not reached in time (or in a call that ran out of time) stay open and are listed in the job summary. With nothing open, no model runs. The job summary shows the tokens used.
+- **Only the newest push.** With several pushes in a row, the older recheck is cancelled and only the newest one runs. A recheck that finishes after another push posts nothing: the next one will.
+- **Looks fixed.** The bot replies in the thread: "**Looks fixed** at `<sha>`", a one- or two-sentence reason, and the details collapsed. A finding outside the diff gets the same in one PR comment per recheck. Still-present findings get nothing.
+- **Lifting the block.** When no Critical or Important comment is left open (inline or outside the diff), the bot dismisses its "request changes" review ("Rechecked at `<sha>`: … no critical or important finding is left open."). In CI a full review leaves this to the recheck it ends with.
+- **Disagree?** Unresolve the thread if the bot resolved it, or reply in it if the bot couldn't resolve it (the reply's footer says which). A reply alone doesn't reopen a thread the bot resolved. The comment then counts as open again: it holds the block (if Critical or Important) and is never marked fixed again. It stops holding only when a person resolves it. Reopening keeps an active "request changes" in place; it doesn't bring back one a recheck already dismissed. A later full run requests changes again only if it reports the finding as Critical or Important.
+- **A person resolving a thread** counts as handled, the same as on a full run.
+- **If something fails** (the model's answer can't be read, the PR head moved, or a tracked file in the checkout was changed), the recheck posts nothing and dismisses nothing. The block then stays until the next push or `/review-council recheck`; the job summary's recheck section says why.
 
 ### The summary
 
@@ -602,7 +621,7 @@ PRs from forks are ignored completely. That includes `/review-council` comments 
 
 **What the run reads from the PR.** Because fork PRs are skipped, every PR is opened by a person or bot with write access. But a bot PR (Dependabot, Renovate, an agent that opens PRs) can carry text written by others: upstream release notes in the body, vendored code in the diff. PR comments and reviews are different again: on a public repo anyone can write them. In CI the run reads only comments and reviews whose author is `OWNER`, `MEMBER` or `COLLABORATOR`, and drops the rest. That is wider than the write-access rule for `/review-council`: `MEMBER` is any org member, and `COLLABORATOR` is any collaborator, including read and triage access. All PR text, trusted or not, is treated as data to review, never as instructions. It can still try to steer the run; see **Residual risk** below.
 
-**Job permissions.** The `review` job gets exactly the caller's grant: `contents: read`, `pull-requests: write`, `issues: write`, plus `id-token: write` with federation only. The checkout does not keep credentials (`persist-credentials: false`). The run can read code, post comments and reviews, resolve its own comment threads and dismiss its own reviews (GitHub may refuse either; see [What gets posted](#what-gets-posted)). It cannot push.
+**Job permissions.** The `review` job gets exactly the caller's grant: `contents: read`, `pull-requests: write`, `issues: write`, plus `id-token: write` with federation only. The checkout does not keep credentials (`persist-credentials: false`). The run can read code, post comments and reviews, and dismiss its own reviews (GitHub may refuse; see [What gets posted](#what-gets-posted)). It cannot push, and with `GITHUB_TOKEN` it cannot resolve threads either: that needs `contents: write`, which is deliberately not asked for, since a full run gives a model a Bash tool on the PR's code. The `gate` job has its own grant (`contents: read`, `pull-requests: write`) and runs no model.
 
 **The PR's Claude settings never load.** Claude Code runs with `--setting-sources user`, so the reviewed branch's `.claude/` settings and hooks are never loaded into the session that holds the keys.
 
@@ -613,7 +632,7 @@ The boundary is **write access to the repo**. Everything below follows from it.
 **Which workflow file runs.** The caller workflow sets the switches (`RC_CI`, `RC_APPROVED_SEATS`, `plugin_ref`, the `uses:` ref, …). Which copy of it runs depends on the trigger:
 
 - `issue_comment` (`/review-council`): GitHub runs the copy on your **default branch**.
-- `pull_request`: GitHub runs the copy on the **PR's branch**. A same-repo PR can change `approved_seats`, `request_changes`, `plugin_ref` or the `uses:` ref for its own run. If you rely on "request changes" as a gate, protect `.github/workflows/` with CODEOWNERS.
+- `pull_request` (pushes included): GitHub runs the copy on the **PR's branch**. A same-repo PR can change `approved_seats`, `request_changes`, `recheck_on_push`, `recheck_model`, `plugin_ref` or the `uses:` ref for its own run. If you rely on "request changes" as a gate, protect `.github/workflows/` with CODEOWNERS.
 
 That is not an escalation: anyone who can push a branch can already edit any workflow file. But it means the default-branch workflow is not a hard limit on what a PR's own run does. If you need the default-branch settings to hold, use only the `/review-council` trigger.
 
@@ -658,6 +677,8 @@ For a bot user, store its fine-grained token as a repo or org secret. For a GitH
 **`No GitHub OIDC token available`.** You set the federation inputs but the caller does not grant `id-token: write`. Add it to the caller's `permissions:` block, or drop the `anthropic_*` inputs if you meant to use an API key or a subscription token.
 
 **`/review-council` does nothing.** The caller workflow must be on your default branch. The commenter needs write access. The PR must be open, not a draft, and not from a fork. The 👀 reaction appears only once these checks pass.
+
+**A push doesn't recheck.** Your caller needs `synchronize` in its `pull_request` types, and `recheck_on_push` must not be `false`. A push rechecks only while a council review still requests changes; the `gate` job's log says why it skipped.
 
 **The run fails at the `Check Claude auth` step.** The error says what is wrong:
 
