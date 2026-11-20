@@ -710,6 +710,26 @@ with_code() {
   ! grep -qF "reviews/301" "$GHLOG" || return 1
 }
 
+@test "review: with RC_PLAN_OUT (a recheck follows in CI) a clean run leaves the dismissal to it" {
+  review_fixtures clean
+  only_suggestions
+  printf '[{"id":300,"state":"CHANGES_REQUESTED","user":{"login":"rc-bot"},"body":"x <!-- rc:review -->"}]\n' >"$REVIEWS"
+  RC_PLAN_OUT="$BATS_TEST_TMPDIR/plan-out.json" PATH="$SANDBOX" run "$SCRIPT" review 5 "$BODY" "$LEDGER"
+  [ "$status" -eq 0 ]
+  has "dismissed=0"
+  ! grep -qF dismissals "$GHLOG" || return 1
+}
+
+@test "review: an unreadable ledger never dismisses, even on a clean digest" {
+  review_fixtures clean
+  printf 'not json' >"$LEDGER"
+  printf '[{"id":300,"state":"CHANGES_REQUESTED","user":{"login":"rc-bot"},"body":"x <!-- rc:review -->"}]\n' >"$REVIEWS"
+  PATH="$SANDBOX" run "$SCRIPT" review 5 "$BODY" "$LEDGER"
+  [ "$status" -eq 0 ]
+  has "dismissed=0"
+  ! grep -qF dismissals "$GHLOG" || return 1
+}
+
 @test "review: a degraded run never dismisses" {
   review_fixtures degraded
   only_suggestions
@@ -1642,6 +1662,25 @@ dismissable() {
   PATH="$SANDBOX" run --separate-stderr "$SCRIPT" recheck 5 "$VERD"
   has "dismissed=1"
   has "held=0"
+}
+
+@test "recheck: a finding back outside the diff is rechecked, though its old inline comment looks fixed" {
+  open_fixtures
+  # 71: our inline comment, "looks fixed" and resolved by us -> fixed.
+  jq '[.[] | select(.id == 71 or .in_reply_to_id == 71)]' "$RCOMMENTS" >"$RCOMMENTS.t" && mv "$RCOMMENTS.t" "$RCOMMENTS"
+  active "fp71"
+  # A later review lists fp71 again, outside the diff.
+  jq '. + [{id: 301, state: "COMMENTED", user: {login: "rc-bot", type: "User"}, html_url: "https://gh/r/301",
+            submitted_at: "2026-01-02T00:00:00Z",
+            body: "digest\n\n<!-- rc:outside-begin -->\n\n`a.sh:9`\n\n**🟠 Important**\n\n**Back again**\n\n<!-- rc:outside fp71 -->\n\n<!-- rc:review -->"}]' \
+    "$REVIEWS" >"$REVIEWS.t" && mv "$REVIEWS.t" "$REVIEWS"
+  PATH="$SANDBOX" run --separate-stderr "$SCRIPT" open 5
+  [ "$(printf '%s' "$output" | jq -c '[.inline[] | {id, status}]')" = '[{"id":71,"status":"fixed"}]' ]
+  [ "$(printf '%s' "$output" | jq -c '[.outside[] | {fingerprint, status}]')" = '[{"fingerprint":"fp71","status":"open"}]' ]
+  verdicts '{}'
+  PATH="$SANDBOX" run --separate-stderr "$SCRIPT" recheck 5 "$VERD"
+  has "dismissed=0"
+  has "held=1"
 }
 
 @test "recheck: a reopened comment holds even when this run reported it again" {

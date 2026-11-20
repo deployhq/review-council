@@ -1173,7 +1173,10 @@ load_state() {
   jq -n --slurpfile ours "$_tmp/ours.json" --slurpfile rv "$_tmp/rv.json" --slurpfile of "$_tmp/ofixed.json" \
     --arg head "$_pr_head" --argjson ok "$_inline_ok" --argjson known "$_known" '
     $ours[0] as $in | $rv[0] as $r
-    | ([$in[] | .fp]) as $infps
+    # An inline comment stands for its finding only while it is open: a
+    # finding that comes back outside the diff after its inline comment was
+    # fixed is a new occurrence, rechecked (and held) on its own.
+    | ([$in[] | select(.status == "open" or .status == "reopened") | .fp]) as $infps
     | {head: $head, inline_ok: $ok, known: $known,
        active: $r.active, blocking: $r.blocking,
        ack: ($r.ack + (if $known then [$in[] | select(.status == "resolved_by_person") | .fp] else [] end) | unique),
