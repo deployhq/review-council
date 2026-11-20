@@ -130,16 +130,37 @@ calls() { cat "$D/claude.n" 2>/dev/null || echo 0; }
   grep -qF '| 1 | 1 | 0 | 1 | 2 | 1 | 110 | 7 |' "$D/summary.md"
 }
 
-@test "recheck: more than 20 candidates are split into batches of 20, none dropped" {
+@test "recheck: more than 10 candidates are split into batches of 10, none dropped" {
   lines="$(for i in $(seq 1 45); do inline "$i" "fp$i" open; done)"
   state "$lines"
   recheck 5
   [ "$status" -eq 0 ]
-  [ "$(calls)" -eq 3 ]
-  [ "$(grep -c '^=== FINDING ' "$D/prompt.1")" -eq 20 ]
-  [ "$(grep -c '^=== FINDING ' "$D/prompt.3")" -eq 5 ]
+  [ "$(calls)" -eq 5 ]
+  [ "$(grep -c '^=== FINDING ' "$D/prompt.1")" -eq 10 ]
+  [ "$(grep -c '^=== FINDING ' "$D/prompt.5")" -eq 5 ]
   jq -e '.checked == 45 and (.fixed | length) == 45 and ([.fixed[].id] | sort) == [range(1; 46)]' "$D/verdicts.json"
-  printf '%s' "$output" | grep -qx 'input_tokens=330'
+  printf '%s' "$output" | grep -qx 'input_tokens=550'
+  printf '%s' "$output" | grep -qx 'unchecked=0'
+}
+
+@test "recheck: batches share one time budget; the ones not reached stay open, the rest post" {
+  # A fake clock: each claude call takes 600 seconds.
+  echo 1000 >"$D/now"
+  printf '#!/bin/sh\ncat "%s/now"\n' "$D" >"$D/bin/date"
+  chmod +x "$D/bin/date"
+  mv "$D/bin/claude" "$D/bin/claude.real"
+  printf '#!/bin/sh\necho $(( $(cat "%s/now") + 600 )) >"%s/now"\nexec "%s/bin/claude.real" "$@"\n' "$D" "$D" "$D" >"$D/bin/claude"
+  chmod +x "$D/bin/claude"
+  lines="$(for i in $(seq 1 25); do inline "$i" "fp$i" open; done)"
+  state "$lines"
+  RC_RECHECK_BUDGET_SEC=720 recheck 5
+  [ "$status" -eq 0 ]
+  # 720 s: the first call (600 s) leaves 120 s, enough for a second; then none.
+  [ "$(calls)" -eq 2 ]
+  printf '%s' "$output" | grep -qx 'candidates=25'
+  printf '%s' "$output" | grep -qx 'unchecked=5'
+  jq -e '.degraded == false and .checked == 20 and (.fixed | length) == 20' "$D/verdicts.json"
+  grep -qF '5 open comments were not checked in time' "$D/summary.md"
 }
 
 @test "recheck: an answer that is not strict JSON is degraded: nothing posted" {
@@ -208,7 +229,7 @@ calls() { cat "$D/claude.n" 2>/dev/null || echo 0; }
   grep -qx -- '--restricted' "$D/args.1"
   grep -qx -- '--strict-mcp-config' "$D/args.1"
   grep -A1 -x -- '--setting-sources' "$D/args.1" | grep -qx user
-  grep -A1 -x -- '--max-turns' "$D/args.1" | grep -qx 6
+  grep -A1 -x -- '--max-turns' "$D/args.1" | grep -qx 8
   grep -A1 -x -- '--model' "$D/args.1" | grep -qx claude-sonnet-5-5
   ! grep -q 'Bash' "$D/args.1" || return 1
   ! grep -q 'plugin-dir' "$D/args.1" || return 1

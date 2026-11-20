@@ -1291,7 +1291,8 @@ open_fixtures() {
   jq -n '
     def root($id; $sev; $fp): {id: $id, in_reply_to_id: null, user: {login: "rc-bot", type: "User"}, path: "a.sh",
       line: 3, html_url: "https://gh/c/\($id)", body: "**\($sev)** · found by claude\n\n**T\($id)**\n\n<!-- rc:finding \($fp) -->"};
-    def reply($id; $to; $who; $type; $body): {id: $id, in_reply_to_id: $to, user: {login: $who, type: $type}, body: $body};
+    def reply($id; $to; $who; $type; $body): {id: $id, in_reply_to_id: $to, user: {login: $who, type: $type}, body: $body,
+      author_association: (if $type == "User" then "COLLABORATOR" else "NONE" end)};
     [ root(70; "🟠 Important"; "fp70"), root(71; "🟠 Important"; "fp71"), root(72; "🔴 Critical"; "fp72"),
       root(73; "🟠 Important"; "fp73"), root(74; "🟠 Important"; "fp74"), root(75; "🟡 Suggestion"; "fp75"),
       root(76; "🟠 Important"; "fp76"), root(77; "🟠 Important"; "fp77"),
@@ -1594,6 +1595,16 @@ outside_round_trip() {
   [ ! -f "$GHLOG.dismiss" ]
 }
 
+@test "open: a reply by someone without access to the repo does not reopen" {
+  open_fixtures
+  # 73 has a plain rc:fixed reply, then alice "No, still broken" (93): reopened.
+  PATH="$SANDBOX" run --separate-stderr "$SCRIPT" open 5
+  [ "$(printf '%s' "$output" | jq -r '.inline[] | select(.id == 73) | .status')" = reopened ]
+  jq 'map(if .id == 93 then .author_association = "NONE" else . end)' "$RCOMMENTS" >"$RCOMMENTS.t" && mv "$RCOMMENTS.t" "$RCOMMENTS"
+  PATH="$SANDBOX" run --separate-stderr "$SCRIPT" open 5
+  [ "$(printf '%s' "$output" | jq -r '.inline[] | select(.id == 73) | .status')" = fixed ]
+}
+
 # dismissable: only comment 70 (open, important), our review 300 blocks on fp70.
 dismissable() {
   open_fixtures
@@ -1626,6 +1637,36 @@ dismissable() {
   rm -f "$GHLOG.replies"
   PATH="$SANDBOX" run --separate-stderr "$SCRIPT" recheck 5 "$VERD"
   has "dismissed=1"
+}
+
+@test "recheck: an open critical comment reported again by this run no longer holds" {
+  dismissable "fp70 other"
+  jq '. + [{id: 69, in_reply_to_id: null, user: {login: "rc-bot", type: "User"}, path: "a.sh", line: 3,
+            html_url: "https://gh/c/69", body: "**🔴 Critical** · found by claude\n\n**T69**\n\n<!-- rc:finding other -->"}]' \
+    "$RCOMMENTS" >"$RCOMMENTS.t" && mv "$RCOMMENTS.t" "$RCOMMENTS"
+  verdicts '{fixed: [{kind: "inline", id: 70}]}'
+  PATH="$SANDBOX" run --separate-stderr "$SCRIPT" recheck 5 "$VERD"
+  has "dismissed=0"
+  verdicts '{reported: ["other"], fixed: [{kind: "inline", id: 70}]}'
+  rm -f "$GHLOG.replies"
+  PATH="$SANDBOX" run --separate-stderr "$SCRIPT" recheck 5 "$VERD"
+  has "dismissed=1"
+  has "held=0"
+}
+
+@test "recheck: an open critical finding outside the diff holds the block, even from a COMMENT review" {
+  dismissable "fp70"
+  jq '. + [{id: 301, state: "COMMENTED", user: {login: "rc-bot", type: "User"}, html_url: "https://gh/r/301",
+            submitted_at: "2026-01-02T00:00:00Z",
+            body: "digest\n\n<!-- rc:outside-begin -->\n\n`c.sh:7`\n\n**🔴 Critical**\n\n**Bad thing**\n\n<!-- rc:outside c.sh::h::x -->\n\n<!-- rc:review -->"}]' \
+    "$REVIEWS" >"$REVIEWS.t" && mv "$REVIEWS.t" "$REVIEWS"
+  PATH="$SANDBOX" run --separate-stderr "$SCRIPT" open 5
+  [ "$(printf '%s' "$output" | jq -c '[.outside[] | {fingerprint, severity, status}]')" = '[{"fingerprint":"c.sh::h::x","severity":"critical","status":"open"}]' ]
+  verdicts '{fixed: [{kind: "inline", id: 70}]}'
+  PATH="$SANDBOX" run --separate-stderr "$SCRIPT" recheck 5 "$VERD"
+  has "dismissed=0"
+  has "held=1"
+  [ ! -f "$GHLOG.dismiss" ]
 }
 
 @test "recheck: an open important comment not re-checked fixed holds the block" {
@@ -1728,5 +1769,15 @@ dismissable() {
   PATH="$SANDBOX" run "$SCRIPT" review 5 "$BATS_TEST_TMPDIR/missing.md" "$LEDGER"
   [ "$status" -ne 0 ]
   [ "$(jq -c .posted "$RC_PLAN_OUT")" = false ]
+  unset RC_PLAN_OUT
+}
+
+@test "review: an unreadable ledger makes RC_PLAN_OUT report a block" {
+  review_fixtures
+  export RC_PLAN_OUT="$BATS_TEST_TMPDIR/plan-out.json"
+  printf 'not json' >"$LEDGER"
+  PATH="$SANDBOX" run "$SCRIPT" review 5 "$BODY" "$LEDGER"
+  [ "$status" -eq 0 ]
+  [ "$(jq -c '[.block, .posted, .reported]' "$RC_PLAN_OUT")" = '[true,true,[]]' ]
   unset RC_PLAN_OUT
 }

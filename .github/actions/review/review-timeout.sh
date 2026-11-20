@@ -11,7 +11,8 @@
 set -euo pipefail
 
 HEADROOM=20 # judge, report and posting after the last seat finishes
-MAX=110     # the job's timeout-minutes (120) minus setup time
+MAX=95      # the job's timeout-minutes (120) minus setup time and the
+            # 15-minute recheck that follows the run
 
 limit="${1:-}"
 case "$limit" in ''|*[!0-9]*|0) limit=45 ;; esac

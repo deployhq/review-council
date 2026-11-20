@@ -13,8 +13,9 @@
 # The token budget is the point: no skill, no rules, no diff. This script
 # gathers the input (each finding's text without its footer and AI-agent
 # prompt, and ±20 lines of the current file at its line) and makes ONE small
-# `claude -p` call per batch of at most 20 candidates, with Read/Grep/Glob
-# only, a low --max-turns, and no call at all when nothing is open. Any bad
+# `claude -p` call per batch of at most 10 candidates, with Read/Grep/Glob
+# only, a low --max-turns, and no call at all when nothing is open. The calls
+# share a 12-minute budget; candidates not reached stay open. Any bad
 # answer (not strict JSON, an unknown or repeated id, a bad verdict, a failed
 # call) makes the whole run degraded: nothing is posted.
 #
@@ -42,11 +43,16 @@ here="$(cd "$(dirname "$0")" && pwd -P)"
 
 POST="${RC_POST_BIN:-$here/rc-post.sh}"
 MODEL="${RC_RECHECK_MODEL:-claude-sonnet-5-5}"
-BATCH=20      # candidates per claude call
-MAX_TURNS=6   # tool turns per call (Read/Grep/Glob, only when the window isn't enough)
+BATCH=10      # candidates per claude call
+MAX_TURNS=8   # tool turns per call (Read/Grep/Glob, only when the window isn't enough)
 WINDOW=20     # lines of code on each side of the comment's line
 BODY_MAX=4000 # characters of finding text per candidate
-CALL_MIN=10   # minutes per claude call
+CALL_MIN=10   # minutes per claude call, at most
+# The whole recheck gets 15 minutes from the workflow; the calls share 12 of
+# them, so posting always has time. RC_RECHECK_BUDGET_SEC (tests) overrides.
+BUDGET_SEC="${RC_RECHECK_BUDGET_SEC:-720}"
+case "$BUDGET_SEC" in '' | *[!0-9]*) BUDGET_SEC=720 ;; esac
+started="$(date +%s)"
 
 note() { echo "rc-recheck: $*" >&2; }
 usage() {
@@ -76,7 +82,7 @@ fi
 # --- summary ------------------------------------------------------------------
 mode_label="recheck"
 [ -z "$plan" ] || mode_label="after the full run"
-checked=0 nfixed=0 reopened=0 in_tok=0 out_tok=0 resolved="" dismissed="" outcome=""
+checked=0 unchecked=0 nfixed=0 reopened=0 in_tok=0 out_tok=0 resolved="" dismissed="" outcome=""
 
 summary() {
   local still=$((checked - nfixed))
@@ -86,6 +92,7 @@ summary() {
     echo "_${mode_label} · model \`${MODEL}\`_"
     echo
     [ -z "$outcome" ] || { echo "$outcome"; echo; }
+    [ "$unchecked" -eq 0 ] || { echo "_${unchecked} open comments were not checked in time; they stay open._"; echo; }
     echo "| checked | fixed | still open | reopened | resolved | dismissed | input tokens | output tokens |"
     echo "|---|---|---|---|---|---|---|---|"
     echo "| $checked | $nfixed | $still | $reopened | ${resolved:-0} | ${dismissed:-0} | $in_tok | $out_tok |"
@@ -123,7 +130,7 @@ fi
 jq -e 'type == "object"' "$tmp/open.json" >/dev/null 2>&1 || finish 1 "failed: rc-post.sh open printed no state"
 reopened="$(jq '[.inline[]? | select(type == "object" and .status == "reopened")] | length' "$tmp/open.json")"
 [ "$(jq -r '.known == true' "$tmp/open.json")" = true ] || finish 0 "skipped: cannot tell our own comments (identity unknown)"
-[ "$(jq -r '.inline_ok == true' "$tmp/open.json")" = true ] || finish 0 "skipped: the PR's comments could not be read at its head"
+[ "$(jq -r '.inline_ok == true' "$tmp/open.json")" = true ] || finish 0 "skipped: the PR's comments, threads, reviews or history could not be read at its head"
 head="$(jq -r '.head // ""' "$tmp/open.json")"
 [[ "$head" =~ ^[0-9a-f]{40}([0-9a-f]{24})?$ ]] || finish 1 "failed: no PR head"
 root="$(git rev-parse --show-toplevel 2>/dev/null)" || finish 1 "failed: not in a git checkout"
@@ -182,7 +189,6 @@ for v in TMPDIR LANG LC_ALL USER CLAUDE_CONFIG_DIR \
   [ -z "${!v:-}" ] || cenv+=("$v=${!v}")
 done
 tcmd=()
-! command -v timeout >/dev/null 2>&1 || tcmd=(timeout -k 15 "${CALL_MIN}m")
 
 # ask <batch-json> <n>: run one call; append the FIXED entries to fixed.jsonl.
 # Non-zero = degraded.
@@ -266,6 +272,16 @@ EOF
 degraded=false
 n=0
 while [ $((n * BATCH)) -lt "$checked" ]; do
+  # Out of time: the rest stay open (not fixed), and what was checked posts.
+  left=$((started + BUDGET_SEC - $(date +%s)))
+  if [ "$left" -lt 90 ]; then
+    unchecked=$((checked - n * BATCH))
+    note "out of time: $unchecked candidates left unchecked (they stay open)"
+    break
+  fi
+  call=$((CALL_MIN * 60))
+  [ "$call" -le $((left - 30)) ] || call=$((left - 30))
+  ! command -v timeout >/dev/null 2>&1 || tcmd=(timeout -k 15 "${call}s")
   b="$(jq -c --argjson s "$((n * BATCH))" --argjson k "$BATCH" '.[$s:$s + $k]' "$tmp/cand.json")"
   n=$((n + 1))
   if ! ask "$b" "$n"; then
@@ -273,9 +289,11 @@ while [ $((n * BATCH)) -lt "$checked" ]; do
     break
   fi
 done
+checked=$((checked - unchecked))
 nfixed="$(jq -s length "$tmp/fixed.jsonl")"
 
-echo "candidates=$checked"
+echo "candidates=$((checked + unchecked))"
+echo "unchecked=$unchecked"
 echo "fixed=$nfixed"
 echo "degraded=$degraded"
 echo "input_tokens=$in_tok"

@@ -54,7 +54,7 @@ seat() { # seat <slot> <harness> [timeout_minutes] [needs_confirm] [provider] [e
 
 @test "review-timeout: a high-effort ocr seat past the job cap is capped, with a warning" {
   run --separate-stderr bash "$SCRIPT" 45 < <(seat qwen ocr 30 false openrouter high)
-  [ "$output" = 110 ]
+  [ "$output" = 95 ]
   printf '%s' "$stderr" | grep -qF 'qwen'
 }
 
@@ -70,7 +70,7 @@ seat() { # seat <slot> <harness> [timeout_minutes] [needs_confirm] [provider] [e
 
 @test "review-timeout: a limit beyond the job's cap is capped, with a warning" {
   run --separate-stderr bash "$SCRIPT" 45 < <(seat kimi claude 180)
-  [ "$output" = 110 ]
+  [ "$output" = 95 ]
   printf '%s' "$stderr" | grep -qF '::warning::'
   printf '%s' "$stderr" | grep -qF 'kimi'
 }

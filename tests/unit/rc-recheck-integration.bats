@@ -248,7 +248,8 @@ FOOT='<sub>Recheck by [Review Council](https://github.com/deployhq/review-counci
   # Round trip: a person replying after our plain rc:fixed reopens it.
   jq --argjson to "$nil" --slurpfile r "$GHLOG.replies" \
     '. + [{id: 200, in_reply_to_id: $to, user: {login: "rc-bot", type: "User"}, body: $r[0].body},
-          {id: 201, in_reply_to_id: $to, user: {login: "alice", type: "User"}, body: "Still broken."}]' \
+          {id: 201, in_reply_to_id: $to, user: {login: "alice", type: "User"}, author_association: "COLLABORATOR",
+           body: "Still broken."}]' \
     "$RCOMMENTS" >"$RCOMMENTS.t" && mv "$RCOMMENTS.t" "$RCOMMENTS"
   run --separate-stderr bash -c 'cd "$1" && shift && bash "$@"' _ "$D/repo" "$POST" open 5
   [ "$(printf '%s' "$output" | jq -r --argjson i "$nil" '.inline[] | select(.id == $i) | .status')" = reopened ]

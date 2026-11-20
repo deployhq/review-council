@@ -43,7 +43,10 @@ name: Review Council
 # With GITHUB_TOKEN a recheck can't resolve review threads: GitHub requires
 # contents: write for that, which is deliberately not granted (the full run
 # gives a model a Bash tool on the PR's code). Its "looks fixed" reply alone
-# marks a comment as handled. A PR_BOT_TOKEN that may resolve threads does both.
+# marks a comment as handled. A PR_BOT_TOKEN that may resolve threads does both,
+# but the full run's model (which has Bash) can see that token, so a token with
+# repo write access brings back the risk withheld above: the reply-only default
+# is the recommended setup.
 #
 # Security model, in short:
 #   - Fork PRs are skipped (secrets would be exposed to untrusted code paths).

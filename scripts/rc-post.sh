@@ -472,8 +472,11 @@ OURS_JQ='
       | $th[$rid | tostring] as $thr
       # Our latest "looks fixed" reply (old `rc:fixed` and new `rc:fixed resolved`).
       | ([ $mine[] | select(.in_reply_to_id == $rid and (.body | contains("<!-- rc:fixed"))) ] | max_by(.id)) as $fx
+      # Only a reply by someone with a say on the repo reopens: on a public
+      # repo anyone can comment, and a stranger must not pin the block.
       | ($fx != null and any($all[]; .in_reply_to_id == $rid and (.id | type) == "number" and .id > $fx.id
-                             and .user.type == "User" and (ours | not))) as $replied
+                             and .user.type == "User" and (ours | not)
+                             and ((.author_association // "") | IN("OWNER", "MEMBER", "COLLABORATOR")))) as $replied
       | ($fx != null and ($fx.body | contains("<!-- rc:fixed resolved -->"))) as $weresolved
       | ($thr != null and ($thr.by | type) == "string" and $thr.by != "" and $thr.by != $me and $thr.by != $fb) as $byperson
       # The disagreement signal matches the footer each reply showed:
@@ -717,6 +720,7 @@ review_setup() {
     :
   else
     echo "rc-post: ledger is not a JSON object; treating it as having no findings" >&2
+    _plan_unknown=true
     printf '{}\n' >"$_tmp/ledger.json"
     _ledger="$_tmp/ledger.json"
   fi
@@ -885,8 +889,10 @@ dismiss_active() {
 plan_out() {
   [ -n "${RC_PLAN_OUT:-}" ] || return 0
   if [ "$1" = true ]; then
-    jq -c --arg h "${_local_head:-}" --arg s "${_status:-}" \
-      '{head: $h, status: $s, block: (.block != false), reported: [.reported[]? | strings], posted: true}' \
+    # An unreadable ledger or a failed plan says nothing about what blocks:
+    # report a block, so the recheck after the run cannot lift one.
+    jq -c --arg h "${_local_head:-}" --arg s "${_status:-}" --argjson u "${_plan_unknown:-false}" \
+      '{head: $h, status: $s, block: ((.block != false) or $u), reported: [.reported[]? | strings], posted: true}' \
       "$_tmp/plan.json" >"$RC_PLAN_OUT" 2>/dev/null
   else
     printf '{"head":"","status":"","block":true,"reported":[],"posted":false}\n' >"$RC_PLAN_OUT" 2>/dev/null
@@ -948,6 +954,7 @@ do_review() {
     --arg re "$SECRET_RE" --arg footer "$_footer" \
     "$LEDGER_DEFS"' $f[0] | '"$PLAN_JQ" >"$_tmp/plan.json" 2>/dev/null; then
     echo "rc-post: could not place the findings; posting the digest only" >&2
+    _plan_unknown=true
     printf '{"block":false,"blocking":[],"reported":[],"kept":0,"new":[],"outside":[],"stale":[],"resolve":[],"held":[]}\n' >"$_tmp/plan.json"
   fi
 
@@ -1317,7 +1324,8 @@ do_recheck() {
 # fingerprint it blocks on is satisfied — acknowledged by a person, its
 # inline comment fixed or resolved, its outside finding fixed, or still
 # reported (but no longer blocking) — none is untracked (""), and no
-# critical/important inline comment is open or reopened unless acknowledged.
+# critical/important comment (inline, or outside the diff) is open or
+# reopened unless acknowledged or reported again by this run.
 # held = what keeps the block: those comments + the unsatisfied fingerprints.
 recheck_eval() {
   jq -R -s 'split("\n") | map(select(test("^[0-9]+$")) | tonumber)' "$_tmp/done_inline.txt" >"$_tmp/di.json"
@@ -1328,9 +1336,13 @@ recheck_eval() {
     | ([$v.reported[]? | strings | gsub("[^A-Za-z0-9._:/@+-]"; "-") | .[0:200] | select(length > 0)]) as $rep
     | ($st.inline | map(if (.id as $i | $di | index($i)) != null then .status = "fixed" else . end)) as $in
     | ($st.outside | map(if (.fingerprint as $f | $dout | index($f)) != null then .status = "fixed" else . end)) as $out
-    | [ $in[] | select((.status == "open" or .status == "reopened")
-                       and (.severity == "critical" or .severity == "important")
-                       and (.fingerprint as $f | $st.ack | index($f)) == null) | .fingerprint ] as $hold
+    # A fingerprint this run reported again is decided by blocking_now (the
+    # run blocks when it is still critical or important), not by its old text.
+    | [ ($in[] | select(.status == "open" or .status == "reopened")),
+        ($out[] | select(.status == "open"))
+        | select((.severity == "critical" or .severity == "important")
+                 and (.fingerprint as $f | ($st.ack | index($f)) == null and ($rep | index($f)) == null))
+        | .fingerprint ] as $hold
     | [ $st.blocking[] | . as $f
         | select(. == ""
             or ((($st.ack | index($f)) != null)
