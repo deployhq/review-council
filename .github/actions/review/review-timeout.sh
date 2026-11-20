@@ -62,4 +62,9 @@ if [ -n "$longest" ]; then
     limit="$MAX"
   fi
 fi
+# The run budget alone can ask for more than the job allows too.
+if [ "$limit" -gt "$MAX" ]; then
+  echo "::warning::The run budget asks for ${limit} minutes, longer than the job allows. The run is capped at ${MAX} minutes; lower run_budget_seconds." >&2
+  limit="$MAX"
+fi
 printf '%s\n' "$limit"
