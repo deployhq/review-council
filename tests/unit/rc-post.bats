@@ -1825,6 +1825,23 @@ dismissable() {
   unset RC_PLAN_OUT
 }
 
+@test "review: RC_PLAN_OUT blocks unless rc:state calls the run clean, whatever the ledger says" {
+  # rc:state says findings, but the ledger has suggestions only
+  review_fixtures findings
+  only_suggestions
+  export RC_PLAN_OUT="$BATS_TEST_TMPDIR/plan-out.json"
+  PATH="$SANDBOX" run "$SCRIPT" review 5 "$BODY" "$LEDGER"
+  [ "$status" -eq 0 ]
+  [ "$(jq -c '[.status, .block]' "$RC_PLAN_OUT")" = '["findings",true]' ]
+  # the same ledger on a clean run does not block
+  review_fixtures clean
+  only_suggestions
+  PATH="$SANDBOX" run "$SCRIPT" review 5 "$BODY" "$LEDGER"
+  [ "$status" -eq 0 ]
+  [ "$(jq -c '[.status, .block]' "$RC_PLAN_OUT")" = '["clean",false]' ]
+  unset RC_PLAN_OUT
+}
+
 @test "review: an unreadable ledger makes RC_PLAN_OUT report a block" {
   review_fixtures
   export RC_PLAN_OUT="$BATS_TEST_TMPDIR/plan-out.json"

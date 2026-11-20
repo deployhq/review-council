@@ -891,9 +891,11 @@ plan_out() {
   [ -n "${RC_PLAN_OUT:-}" ] || return 0
   if [ "$1" = true ]; then
     # An unreadable ledger or a failed plan says nothing about what blocks:
-    # report a block, so the recheck after the run cannot lift one.
+    # report a block, so the recheck after the run cannot lift one. A run its
+    # rc:state does not call clean blocks too, as the review path's own
+    # dismissal requires (an empty or mismatched ledger never lifts a block).
     jq -c --arg h "${_local_head:-}" --arg s "${_status:-}" --argjson u "${_plan_unknown:-false}" \
-      '{head: $h, status: $s, block: ((.block != false) or $u), reported: [.reported[]? | strings], posted: true}' \
+      '{head: $h, status: $s, block: ((.block != false) or $u or ($s != "clean")), reported: [.reported[]? | strings], posted: true}' \
       "$_tmp/plan.json" >"$RC_PLAN_OUT" 2>/dev/null
   else
     printf '{"head":"","status":"","block":true,"reported":[],"posted":false}\n' >"$RC_PLAN_OUT" 2>/dev/null
