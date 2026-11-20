@@ -529,8 +529,12 @@ LEDGER_DEFS='
 # shellcheck disable=SC2016  # jq program, not shell
 REPLY_DEFS='
   # An odd backtick count would leave an unclosed "code span" that `clean`
-  # skips but GitHub renders as text (a live @mention): drop them then.
-  def rtext: tostring | (if ([match("`"; "g")] | length) % 2 == 1 then gsub("`"; "") else . end) | oneline;
+  # skips but GitHub renders as text (a live @mention): drop them then. Check
+  # again after the 300-character cut, which can split a pair; `clean` then
+  # defuses what the dropped backticks exposed.
+  def unpaired: ([match("`"; "g")] | length) % 2 == 1;
+  def rtext: tostring | (if unpaired then gsub("`"; "") else . end) | oneline
+    | if unpaired then gsub("`"; "") | clean else . end;
   def whysum($why; $dflt):
     (if ($why | type) == "object" and ($why.summary | type) == "string" then $why.summary | rtext else "" end)
     | if . == "" then $dflt else . end;

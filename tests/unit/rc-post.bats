@@ -1567,6 +1567,19 @@ outside_round_trip() {
   ! printf '%s' "$_r" | grep -qF '@bob' || return 1
 }
 
+@test "recheck: cutting a reason to 300 characters cannot unpair a backtick and free an @mention" {
+  open_fixtures
+  _long="$(printf 'a%.0s' $(seq 1 296))"
+  verdicts "{fixed: [{kind: \"inline\", id: 70, summary: \"$_long \\u0060@alice\\u0060 end\"}]}"
+  PATH="$SANDBOX" run --separate-stderr "$SCRIPT" recheck 5 "$VERD"
+  [ "$status" -eq 0 ]
+  _r="$(jq -r .body "$GHLOG.replies")"
+  # the cut lands right after "`@a": no live mention may remain in the reason
+  _s="$(printf '%s\n' "$_r" | grep '^aaaa')"
+  [ -n "$_s" ]
+  ! printf '%s' "$_s" | grep -qE '@[A-Za-z]' || return 1
+}
+
 @test "recheck: one grouped PR comment for the fixed outside findings" {
   outside_round_trip
   # a second tracked outside finding in the same review
