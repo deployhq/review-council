@@ -136,6 +136,11 @@ head="$(jq -r '.head // ""' "$tmp/open.json")"
 root="$(git rev-parse --show-toplevel 2>/dev/null)" || finish 1 "failed: not in a git checkout"
 root="$(cd "$root" && pwd -P)" || finish 1 "failed: not in a git checkout"
 [ "$(git rev-parse HEAD 2>/dev/null)" = "$head" ] || finish 0 "skipped: the checked-out commit is not the PR head (a newer push will recheck)"
+# The commit alone is not enough: after a full run (whose model had Bash) a
+# tracked file could be edited, and the window would show that edit, not the
+# PR's code. Untracked files (tool output) are fine.
+dirty="$(git status --porcelain --untracked-files=no 2>/dev/null)" || finish 1 "failed: git status failed"
+[ -z "$dirty" ] || finish 1 "failed: the checkout has local changes to tracked files; the recheck only judges the PR's commit"
 
 # Candidates: open inline comments and open outside-the-diff findings, minus
 # the fingerprints the full run reported again. `reopened` ones are never sent.

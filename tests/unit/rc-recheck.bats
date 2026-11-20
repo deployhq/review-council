@@ -289,6 +289,24 @@ calls() { cat "$D/claude.n" 2>/dev/null || echo 0; }
   jq -e '.fixed == [{kind: "outside", fingerprint: "ofp", summary: "Gone.", points: ["p1","p2","p3","p4","p5"]}]' "$D/verdicts.json"
 }
 
+@test "recheck: a checkout with local changes to tracked files -> nothing at all, and a failure" {
+  state "$(inline 1 fp1 open)"
+  echo "edited" >>"$D/repo/a.rb"
+  recheck 5
+  [ "$status" -eq 1 ]
+  printf '%s' "$output" | grep -qF 'local changes'
+  [ "$(calls)" -eq 0 ]
+  ! grep -q '^recheck ' "$D/post.calls" || return 1
+}
+
+@test "recheck: an untracked file in the checkout is fine" {
+  state "$(inline 1 fp1 open)"
+  echo "tmp" >"$D/repo/scratch.txt"
+  recheck 5
+  [ "$status" -eq 0 ]
+  [ "$(calls)" -eq 1 ]
+}
+
 @test "recheck: the checked-out commit is not the PR head -> nothing at all" {
   state "$(inline 1 fp1 open)" "[]" true true "$(printf '%040d' 0)"
   recheck 5
