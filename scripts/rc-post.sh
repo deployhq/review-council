@@ -1031,9 +1031,13 @@ do_review() {
     # Dismiss only on a run the rc:state line calls clean (no critical or
     # important finding), so an empty or unreadable ledger never lifts a block,
     # and never while one of our critical/important comments is still open
-    # without the re-check finding it fixed, or reopened by a person.
+    # without the re-check finding it fixed, or reopened by a person. Never
+    # when the plan could not be built (it says nothing about what blocks),
+    # and not in CI when a recheck follows (RC_PLAN_OUT): .held covers inline
+    # comments only, and that recheck also weighs the findings outside the diff.
     _held="$(jq '.held // [] | length' "$_tmp/plan.json" 2>/dev/null)" || _held=1
     if [ "$_inline" = true ] && [ "$_block" = false ] && [ "$_status" = clean ] \
+      && [ "${_plan_unknown:-false}" != true ] && [ -z "${RC_PLAN_OUT:-}" ] \
       && [ "$_held" = 0 ] && [ -n "$_active" ] && [ "$_active" != '[]' ]; then
       dismiss_active "No critical or important findings in the Review Council review of $_short."
     fi

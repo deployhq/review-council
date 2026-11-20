@@ -79,3 +79,14 @@ seat() { # seat <slot> <harness> [timeout_minutes] [needs_confirm] [provider] [e
   run --separate-stderr bash "$SCRIPT" abc < <(printf '')
   [ "$output" = 45 ]
 }
+
+@test "review-timeout: a gate limit past the job's cap is capped too, without any seat" {
+  run --separate-stderr bash "$SCRIPT" 110 < <(printf 'settings.ci=true\n')
+  [ "$output" = 95 ]
+  printf '%s' "$stderr" | grep -qF '::warning::'
+}
+
+@test "review-timeout: a gate limit under the cap is kept without any seat" {
+  run --separate-stderr bash "$SCRIPT" 60 < <(printf 'settings.ci=true\n')
+  [ "$output" = 60 ]
+}
