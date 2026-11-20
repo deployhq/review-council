@@ -9,8 +9,8 @@ name: Review Council
 #   - recheck: no new review. One small model call re-checks the council's
 #     open comments against the current code, marks the fixed ones, and
 #     dismisses our "request changes" when no critical or important finding is
-#     left. On `/review-council recheck`, and on a push (`synchronize`) while
-#     one of our reviews still requests changes (input recheck_on_push,
+#     left. On `/review-council recheck` (or `check`), and on a push
+#     (`synchronize`) while one of our reviews still requests changes (input recheck_on_push,
 #     default on). A push never starts a full run.
 #
 # Claude authenticates in one of three ways:

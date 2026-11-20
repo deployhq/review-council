@@ -233,6 +233,20 @@ EOF
   ! grep -qF -- "issues/comments/42" "$GHLOG" || return 1
 }
 
+@test "review: the commands section is in the summary only under GITHUB_ACTIONS" {
+  review_fixtures
+  GITHUB_ACTIONS=true PATH="$SANDBOX" run "$SCRIPT" review 5 "$BODY" "$LEDGER"
+  [ "$status" -eq 0 ]
+  digest_sent | grep -qF '<summary>Commands</summary>'
+  digest_sent | grep -qF '`/review-council recheck` (or `check`)'
+  digest_sent | grep -qF "council's open comments"
+  review_fixtures
+  GITHUB_ACTIONS= PATH="$SANDBOX" run "$SCRIPT" review 5 "$BODY" "$LEDGER"
+  [ "$status" -eq 0 ]
+  digest_sent | grep -qF 'What the tags mean'
+  ! digest_sent | grep -qF 'Commands' || return 1
+}
+
 @test "post: under GITHUB_ACTIONS (no bot token) only github-actions[bot] is matched" {
   printf '[{"id":50,"user":{"login":"other[bot]","type":"Bot"},"body":"<!-- rc:report --> theirs"},{"id":42,"user":{"login":"github-actions[bot]","type":"Bot"},"body":"<!-- rc:report --> old"}]\n' >"$COMMENTS"
   GITHUB_ACTIONS=true USER_FAIL=1 PATH="$SANDBOX" run "$SCRIPT" post 5 "$BODY"

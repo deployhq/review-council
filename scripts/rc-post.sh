@@ -1346,13 +1346,15 @@ recheck_eval() {
 # fallback comment) into $_tmp/body.md: the digest, the counts in place of its
 # `rc:inline` line, the tags legend, the findings outside the diff (with the
 # inline ones too when <with-inline> is false; each tracked one between
-# `rc:outside-begin` and `rc:outside <fp>`), then the footer. Hidden-marker
+# `rc:outside-begin` and `rc:outside <fp>`), then the footer. Under
+# GITHUB_ACTIONS the legend also lists the /review-council commands. Hidden-marker
 # openers are neutralised everywhere except the rc:report line and a strict
 # rc:state line, so only those and the lines this script writes are markers.
 # Needs _tmp, _body, _n_res, _footer.
 compose_body() {
   jq -n -r --rawfile dg "$_body" --slurpfile p "$_tmp/plan.json" --arg mark "$INLINE_MARK" \
-    --argjson wi "$1" --argjson nr "$_n_res" --arg footer "$_footer" --arg mk "$MARKER" '
+    --argjson wi "$1" --argjson nr "$_n_res" --arg footer "$_footer" --arg mk "$MARKER" \
+    --argjson ci "$([ "${GITHUB_ACTIONS:-}" = true ] && echo true || echo false)" '
     def defuse: gsub("<!--"; "&lt;!--");
     ($dg | split("\n")) as $l
     # The state line is printed from model-filled values: keep it only in its
@@ -1389,7 +1391,17 @@ compose_body() {
        + "- `[1 reviewer · unverified]` — only Claude-family reviewers ran, so no other family could check it.\n"
        + "- `[unverified]` — the double-check could not confirm or refute it (or ran out of time).\n"
        + "- `[tool-only:<rule>]` — a lint or security rule fired and no reviewer confirmed it.\n\n"
-       + "</details>") as $legend
+       + "</details>"
+       # The commands exist only where the CI workflow listens for them.
+       + (if $ci then "\n\n<details>\n<summary>Commands</summary>\n\n"
+          + "Comment on this PR (people with write access only; a 👀 reaction means it started):\n"
+          + "- `/review-council` (or `/review-council run`): runs the whole council again on the latest commit.\n"
+          + "- `/review-council recheck` (or `check`): only checks whether the council'"'"'s open comments are fixed. It'"'"'s cheap and never adds findings. It replies \"Looks fixed\" where it can, and lifts \"request changes\" when nothing critical or important is left.\n\n"
+          + "Without a command:\n"
+          + "- **Push:** while \"request changes\" is active, each push runs a recheck, if this repo'"'"'s workflow listens for pushes.\n"
+          + "- **Resolve a thread:** it counts as handled.\n"
+          + "- **Unresolve a thread, or reply under \"Looks fixed\":** the comment counts as open again.\n\n"
+          + "</details>" else "" end)) as $legend
     # GitHub caps a review or comment body at 65,536 characters: keep the
     # findings that fit in about 60,000 and count the rest.
     | (60000 - ($dg | length) - ($line | length) - ($legend | length) - ($footer | length) - 300) as $room

@@ -29,7 +29,7 @@ Pass exactly one. Everything else (inputs, optional secrets, behaviour) is the s
 
 - **Automatically:** when a PR is **opened** (not as a draft), and when a draft is **marked ready for review**. A push never starts a full review, so a PR is normally reviewed once on its own. Each run costs a full review.
 - **On request:** someone **comments `/review-council`** on a PR. The commenter must have write access (admin, maintain or write). The workflow reacts with 👀 so you know it started. Comment again after pushing fixes for a new full review.
-- **Recheck:** `/review-council recheck` (same access rule, same 👀) re-checks only the council's open comments against the current code. It is much cheaper than a review. See [Rechecks](#rechecks).
+- **Recheck:** `/review-council recheck` (or `check`; same access rule, same 👀) re-checks only the council's open comments against the current code. It is much cheaper than a review. See [Rechecks](#rechecks).
 - **Recheck on push:** while a council review **requests changes**, each push runs a recheck (on by default; needs `synchronize` in your caller's triggers). Otherwise a push runs only the short `gate` job, with no model.
 
 Either way, the PR must be open and not a draft. It never runs on PRs from forks. See [Fork PRs](#fork-prs).
@@ -496,6 +496,7 @@ Each reported finding that sits on a line of the PR's diff becomes an inline com
 - **Dismissing may be refused.** On a protected branch that limits who can dismiss reviews, GitHub may refuse the bot's dismissal. Then its "request changes" stays until a person dismisses it (and that dismissal sticks, as above).
 - **Comment only.** With `request_changes: false`, no review requests changes. See below.
 - **Tags.** Each comment shows the finding's confidence tag, the same as in the report: `[verified]`, `[cross-reviewed]`, `[1 reviewer · unverified]`, `[unverified]` or `[tool-only:<rule>]`. The summary explains them under **What the tags mean**.
+- **Commands.** In CI the summary also lists the `/review-council` commands under **Commands**, collapsed.
 - **If GitHub rejects the review** (one bad line fails the whole review), it is posted again without inline comments, with every finding in the summary. If GitHub accepts no review at all, the summary is posted as a PR comment instead. Nothing is lost.
 - **At most 50 inline comments** per run; the rest go in the summary.
 - **If the PR head moved during the run** (a push landed), nothing goes inline, nothing requests changes and nothing is dismissed. Every finding goes in the summary.
@@ -543,7 +544,7 @@ Only comments posted by the same identity (`github-actions[bot]`, or your bot) c
 
 ### Rechecks
 
-A recheck asks one question: are the council's open comments fixed? It runs on `/review-council recheck`, and on each push while a council review requests changes (`recheck_on_push`, on by default; your caller needs `synchronize` in its `pull_request` types). It never posts a new review, never adds findings and never requests changes.
+A recheck asks one question: are the council's open comments fixed? It runs on `/review-council recheck` (or `check`, in any case), and on each push while a council review requests changes (`recheck_on_push`, on by default; your caller needs `synchronize` in its `pull_request` types). It never posts a new review, never adds findings and never requests changes.
 
 - **What it checks.** Every open council comment: Critical, Important and Suggestion. Only Critical and Important ones hold "request changes". Findings listed **outside the diff** are checked too, but only in reviews posted by this version or later: older reviews didn't mark them.
 - **Cost.** A script gathers each comment and 20 lines either side of it in the current file. One small model call (`recheck_model`, default `claude-sonnet-5-5`, read-only tools) judges them all; a PR with very many is split into a few calls. With nothing open, no model runs. The job summary shows the tokens used. The gate gives it 15 minutes.
