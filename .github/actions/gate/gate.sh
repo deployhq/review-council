@@ -12,16 +12,20 @@ skip() { echo "Skipping: $1"; echo "proceed=false" >> "$GITHUB_OUTPUT"; exit 0; 
 case "${PR_NUMBER:-}" in ''|*[!0-9]*) skip "no PR number on this event" ;; esac
 
 # Mode. A comment's first word is /review-council (the workflow's pre-filter
-# checks that); a second word `recheck` asks for a recheck only, anything else
-# is a full run. Split on any whitespace, CR included (web comments use CRLF),
-# with globbing off so a `*` in the comment stays text.
+# checks that); a second word `recheck` or `check` asks for a recheck only,
+# anything else is a full run. Both words are matched ignoring case, and
+# hyphens in the second are ignored (`Re-check`). Split on any whitespace, CR
+# included (web comments use CRLF), with globbing off so a `*` in the comment
+# stays text.
 mode=full
 if [ "$EVENT_NAME" = "issue_comment" ]; then
   set -f
   # shellcheck disable=SC2046 # deliberate word splitting
   set -- $(printf '%s' "${COMMENT_BODY:-}" | tr '\r\n\t' '   ')
   set +f
-  if [ "${1:-}" = "/review-council" ] && [ "${2:-}" = "recheck" ]; then
+  w1="$(printf '%s' "${1:-}" | tr '[:upper:]' '[:lower:]')"
+  w2="$(printf '%s' "${2:-}" | tr '[:upper:]' '[:lower:]' | tr -d '-')"
+  if [ "$w1" = "/review-council" ] && { [ "$w2" = "recheck" ] || [ "$w2" = "check" ]; }; then
     mode=recheck
   fi
 elif [ "$EVENT_NAME" = "pull_request" ] && [ "${EVENT_ACTION:-}" = "synchronize" ]; then

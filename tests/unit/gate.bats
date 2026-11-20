@@ -167,8 +167,17 @@ EOF
   done
 }
 
+@test "mode: check, any case and hyphens also mean a recheck" {
+  for body in '/review-council check' '/review-council Check' '/review-council Recheck' '/review-council RE-CHECK' '/review-council re-check' '/Review-Council check' $'/review-council check\r\nthanks'; do
+    : >"$GITHUB_OUTPUT"
+    COMMENT_BODY="$body" gate
+    proceeds
+    mode_is recheck || { echo "body: $body"; return 1; }
+  done
+}
+
 @test "mode: any other second word is a full run" {
-  for body in '/review-council something' '/review-council Recheck' '/review-council rechecks' '/review-council * recheck'; do
+  for body in '/review-council something' '/review-council run' '/review-council rechecks' '/review-council checks' '/review-council checkout' '/review-council * recheck'; do
     : >"$GITHUB_OUTPUT"
     COMMENT_BODY="$body" gate
     proceeds
