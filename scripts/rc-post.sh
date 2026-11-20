@@ -1417,7 +1417,7 @@ compose_body() {
           + "Without a command:\n"
           + "- **Push:** while \"request changes\" is active, each push runs a recheck, if this repo'"'"'s workflow listens for pushes.\n"
           + "- **Resolve a thread:** it counts as handled.\n"
-          + "- **Unresolve a thread, or reply under \"Looks fixed\":** the comment counts as open again.\n\n"
+          + "- **Disagree with \"Looks fixed\":** unresolve the thread, or reply in it if the bot couldn'"'"'t resolve it. The comment counts as open again.\n\n"
           + "</details>" else "" end)) as $legend
     # GitHub caps a review or comment body at 65,536 characters: keep the
     # findings that fit in about 60,000 and count the rest.
