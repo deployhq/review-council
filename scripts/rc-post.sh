@@ -472,11 +472,8 @@ OURS_JQ='
       | $th[$rid | tostring] as $thr
       # Our latest "looks fixed" reply (old `rc:fixed` and new `rc:fixed resolved`).
       | ([ $mine[] | select(.in_reply_to_id == $rid and (.body | contains("<!-- rc:fixed"))) ] | max_by(.id)) as $fx
-      # Only a reply by someone with a say on the repo reopens: on a public
-      # repo anyone can comment, and a stranger must not pin the block.
       | ($fx != null and any($all[]; .in_reply_to_id == $rid and (.id | type) == "number" and .id > $fx.id
-                             and .user.type == "User" and (ours | not)
-                             and ((.author_association // "") | IN("OWNER", "MEMBER", "COLLABORATOR")))) as $replied
+                             and .user.type == "User" and (ours | not))) as $replied
       | ($fx != null and ($fx.body | contains("<!-- rc:fixed resolved -->"))) as $weresolved
       | ($thr != null and ($thr.by | type) == "string" and $thr.by != "" and $thr.by != $me and $thr.by != $fb) as $byperson
       # The disagreement signal matches the footer each reply showed:
@@ -1118,7 +1115,7 @@ do_review() {
 # `open` prints the state a recheck works from (one JSON object):
 #   {head, inline_ok, known, active, blocking, ack, inline: [...], outside: [...]}
 # inline_ok is false unless the checked-out commit is the PR head AND the
-# threads, review comments, reviews and PR comments could all be read; known is
+# threads, review comments, reviews, PR comments and timeline could all be read; known is
 # false when we can't tell our own comments from another bot's. Either way the
 # object is still printed, and the caller does nothing.
 # inline[]: {id, fingerprint, severity, path, line, url, body, status} (status:
@@ -1235,7 +1232,7 @@ do_recheck() {
   elif [ "$_known" != true ]; then
     _why="we can't tell our own comments from another bot's"
   elif [ "$_inline_ok" != true ]; then
-    _why="the PR head or its comments, threads or reviews can't be read"
+    _why="the PR head or its comments, threads, reviews or history can't be read"
   elif [ -z "$_vhead" ] || [ "$_vhead" != "$_pr_head" ]; then
     _why="the checked commit is no longer the PR head (a newer push will recheck)"
   fi
@@ -1324,8 +1321,8 @@ do_recheck() {
 # fingerprint it blocks on is satisfied — acknowledged by a person, its
 # inline comment fixed or resolved, its outside finding fixed, or still
 # reported (but no longer blocking) — none is untracked (""), and no
-# critical/important comment (inline, or outside the diff) is open or
-# reopened unless acknowledged or reported again by this run.
+# critical/important comment (inline, or outside the diff) is open (and not
+# reported again by this run) or reopened, unless acknowledged.
 # held = what keeps the block: those comments + the unsatisfied fingerprints.
 recheck_eval() {
   jq -R -s 'split("\n") | map(select(test("^[0-9]+$")) | tonumber)' "$_tmp/done_inline.txt" >"$_tmp/di.json"
@@ -1336,12 +1333,13 @@ recheck_eval() {
     | ([$v.reported[]? | strings | gsub("[^A-Za-z0-9._:/@+-]"; "-") | .[0:200] | select(length > 0)]) as $rep
     | ($st.inline | map(if (.id as $i | $di | index($i)) != null then .status = "fixed" else . end)) as $in
     | ($st.outside | map(if (.fingerprint as $f | $dout | index($f)) != null then .status = "fixed" else . end)) as $out
-    # A fingerprint this run reported again is decided by blocking_now (the
-    # run blocks when it is still critical or important), not by its old text.
-    | [ ($in[] | select(.status == "open" or .status == "reopened")),
-        ($out[] | select(.status == "open"))
+    # An open one this run reported again is decided by blocking_now (the run
+    # blocks when it is still critical or important), not by its old text. A
+    # reopened one holds until a person resolves it, whatever a run reports.
+    | [ ($in[] | select(.status == "reopened")),
+        (($in[], $out[]) | select(.status == "open" and (.fingerprint as $f | ($rep | index($f)) == null)))
         | select((.severity == "critical" or .severity == "important")
-                 and (.fingerprint as $f | ($st.ack | index($f)) == null and ($rep | index($f)) == null))
+                 and (.fingerprint as $f | ($st.ack | index($f)) == null))
         | .fingerprint ] as $hold
     | [ $st.blocking[] | . as $f
         | select(. == ""

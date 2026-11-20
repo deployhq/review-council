@@ -1595,16 +1595,6 @@ outside_round_trip() {
   [ ! -f "$GHLOG.dismiss" ]
 }
 
-@test "open: a reply by someone without access to the repo does not reopen" {
-  open_fixtures
-  # 73 has a plain rc:fixed reply, then alice "No, still broken" (93): reopened.
-  PATH="$SANDBOX" run --separate-stderr "$SCRIPT" open 5
-  [ "$(printf '%s' "$output" | jq -r '.inline[] | select(.id == 73) | .status')" = reopened ]
-  jq 'map(if .id == 93 then .author_association = "NONE" else . end)' "$RCOMMENTS" >"$RCOMMENTS.t" && mv "$RCOMMENTS.t" "$RCOMMENTS"
-  PATH="$SANDBOX" run --separate-stderr "$SCRIPT" open 5
-  [ "$(printf '%s' "$output" | jq -r '.inline[] | select(.id == 73) | .status')" = fixed ]
-}
-
 # dismissable: only comment 70 (open, important), our review 300 blocks on fp70.
 dismissable() {
   open_fixtures
@@ -1652,6 +1642,17 @@ dismissable() {
   PATH="$SANDBOX" run --separate-stderr "$SCRIPT" recheck 5 "$VERD"
   has "dismissed=1"
   has "held=0"
+}
+
+@test "recheck: a reopened comment holds even when this run reported it again" {
+  open_fixtures
+  # 70 open, 73 reopened (a person replied after our plain rc:fixed reply).
+  jq '[.[] | select(.id == 70 or .id == 73 or .in_reply_to_id == 73)]' "$RCOMMENTS" >"$RCOMMENTS.t" && mv "$RCOMMENTS.t" "$RCOMMENTS"
+  active "fp70"
+  verdicts '{reported: ["fp73"], fixed: [{kind: "inline", id: 70}]}'
+  PATH="$SANDBOX" run --separate-stderr "$SCRIPT" recheck 5 "$VERD"
+  has "dismissed=0"
+  has "held=1"
 }
 
 @test "recheck: an open critical finding outside the diff holds the block, even from a COMMENT review" {

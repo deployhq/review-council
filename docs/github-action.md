@@ -551,7 +551,7 @@ A recheck asks one question: are the council's open comments fixed? It runs on `
 - **Only the newest push.** With several pushes in a row, the older recheck is cancelled and only the newest one runs. A recheck that finishes after another push posts nothing: the next one will.
 - **Looks fixed.** The bot replies in the thread: "**Looks fixed** at `<sha>`", a one- or two-sentence reason, and the details collapsed. A finding outside the diff gets the same in one PR comment per recheck. Still-present findings get nothing.
 - **Lifting the block.** When no Critical or Important comment is left open, the bot dismisses its "request changes" review ("Rechecked at `<sha>`: … no critical or important finding is left open.").
-- **Disagree?** Reply in the thread, or unresolve it if the bot resolved it. Only a reply from someone with access to the repo (owner, member or collaborator) counts, so a stranger on a public repo can't hold the block. The comment then counts as open again: it holds the block (if Critical or Important) and is never marked fixed again. It stops holding only when a person resolves it.
+- **Disagree?** Reply in the thread, or unresolve it if the bot resolved it. The comment then counts as open again: it holds the block (if Critical or Important) and is never marked fixed again. It stops holding only when a person resolves it.
 - **A person resolving a thread** counts as handled, the same as on a full run.
 - **If something fails** (the model's answer can't be read, or the PR head moved), the recheck posts nothing and dismisses nothing.
 

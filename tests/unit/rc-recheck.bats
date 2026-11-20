@@ -31,9 +31,10 @@ printf '%s\n' "\$@" >"$D/args.\$n"
 pwd >"$D/cwd.\$n"
 mode=\$(cat "$D/mode")
 [ "\$mode" = FAIL ] && exit 3
+[ "\$mode" = TIMEOUT2 ] && [ "\$n" = 2 ] && exit 124
 ids=\$(sed -n 's/^=== FINDING \(c[0-9]*\) .*/\1/p' "$D/prompt.\$n")
 case "\$mode" in
-  FIXED|FENCE) v=FIXED ;;
+  FIXED|FENCE|TIMEOUT2) v=FIXED ;;
   *) v=STILL_PRESENT ;;
 esac
 ans=\$(printf '%s\n' \$ids | jq -R . | jq -sc --arg v "\$v" 'map({id: ., verdict: \$v, summary: (if \$v == "FIXED" then "Gone." else "" end),
@@ -161,6 +162,17 @@ calls() { cat "$D/claude.n" 2>/dev/null || echo 0; }
   printf '%s' "$output" | grep -qx 'unchecked=5'
   jq -e '.degraded == false and .checked == 20 and (.fixed | length) == 20' "$D/verdicts.json"
   grep -qF '5 open comments were not checked in time' "$D/summary.md"
+}
+
+@test "recheck: a call killed by its timeout leaves its batch unchecked; earlier batches still post" {
+  echo TIMEOUT2 >"$D/mode"
+  lines="$(for i in $(seq 1 25); do inline "$i" "fp$i" open; done)"
+  state "$lines"
+  recheck 5
+  [ "$status" -eq 0 ]
+  [ "$(calls)" -eq 2 ]
+  printf '%s' "$output" | grep -qx 'unchecked=15'
+  jq -e '.degraded == false and .checked == 10 and (.fixed | length) == 10' "$D/verdicts.json"
 }
 
 @test "recheck: an answer that is not strict JSON is degraded: nothing posted" {

@@ -238,6 +238,10 @@ EOF
     in_tok=$((in_tok + $(jq '[.usage.input_tokens, .usage.cache_creation_input_tokens, .usage.cache_read_input_tokens] | map(numbers) | add // 0 | floor' "$tmp/out.$n")))
     out_tok=$((out_tok + $(jq '.usage.output_tokens | numbers // 0 | floor' "$tmp/out.$n")))
   fi
+  if [ "$crc" -eq 124 ] || [ "$crc" -eq 137 ]; then
+    note "batch $n: out of time"
+    return 2
+  fi
   if [ "$crc" -ne 0 ]; then
     note "batch $n: claude exited with $crc"
     return 1
@@ -284,7 +288,15 @@ while [ $((n * BATCH)) -lt "$checked" ]; do
   ! command -v timeout >/dev/null 2>&1 || tcmd=(timeout -k 15 "${call}s")
   b="$(jq -c --argjson s "$((n * BATCH))" --argjson k "$BATCH" '.[$s:$s + $k]' "$tmp/cand.json")"
   n=$((n + 1))
-  if ! ask "$b" "$n"; then
+  rc=0
+  ask "$b" "$n" || rc=$?
+  if [ "$rc" -eq 2 ]; then
+    # A call killed by its timeout gave no verdicts: its batch and the rest
+    # stay open (not fixed); what earlier batches found still posts.
+    unchecked=$((checked - (n - 1) * BATCH))
+    note "out of time: $unchecked candidates left unchecked (they stay open)"
+    break
+  elif [ "$rc" -ne 0 ]; then
     degraded=true
     break
   fi
